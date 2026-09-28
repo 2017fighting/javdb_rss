@@ -4,14 +4,16 @@
 > 原以为「必须先逆向 APK」是整条路的瓶颈，结果发现已有 MIT 许可的 Go 先例
 > （[`FlanChanXwO/javdb-cli`](https://github.com/FlanChanXwO/javdb-cli)）把 `jdsignature`
 > 完整实现，且已实测对我们目标版本的服务端有效。
-> 9 张票中 4 张被降级或部分解掉。见 **Decisions so far** 的第一条。
+> 9 张票中 4 张被降级或部分解掉，3 张已关闭（`01` `04` `08`）。
+> **当前前线：`02` `03`。**
 
 ## Destination
 
 一个 **Go 单二进制** 的 RSS 服务。部署后 qBittorrent 订阅 `/rss/code/{番号}.xml` 与
-`/rss/actress/{id}.xml?<App演员页原样参数>`；每个 feed 只吐 **App 返回顺序第 0 条的磁链**，
-外加（若存在）**第 0 条 `cnsub=true` 的磁链**；女优订阅支持 `since=<日期>` 只追新；
-登录态由用户**手工从 App 导出的 token** 提供；服务**无状态**，去重交给 qBittorrent。
+`/rss/actress/{id}.xml?<App演员页原样参数>`；每个 feed **每部作品恒发 1 条 item**，
+**字幕优先**（有 `cnsub=true` 的磁链就发它，否则发 `magnets[0]`），`guid` = 纯 infohash；
+女优订阅支持 `since=<日期>` 只追新；登录态由用户**手工从 App 导出的 token** 提供；
+服务**无状态**、**不做鉴权**（纯内网）、默认监听 `127.0.0.1`；去重交给 qBittorrent。
 数据来源于 **JavDB 官方 App 私有 API**（`https://jdforrepam.com/api/v1`）。
 
 ## Notes
@@ -25,9 +27,14 @@
 - 语言/形态 = Go 单二进制
 - Feed 粒度 = **每个订阅一个 feed URL**（不做聚合 feed）
 - 状态模型 = **无状态**，服务端不持久化「已下发」；qBittorrent 按 guid 去重
-- 「第一条磁链」= 信任 App 返回顺序的第 0 条，不自建排序规则
+- **槽位规则 = 字幕优先，每部作品恒发 1 条**：有 `cnsub=true` 就发第一条 `cnsub=true`，
+  否则发 `magnets[0]`。（用户主动收窄了原需求里的「也返回」→ 不发两条）
+- **`guid` = 纯 infohash**（磁链 `hash`），不带番号/槽位前缀 —— 跨 feed 自动去重、洗版自动重下、重启不变
 - 登录态 = 用户手工从 App 导出 token，**不逆向登录接口、不做自动登录**
 - 女优参数 = 同构透传 App 演员页的查询参数
+- 部署 = 裸二进制为主 + 附 Dockerfile；配置 = 单 YAML + `SIGHUP` 重载
+- **鉴权 = 不做**（纯内网）→ 因此**监听地址默认 `127.0.0.1`**，暴露到局域网必须显式改配置
+- 日志 = 结构化 stdout；签名失效/契约变化必须显式 `WARN`，**不得静默返回空 feed**
 - 本 effort **允许把执行纳入地图**（用户明确要求做到能跑）——但 ticket 仍以决策为主
 
 **已确认的服务端事实（不要重新试探，直接用）**
@@ -63,13 +70,26 @@
   `/startup`、`/movies/latest`、`/actors/{id}`、`/movies/{id}/magnets` 均拿到真实数据；
   `/users/collected_actors` 只差 token。顺带解掉中文字幕判定（磁链级 `cnsub`）
   与演员页参数集。**唯一残留风险**：Prefix 源自 App 内 access key，App 升级可能使其失效。
+- [配置与部署模型](issues/04-config-and-deploy.md)
+  — 裸二进制 + 附 Dockerfile；**不做鉴权**（纯内网）因此监听默认 `127.0.0.1`；
+  单 YAML + `SIGHUP` 重载；结构化 stdout，签名失效必须 `WARN` 而非静默空 feed。
+- [中文字幕补充条的 feed 语义](issues/08-subtitle-supplement-semantics.md)
+  — **字幕优先，每部作品恒发 1 条**；`guid` = 纯 infohash（跨 feed 去重、洗版自动重下）；
+  标题字幕版加 `中文字幕 ·` 前缀；`pubDate` 取 `created_at`。
+  已知后果：无字幕版先下、字幕版后到时磁盘留两份（清理属 qBittorrent 职责，已出界）。
 
 ## Not yet specified
 
 <!-- 看得出方向、但还捏不成 ticket 的东西 -->
 
+- **番号订阅 → item 的完整链路**：ticket 08 已定「字幕优先、恒 1 条、guid=infohash」，
+  ticket 07 已定「透传 `/movies/tags` 参数」，但**「番号字符串 → 作品」这一步仍未定**：
+  是走 `/api/v2/search?q=` 还是 `/api/v1/search_magnet`？一个番号多部作品时怎么办？
+  这直接决定 `/rss/code/{番号}.xml` 能否实现。
+- **`since=<日期>` 的比较字段**：`movies/latest` 有 `release_date`，但演员页列表里有没有、
+  格式是什么，尚未确认。没有它需求 3 的「只追新」就悬空。
 - **Prefix 失效的检测与应对**：Prefix 由 App 内 access key 派生，App 升级或服务端轮换
-  都可能使其作废。需要一个「多久探一次、失效时怎么告警」的判断，才知道要不要为它建票。
+  都可能使其作废。需要一个「多久探一次、失效时怎么告警」的判断。
   也要看一眼 javdb-cli 是否已跟进 —— 它活跃，很可能比我们先发现。
 - **token 的获取成本**：用户要手工从 App 导出。导出路径是 App 本地存储
   （sqflite/hive/shared_preferences）还是需要 root/adb？多久过期一次？
@@ -85,6 +105,8 @@
 
 ## Out of scope
 
+- **清理旧版磁链（洗版去重）** —— 字幕版出现后旧的无字幕版会留在磁盘上。
+  删除旧文件是 qBittorrent 的职责，本服务只负责交出发什么磁链。
 - **静态逆向 libapp.so** —— 先例已存在，本 effort 不做。
   备灾清单留在 [`notes/dart-toolchain-probe.md`](notes/dart-toolchain-probe.md)，
   等 Prefix 真失效时作为**新 effort** 启动，不在这里毕业。

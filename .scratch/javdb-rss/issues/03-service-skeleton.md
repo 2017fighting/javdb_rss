@@ -3,6 +3,20 @@
 Type: task
 Status: open
 
+> ## 已有关键输入（2026-09-28，来自 `01` `04` `08`）
+>
+> 骨架的接口形状已被上游决策钉死，开工前先读 map 的 **Notes**：
+>
+> - **路由**：`/rss/code/{番号}.xml`、`/rss/actress/{id}.xml`（无鉴权，无 secret 段）
+> - **每部作品恒发 1 条 item**；`guid` = 纯 infohash（磁链 `hash`）—— 这是本 ticket 里
+>   **最不能含糊的一点**，因为它决定 qBittorrent 去重是否可靠
+> - 标题：字幕版 `[KV-328] 中文字幕 · <name>`，普通版 `[KV-328] <name>`
+> - 监听默认 `127.0.0.1`；配置单 YAML + `SIGHUP`；无状态、不引数据库
+> - 送进 App API 的公共参数固定七个 + `device_uuid`；`jdsignature` 是请求头
+>
+> **函数级“接缝”优先于功能完备**：App API 客户端必须能整块替换为一个假实现（无网络跑测试），
+> 且签名模块要能单独替换（因为 Prefix 将来可能失效）。
+
 ## Question
 
 这个 Go 单二进制的骨架长什么样？

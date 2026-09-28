@@ -1,7 +1,7 @@
 # 中文字幕补充条的 feed 语义
 
 Type: grilling
-Status: open
+Status: resolved
 
 > **阻塞边已移除（2026-09-28）**：原 `Blocked by: 06` 是因为「判定口径」未知。
 > 现已确认磁链级 `cnsub` 由服务端直接给，这张票的剩余部分（两条 item 的关系、
@@ -47,3 +47,48 @@ Status: open
 
 - 写进 map 的 Decisions-so-far
 - 判定口径与 guid 规则回写到 ticket 03 的骨架 / ticket 06 的契约备注
+
+## Answer
+
+**已定（2026-09-28 与用户面对面 grill 得出）**
+
+### 1. 槽位规则：字幕优先，每部作品恒为 1 条
+
+```
+若 magnets 中存在 cnsub == true → 取第一条 cnsub == true 的
+否则                          → 取 magnets[0]
+```
+
+**用户主动收窄了原始需求**。需求原文是「则**也**返回第一个有中文字幕的（补充中文字幕的）」，
+即默认两条；grill 时用户改选**只发一条、字幕优先**。
+
+### 2. `guid` = 纯 infohash（磁链 `hash` 字段，btih）
+
+```xml
+<guid isPermaLink="false">0e8f4789bdcab713effc3a07d1309a776c867b3e</guid>
+```
+
+理由：内容相同 = guid 相同 → 同一部片即使同时出现在番号订阅和女优订阅里，
+qBittorrent 也只下一次；洗版（新 infohash）自动重新下载；且 guid 完全由内容决定，
+**与「无状态」完全契合，重启不会变**。番号写在 `title` 里，可读性不受损。
+
+### 3. 标题
+
+- 字幕版：`[KV-328] 中文字幕 · <磁链 name>`
+- 普通版：`[KV-328] <磁链 name>`
+
+### 4. `pubDate` = 磁链的 `created_at`；解析失败时退化为「本服务首次见到它的时间」
+
+（注意：退化路径会让 pubDate 随重启变化，但这不影响 guid，因此不影响去重。）
+
+### 5. 已知后果（需写进 README，不在地图内解决）
+
+无字幕版先下、字幕版后到时，**磁盘上会留两份** —— qBittorrent 不会自动删旧版。
+清理旧版属于 qBittorrent 的职责，已列入 map 的 **Out of scope**。
+
+### 6. 作废的子问题
+
+- 原 Q4（中文字幕判定口径）：作废 —— 服务端直接给磁链级 `cnsub`。
+- 原 Q5（只有字幕版没有普通版）：不存在了 —— 字幕优先，恒发一条。
+- 原 Q1 的「两条 item 的关系」：不存在了 —— 只发一条。
+

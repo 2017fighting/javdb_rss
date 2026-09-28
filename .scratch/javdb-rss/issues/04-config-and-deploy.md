@@ -1,7 +1,7 @@
 # 配置与部署模型
 
 Type: grilling
-Status: open
+Status: resolved
 
 ## Question
 
@@ -34,3 +34,36 @@ Status: open
 ## 产出
 
 写进 map 的 Decisions-so-far，并把需要落到骨架里的部分回写到 ticket 03。
+
+## Answer
+
+**已定（2026-09-28 与用户面对面 grill 得出）**
+
+### 1. 部署形态：裸二进制为主 + 附 Dockerfile
+
+- 主路径：`go build` 出单二进制，配一份 systemd unit 示例
+- 另附多阶段构建的 Dockerfile（非 root 用户、挂载配置与 token），不强制使用
+
+### 2. 鉴权：**不做**
+
+用户选了纯内网。因此：
+
+- URL 就是 `/rss/code/{番号}.xml`、`/rss/actress/{id}.xml`，无 secret 段、无 Basic Auth。
+- **安全默认必须补上**：监听地址默认 `127.0.0.1`，**要暴露到局域网必须显式改配置**。
+  没有鉴权的服务不应默认绑 `0.0.0.0`。这条要在 README 里写明。
+- 验证：未授权的路径不构成风险，但**无鉴权 + 0.0.0.0 = 订阅列表公开**，需在文档里提醒。
+
+### 3. 配置：单个 YAML + `SIGHUP` 重载
+
+比 watch 文件简单，比重启体验好。
+
+### 4. 日志：结构化 stdout
+
+签名失效与接口契约变化做成显式 `WARN`，不得静默返回空 feed
+（空 feed 会被误认为「没新片」，是最难排查的失败模式）。
+
+### 5. 不阻塞骨架的部分
+
+这些属于可迭代的实现细节，不构成 ticket：systemd unit 的细节、
+Dockerfile 的 base image 选择、日志字段的具体命名。
+
