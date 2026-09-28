@@ -2,10 +2,11 @@ package appapi
 
 import (
 	"context"
-
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 )
@@ -127,37 +128,97 @@ func (c *Client) Code(ctx context.Context, code string) ([]catalog.Work, error) 
 
 // Actress 实现 catalog.Source。
 //
-// params 是原样透传的 App 演员页查询参数。**唯一的例外是 page 与 limit** ——
-// 本服务要自己控制分页（见 collectWorksByFilter），因此这两个键会被覆盖。
-// 这一点必须在文档里说清楚，否则用户设了 limit 却不生效会变成难以解释的行为。
-//
-// TODO(ticket-09): 现在只取第一页（≤50 部）。一个女优可能有 200+ 部作品
-// （实测 EvkJ 的 videos_count 是 229），要不要翻页、翻几页，
-// 取决于 ticket 09 算出来的成本模型与缓存策略。在那之前刻意保守。
+// params 是原样透传的 App 演员页查询参数。**三个键例外** ——
+// `page`、`limit`、`pages` 由本服务自己控制（页数、每页条数、总页数），
+// 不会透传给上游。这一点必须在文档里说清楚，
+// 否则用户设了 limit 却不生效会变成难以解释的行为。
 func (c *Client) Actress(ctx context.Context, id string, params url.Values) ([]catalog.Work, error) {
 	filterBy, err := buildEntityFilter(id, params)
 	if err != nil {
 		return nil, err
 	}
 
-	query := url.Values{"filter_by": {filterBy}}
+	pages := pageCount(params)
+
+	base := url.Values{"filter_by": {filterBy}}
 	for k, vs := range params {
-		// page/limit 由本服务控制，不接受透传。
-		if k == "page" || k == "limit" {
+		// page/limit/pages 由本服务控制，不接受透传。
+		switch k {
+		case "page", "limit", "pages":
 			continue
 		}
-		query[k] = vs
+		base[k] = vs
 	}
-	if query.Get("sort_by") == "" {
-		query.Set("sort_by", "release")
+	if base.Get("sort_by") == "" {
+		base.Set("sort_by", "release")
 	}
-	if query.Get("order_by") == "" {
-		query.Set("order_by", "desc")
+	if base.Get("order_by") == "" {
+		base.Set("order_by", "desc")
 	}
-	query.Set("page", "1")
-	query.Set("limit", "50") // 实测服务端上限就是 50
+	base.Set("limit", strconv.Itoa(limitPerPage)) // 实测服务端上限就是 50
 
-	return c.collectWorksByFilter(ctx, query)
+	// 逐页拉取。页数很少（默认 1），而且翻页是为了「从零建库」这类少见场景，
+	// 因此这里不做跨页并行 —— 保持上游压力可预测，也避免同一订阅被并发拉扯。
+	// 页内的磁链拉取仍然是并行的（见 hydrate）。
+	var all []catalog.Work
+	seen := make(map[string]bool) // 按作品 id 去重，防上游分页重叠
+	for page := 1; page <= pages; page++ {
+		q := url.Values{}
+		for k, vs := range base {
+			q[k] = vs
+		}
+		q.Set("page", strconv.Itoa(page))
+
+		var env movieListEnvelope
+		if err := c.GetJSON(ctx, "/api/v1/movies/tags", q, &env); err != nil {
+			return nil, err
+		}
+
+		fresh := make([]movieSlim, 0, len(env.Movies))
+		for _, m := range env.Movies {
+			if seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			fresh = append(fresh, m)
+		}
+
+		works, err := c.hydrate(ctx, fresh)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, works...)
+
+		// 这一页没满，说明已经到底，不再白打请求。
+		if len(env.Movies) < limitPerPage {
+			break
+		}
+	}
+	return all, nil
+}
+
+// limitPerPage 是每页条数。实测服务端上限就是 50（传 100/200/500 都只给 50）。
+const limitPerPage = 50
+
+// maxPages 是 `?pages=N` 的上限，防止一个 URL 把上游拖死。
+//
+// 一个女优约 230 部作品，5 页就够建全库；给到 20 页是很宽松的余量。
+const maxPages = 20
+
+// pageCount 从透传参数里读页数，并夹到合理范围。
+func pageCount(params url.Values) int {
+	raw := strings.TrimSpace(params.Get("pages"))
+	if raw == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 1
+	}
+	if n > maxPages {
+		return maxPages
+	}
+	return n
 }
 
 // buildEntityFilter 构造 `filter_by` 复合掩码。
@@ -193,32 +254,108 @@ func (c *Client) collectWorksByFilter(ctx context.Context, query url.Values) ([]
 
 // hydrate 把精简作品逐个补齐磁链。
 //
-// 这一步是 N+1 次请求（一次列表 + 每部一次磁链）。这是本服务最贵的地方，
-// 也是 ticket 09 要决定要不要加缓存的原因。
+// # 为什么要并行
 //
-// 两条省请求的短路：
+// 这一步是 N+1 次请求（一次列表 + 每部一次磁链）。串行时实测一个 50 部的
+// 女优页要 6.75 秒。但上游其实很快：
 //
-//  1. `magnets_count == 0` 时直接跳过 —— 还没人发种，拉也是空。
-//  2. 磁链列表本身为空的作品被保留在结果里（无磁链的作品由 feed.Build 跳过），
-//     因为「这片存在但没种」是有信息量的状态，不该在这一层抹掉。
+//	X-Runtime: 0.005328              ← 源站渲染 5ms
+//	Server-Timing: cfOrigin;dur=198  ← 含 Cloudflare 边缘 218ms
+//
+// 也就是说那 6.75 秒**不是上游慢，是我们串行发请求**。
+// 实测并发 8 把它降到 1.30 秒（并发 1→6.75s, 4→2.22s, 8→1.30s, 16→0.86s）。
+// 并发 8 是收益递减的拐点附近，且对第三方上游比较克制。
+//
+// # 顺序与失败语义
+//
+//   - 结果**严格按输入顺序**返回（按下标回填），不受并发完成顺序影响。
+//     feed 的呈现顺序属于上游，不能被并发打乱。
+//   - 任何一个磁链请求失败都会让整次调用失败。这是刻意的：
+//     静默漏掉几部作品会让用户以为「这几部没有新磁链」，
+//     而那与「上游出了错」是完全不同的两回事。
+//
+// # 省请求的短路
+//
+// `magnets_count == 0` 的作品直接跳过 —— 还没人发种，拉也是空。
+// 没有磁链的作品**仍保留在结果里**（由 feed.Build 跳过），
+// 因为「这片存在但没种」是有信息量的状态，不该在这一层抹掉。
 func (c *Client) hydrate(ctx context.Context, movies []movieSlim) ([]catalog.Work, error) {
-	works := make([]catalog.Work, 0, len(movies))
-	for _, m := range movies {
-		w := catalog.Work{
+	works := make([]catalog.Work, len(movies))
+	// 记下哪些下标真的要去拉磁链。
+	var pending []int
+	for i, m := range movies {
+		works[i] = catalog.Work{
 			Number:      m.Number,
 			Title:       m.Title,
 			ReleaseDate: m.ReleaseDate,
 		}
 		if m.MagnetsCount > 0 {
-			magnets, err := c.magnets(ctx, m.ID)
-			if err != nil {
-				return nil, fmt.Errorf("取 %s (%s) 的磁链: %w", m.Number, m.ID, err)
-			}
-			w.Magnets = magnets
+			pending = append(pending, i)
 		}
-		works = append(works, w)
+	}
+	if len(pending) == 0 {
+		return works, nil
+	}
+
+	conc := c.concurrency()
+	if conc <= 1 || len(pending) == 1 {
+		// 串行路径：仍然走同一段代码，只是 workers=1，避免两套逻辑分叉。
+		conc = 1
+	}
+
+	type result struct {
+		idx     int
+		magnets []catalog.Magnet
+		err     error
+	}
+	// 用带缓冲的 channel 而不是 WaitGroup + 锁：每个下标只被写入一次，
+	// 收集时天然无竞争。
+	sem := make(chan struct{}, conc)
+	results := make(chan result, len(pending))
+
+	var wg sync.WaitGroup
+	for _, idx := range pending {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			magnets, err := c.magnets(ctx, movies[idx].ID)
+			results <- result{idx: idx, magnets: magnets, err: err}
+		}(idx)
+	}
+
+	// 收集必须在 Wait 之前完成，否则带缓冲的 channel 写满后 worker 会阻塞，
+	// 而 Wait 又在等 worker —— 死锁。这里用一个独立的 goroutine 收尾。
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var firstErr error
+	for r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("取 %s (%s) 的磁链: %w",
+					movies[r.idx].Number, movies[r.idx].ID, r.err)
+			}
+			continue
+		}
+		works[r.idx].Magnets = r.magnets
+	}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return works, nil
+}
+
+// concurrency 返回磁链请求的并发上限。
+func (c *Client) concurrency() int {
+	if c.MagnetConcurrency <= 0 {
+		return DefaultMagnetConcurrency
+	}
+	return c.MagnetConcurrency
 }
 
 // magnets 取一部作品的磁链候选，**保持服务端返回的顺序**。

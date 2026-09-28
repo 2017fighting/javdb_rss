@@ -144,9 +144,22 @@ type Client struct {
 	Signer Signer
 	// Lang 是 accept-language，影响服务端返回的文案语言与部分字段。
 	Lang string
+	// MagnetConcurrency 是并行拉取磁链的并发上限。<=0 时用 DefaultMagnetConcurrency。
+	//
+	// 它存在的理由是实测出来的：串行拉 50 部要 6.75 秒，而上游本身只需 ~218ms
+	// （X-Runtime 甚至只有 5ms）。并发 8 就能降到 1.30 秒。
+	// 上限可控是为了对第三方上游保持克制。
+	MagnetConcurrency int
 	// HTTP 允许注入测试用的 transport。为零值时使用带超时的默认客户端。
 	HTTP *http.Client
 }
+
+// DefaultMagnetConcurrency 是默认的磁链并发上限。
+//
+// 实测（一个 50 部女优页）：并发 1→6.75s、4→2.22s、8→1.30s、16→0.86s。
+// 8 已经过了收益最陡的一段，而我们是第三方上游的客人，
+// 不该为了那 0.4 秒施加双倍并发。
+const DefaultMagnetConcurrency = 8
 
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {

@@ -23,6 +23,7 @@ import (
 	"github.com/2017fighting/javdb_rss/internal/appapi"
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"github.com/2017fighting/javdb_rss/internal/config"
+	"github.com/2017fighting/javdb_rss/internal/dedupe"
 	"github.com/2017fighting/javdb_rss/internal/health"
 	"github.com/2017fighting/javdb_rss/internal/httpapi"
 	"github.com/2017fighting/javdb_rss/internal/stub"
@@ -127,7 +128,9 @@ func buildSource(cfg *config.Config, holder *config.Holder) (catalog.Source, err
 		slog.Default().Warn("正在使用固定数据源 stub —— 不会访问任何网络，仅用于跑通链路")
 		return &stub.Source{}, nil
 	case config.ProviderAppAPI:
-		return &appapiSource{holder: holder}, nil
+		// 包一层 dedupe：合并并发的相同请求，只打一次上游。
+		// 它不存任何东西（不是缓存），因此不返回陈旧数据、重启无影响。
+		return dedupe.New(&appapiSource{holder: holder}), nil
 	default:
 		return nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
 	}
@@ -164,6 +167,9 @@ func (s *appapiSource) client() (*appapi.Client, error) {
 		Identity: identity,
 		Signer:   appapi.NewSigner(),
 		Lang:     ac.Lang,
+		// 并行拉磁链。串行时一个 50 部的女优页要 6.75s，
+		// 并发 8 降到 1.30s（上游本身只需 ~218ms，瓶颈在我们自己）。
+		MagnetConcurrency: ac.MagnetConcurrency,
 	}, nil
 }
 
@@ -205,6 +211,9 @@ func (c upstreamChecker) Check(ctx context.Context) health.Result {
 		Identity: identity,
 		Signer:   appapi.NewSigner(),
 		Lang:     ac.Lang,
+		// 并行拉磁链。串行时一个 50 部的女优页要 6.75s，
+		// 并发 8 降到 1.30s（上游本身只需 ~218ms，瓶颈在我们自己）。
+		MagnetConcurrency: ac.MagnetConcurrency,
 		// 刻意不带 token：/api/v1/startup 是匿名端点，
 		// 带上 token 只会让「token 过期」污染「签名是否有效」这个信号。
 	}

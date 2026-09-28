@@ -64,6 +64,10 @@ type AppAPIConfig struct {
 	Lang string `yaml:"lang"`
 	// DeviceUUID 覆盖默认的设备标识，让一台实例长期保持同一身份。
 	DeviceUUID string `yaml:"device_uuid"`
+	// MagnetConcurrency 是并行拉取磁链的并发上限（默认 8）。
+	//
+	// 调高会更快，但会给上游更大压力；调成 1 则完全串行。
+	MagnetConcurrency int `yaml:"magnet_concurrency"`
 
 	// ProbeInterval 是上游健康检查的间隔，如 "15m"。
 	//
