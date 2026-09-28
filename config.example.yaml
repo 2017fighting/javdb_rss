@@ -1,0 +1,67 @@
+# javdb-rss 配置示例
+#
+#   javdb-rss -config config.yaml
+#
+# 改完配置后发 SIGHUP 即可生效（配置文件写坏了会保留旧配置继续服务）：
+#   kill -HUP $(pidof javdb-rss)
+
+# HTTP 监听地址。
+#
+# 默认是 127.0.0.1 —— 本服务不做鉴权，因此默认不对局域网可见。
+# 要让别的机器上的 qBittorrent 订到，改成 ":8080" 或 "0.0.0.0:8080"，
+# 并自己确保它不会被暴露到公网：任何拿到 URL 的人都能看到你的订阅内容。
+listen: "127.0.0.1:8080"
+
+# 数据源实现。
+#
+#   stub   —— 固定样例数据，不访问网络。目前唯一可用值，用于跑通链路。
+#   appapi —— 真实的 JavDB App 私有 API。尚未实现（见 ticket 02 / ticket 06）；
+#             配置成它会直接启动失败，而不是静默退回假数据。
+provider: "stub"
+
+feed:
+  title: "JavDB RSS"
+  description: "由 JavDB 官方 App 私有 API 生成的订阅源"
+  language: "zh-CN"
+  # 本服务的对外地址，用于 feed 的 <link>。路由中的 host 不可靠，所以在这里显式配置。
+  base_url: "http://127.0.0.1:8080"
+
+app_api:
+  host: "https://jdforrepam.com"
+  # 手工从 App 导出的 token 路径。
+  #
+  # 留空或文件不存在 = 匿名访问，这对「番号追新」和「女优追新」完全够用。
+  # 只有需要读取你在 App 里收藏的女优时才需要它。
+  # 支持裸 JWT，或 {"token": "..."} 形式的 JSON。
+  token_file: ""
+  lang: "en"
+  # 固定设备标识，让一台实例长期保持同一身份。留空则用内置默认值。
+  device_uuid: ""
+
+# 可选白名单。
+#
+# 不写这一段：URL 本身就是订阅声明，任何 /rss/code/{番号}.xml 都会被服务。
+# 写了这一段：只有列出的订阅会被服务，其余返回 404。
+#
+# 需要「预热已知订阅」「避免被上级误以为服务了未知内容」时再打开。
+#
+# feeds:
+#   codes:
+#     - KV-328
+#     - ABC-123
+#   actresses:
+#     - id: EvkJ
+#       # 原样透传给 App 演员页的查询参数，本服务不解释这些键值。
+#       # 可用键见 .scratch/javdb-rss/notes/api-contract-survey.md：
+#       #   filter_by       掩码，如 "apmc" = actor + Playable/Downloadable/Subtitles
+#       #   filter_by_tags  标签 id 的 CSV
+#       #   sort_by         release（默认）
+#       #   order_by        desc / asc（默认 desc）
+#       #   page / limit    分页（默认 1 / 20）
+#       params:
+#         filter_by: "apmc"
+#         sort_by: "release"
+#         order_by: "desc"
+#       # 只追新：只保留此日期之后的作品。
+#       # 语义尚未定稿 —— 目前按 release_date 比较，见 ticket 09。
+#       since: "2026-01-01"

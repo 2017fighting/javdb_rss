@@ -4,8 +4,11 @@
 > 原以为「必须先逆向 APK」是整条路的瓶颈，结果发现已有 MIT 许可的 Go 先例
 > （[`FlanChanXwO/javdb-cli`](https://github.com/FlanChanXwO/javdb-cli)）把 `jdsignature`
 > 完整实现，且已实测对我们目标版本的服务端有效。
-> 9 张票中 4 张被降级或部分解掉，3 张已关闭（`01` `04` `08`）。
-> **当前前线：`02` `03`。**
+> 9 张票中 4 张被降级或部分解掉，**4 张已关闭**（`01` `03` `04` `08`），
+> 并新开出 `10`。
+> **代码已存在**：`cmd/` + `internal/` 下已有一个能跑、有测试的 Go 骨架
+> （ticket 03 已交付，2137 行）。
+> **当前前线：`02` `05` `06` `10`。**
 
 ## Destination
 
@@ -46,6 +49,24 @@
 - 磁链自带 `hash`（infohash），可直接做 guid。
 - 女优作品列表 = `GET /api/v1/movies/tags?filter_by&filter_by_tags&sort_by&order_by&page&limit`。
 
+**代码骨架已存在（ticket 03），改代码前先看它**
+
+```
+cmd/javdb-rss/        组装与启动（SIGHUP 重载、优雅退出）
+internal/catalog/     领域模型 + 槽位规则 + **Source 端口**
+internal/feed/        RSS 渲染（纯函数，可字节级测试）
+internal/appapi/      App API 传输层（`Signer` 与「番号解析」两个接口接缝）
+internal/config/      YAML + SIGHUP 重载
+internal/httpapi/     路由
+internal/stub/        固定数据的假数据源
+```
+
+- **唯一外部边界是 `catalog.Source`**（`Code` / `Actress` 两个方法）。
+  加缓存/后台刷新就在这层包装饰器，上层一行不改。
+- 当前 `provider: stub` 是唯一可用值；配 `appapi` **直接启动失败**（不静默退回假数据）。
+- `CONTEXT.md` 是领域词汇表，改代码前先对齐用语。
+- 测试全部离线；`go test ./...` / `go vet ./...` / `gofmt -l .` 应当全净。
+
 **每个 session 应 consult 的 skill**
 - 设计讨论：`/grilling` + `/domain-modeling`
 - 交付前审计：`/code-review`
@@ -77,6 +98,13 @@
   — **字幕优先，每部作品恒发 1 条**；`guid` = 纯 infohash（跨 feed 去重、洗版自动重下）；
   标题字幕版加 `中文字幕 ·` 前缀；`pubDate` 取 `created_at`。
   已知后果：无字幕版先下、字幕版后到时磁盘留两份（清理属 qBittorrent 职责，已出界）。
+  基名规则已被 ticket 03 修订为「作品标题 → 磁链 name → infohash」。
+- [RSS 服务骨架](issues/03-service-skeleton.md)
+  — 交付一个能跑、有离线测试的 Go 骨架。**唯一外部边界是 `catalog.Source`**；
+  签名与番号解析各留一个接口接缝；监听默认 `127.0.0.1`；`provider: appapi` 直接启动失败。
+  实测确认：guid 跨请求逐字节稳定、SIGHUP 重载失败保留旧配置。
+  顺带修订了 08（标题基名）与 09（`since` 临时按 `release_date` 实现并打 WARN）。
+  新暴露缺口：需求 4 在地图终点里没有落脚点 → 已开 ticket 10。
 
 ## Not yet specified
 
@@ -88,6 +116,14 @@
   这直接决定 `/rss/code/{番号}.xml` 能否实现。
 - **`since=<日期>` 的比较字段**：`movies/latest` 有 `release_date`，但演员页列表里有没有、
   格式是什么，尚未确认。没有它需求 3 的「只追新」就悬空。
+- **Dockerfile 与 systemd unit 尚未写**（ticket 04 定了这个形态，但它没被列进
+  ticket 03 的产出）。二进制已能直接跑，镜像化是随时可做的小事，不构成决策，
+  因此不开票 —— 等真需要部署时顺手做。
+- **`size` 的单位未经核实**：ticket 03 假定 App API 的 `size` 是兆字节，
+  并据此填 `enclosure length`。qBittorrent 不会用它做判断，所以不影响功能，
+  但 ticket 06 测接口时顺手核一下。
+- **需求 4 的呈现形态尚未定**：`Source` 端口里根本没有位置放「收藏列表」——
+  ticket 03 实现时才意识到地图的终点描述漏了这一环。见 ticket 10。
 - **Prefix 失效的检测与应对**：Prefix 由 App 内 access key 派生，App 升级或服务端轮换
   都可能使其作废。需要一个「多久探一次、失效时怎么告警」的判断。
   也要看一眼 javdb-cli 是否已跟进 —— 它活跃，很可能比我们先发现。
