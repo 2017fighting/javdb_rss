@@ -89,13 +89,24 @@ type Signer interface {
 type APIError struct {
 	Action  string
 	Message string
+	// Status 是 HTTP 状态码。同一个 action 在不同状态下含义不同，
+	// 因此保留它供诊断；0 表示响应本来就是 200（信封失败路径）。
+	Status int
 }
 
 func (e *APIError) Error() string {
-	if e.Action == "" {
-		return fmt.Sprintf("javdb api: %s", e.Message)
+	var b strings.Builder
+	b.WriteString("javdb api")
+	if e.Status != 0 {
+		fmt.Fprintf(&b, " (HTTP %d)", e.Status)
 	}
-	return fmt.Sprintf("javdb api: %s: %s", e.Action, e.Message)
+	if e.Action != "" {
+		fmt.Fprintf(&b, ": %s", e.Action)
+	}
+	if e.Message != "" {
+		fmt.Fprintf(&b, ": %s", e.Message)
+	}
+	return b.String()
 }
 
 // AuthError 表示请求被接受但**凭据有问题** —— 签名对了，token 缺失/过期/被顶下线。
@@ -218,19 +229,35 @@ func (c *Client) GetJSON(ctx context.Context, path string, params url.Values, de
 	if err != nil {
 		return fmt.Errorf("读取 %s 响应: %w", path, err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("请求 %s 返回 HTTP %d: %s", path, resp.StatusCode, truncate(string(body), 200))
-	}
 
+	// 先尽力解析信封，**不管 HTTP 状态码**。
+	//
+	// 这一点是实测逼出来的：签名值无效时服务端返回 HTTP 400，
+	// 但响应体仍然是标准信封。
+	//
+	//   签名缺失  → HTTP 200 + {"success":0,"action":"ParameterInvalid"}
+	//   签名无效  → HTTP 400 + {"success":0,"action":"InvalidSignature"}
+	//
+	// 如果按状态码提前返回一个字符串错误，action 就丢了 —— 而 action 正是
+	// 区分「签名坏了，要改代码」与「网络抖了，等会儿重试」的唯一依据。
+	// 丢掉它会让告警在最该响的时候变成哑的。
 	var env envelope
-	if err := json.Unmarshal(body, &env); err != nil {
-		return fmt.Errorf("解析 %s 信封: %w; body=%s", path, err, truncate(string(body), 200))
-	}
-	if !successTruthy(env.Success) {
+	// 判据是「success 字段存在」而不是「action 非空」——
+	// 成功响应里 action 就是 null，用后者会把每条成功响应都误判成解析失败。
+	envelopeOK := json.Unmarshal(body, &env) == nil && env.Success != nil
+
+	if envelopeOK && !successTruthy(env.Success) {
 		if authActions[env.Action] {
 			return &AuthError{Action: env.Action, Message: env.Message}
 		}
-		return &APIError{Action: env.Action, Message: env.Message}
+		return &APIError{Action: env.Action, Message: env.Message, Status: resp.StatusCode}
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("请求 %s 返回 HTTP %d: %s", path, resp.StatusCode, truncate(string(body), 200))
+	}
+	if !envelopeOK {
+		return fmt.Errorf("解析 %s 信封失败; body=%s", path, truncate(string(body), 200))
 	}
 
 	if dest == nil || len(env.Data) == 0 || string(env.Data) == "null" {
@@ -240,6 +267,7 @@ func (c *Client) GetJSON(ctx context.Context, path string, params url.Values, de
 		return fmt.Errorf("解析 %s 负载: %w", path, err)
 	}
 	return nil
+
 }
 
 // IsAuthError 报告 err 链上是否有凭据类错误。

@@ -16,6 +16,7 @@ import (
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"github.com/2017fighting/javdb_rss/internal/config"
 	"github.com/2017fighting/javdb_rss/internal/feed"
+	"github.com/2017fighting/javdb_rss/internal/health"
 )
 
 // Version 是 /version 端点报告的服务版本，构建时用 -ldflags 注入。
@@ -26,6 +27,9 @@ type Server struct {
 	cfg *config.Holder
 	src catalog.Source
 	log *slog.Logger
+	// upstream 是可选的上游健康跟踪器。为 nil 时 /readyz 恒为就绪
+	// （没有上游要检查，例如 provider=stub）。
+	upstream *health.Tracker
 	// now 可在测试里替换，让 pubDate 与 lastBuildDate 可确定。
 	now func() time.Time
 }
@@ -38,6 +42,12 @@ func New(cfg *config.Holder, src catalog.Source, log *slog.Logger) *Server {
 	return &Server{cfg: cfg, src: src, log: log, now: time.Now}
 }
 
+// WithUpstream 挂上上游健康跟踪器，启用 /readyz 与 /healthz/upstream。
+func (s *Server) WithUpstream(t *health.Tracker) *Server {
+	s.upstream = t
+	return s
+}
+
 // Handler 返回完整的 HTTP 处理器。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -46,16 +56,102 @@ func (s *Server) Handler() http.Handler {
 	// 路径段，而我们要容忍结尾的 .xml，因此在这里自己剥。
 	mux.HandleFunc("GET /rss/code/", s.handleCode)
 	mux.HandleFunc("GET /rss/actress/", s.handleActress)
-	mux.HandleFunc("GET /healthz", s.handleHealth)
+
+	// 健康检查分两层，分别对应 k8s 的两种探针。这个区分很重要：
+	//
+	//   /healthz          存活探针。进程还在就 200。
+	//                     **绝不能**掺入上游状态 —— 签名失效重启一千次也没用，
+	//                     liveness 失败会导致重启循环。
+	//   /readyz           就绪探针。上游签名坏了就 503，把实例从 Service
+	//                     endpoints 里摘掉，但**不重启**。
+	//   /healthz/upstream 详情 JSON，给 k8s CronJob 或告警系统抓。
+	mux.HandleFunc("GET /healthz", s.handleLiveness)
+	mux.HandleFunc("GET /readyz", s.handleReadiness)
+	mux.HandleFunc("GET /healthz/upstream", s.handleUpstreamDetail)
 	mux.HandleFunc("GET /version", s.handleVersion)
 
 	return mux
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+// handleLiveness 只回答「进程还活着吗」。永远 200。
+func (s *Server) handleLiveness(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("content-type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+// handleReadiness 回答「现在能不能服务有效内容」。
+//
+// 三种情况：
+//
+//	没有上游（provider=stub）  → 200，没有可坏的依赖
+//	尚未检查过                    → 200，探针刚启动时跑，窗口极小；
+//	                               此处返回 503 会让启动过程莫名奇妙失败
+//	检查过且失败                  → 503
+func (s *Server) handleReadiness(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("content-type", "text/plain; charset=utf-8")
+	st, known := s.upstreamStatus()
+	if s.upstream == nil || !known || st.OK {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte("上游不可用: " + st.Err + "\n"))
+}
+
+// handleUpstreamDetail 输出机读的详情，供 CronJob / 告警规则判断。
+func (s *Server) handleUpstreamDetail(w http.ResponseWriter, _ *http.Request) {
+	st, known := s.upstreamStatus()
+
+	body := map[string]any{
+		"checked": known,
+		"ok":      st.OK,
+	}
+	if known {
+		body["checked_at"] = st.CheckedAt.UTC().Format(time.RFC3339)
+		body["latency_ms"] = st.Latency.Milliseconds()
+		if st.Action != "" {
+			// 上游报告的错误名，供告警规则做精确匹配。
+			body["action"] = st.Action
+		}
+		if st.Err != "" {
+			body["error"] = st.Err
+		}
+	}
+
+	// 单独标出「需要改代码而不是重试」的那类失败，
+	// 好让告警规则能直接对 signature_broken 做路由。
+	code := http.StatusOK
+	if known && !st.OK {
+		body["signature_broken"] = isSignatureFailure(st.Action)
+		code = http.StatusServiceUnavailable
+	} else {
+		body["signature_broken"] = false
+	}
+
+	writeJSON(w, code, body)
+}
+
+func (s *Server) upstreamStatus() (health.Status, bool) {
+	if s.upstream == nil {
+		return health.Status{}, false
+	}
+	return s.upstream.Snapshot()
+}
+
+// isSignatureFailure 判断上游报的错误名是否属于「签名/请求构造与服务端不兼容」。
+//
+// 按 action 匹配而不是按错误文本：action 是服务端给的枚举值，稳定可靠。
+//
+// 实测的两种形态：
+//
+//	InvalidSignature  (HTTP 400) 签名值无效 —— Prefix 变了
+//	ParameterInvalid  (HTTP 200) 签名缺失，或公共参数缺了 —— 请求构造过时了
+//
+// 两者对运维而言处置方式相同（要改代码，不是重试），因此归为一类。
+func isSignatureFailure(action string) bool {
+	return action == "InvalidSignature" || action == "ParameterInvalid"
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
@@ -156,6 +252,15 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 // 将来加缓存只需要包一层装饰器，这里一行都不用改。
 func (s *Server) renderFeed(w http.ResponseWriter, r *http.Request, meta feed.Meta, works []catalog.Work) {
 	items := feed.Build(works)
+
+	// 上游已知损坏时把警告写进 channel 描述 —— 用户在 qBittorrent 的界面里
+	// 就能看到，而不是盯着一条安静的空 feed 自己猜。
+	//
+	// 刻意**不**插入一条占位 item：那会被 RSS 客户端的自动下载规则误伤，
+	// 而且会污染去重状态。
+	if st, known := s.upstreamStatus(); s.upstream != nil && known && !st.OK {
+		meta.Description = "⚠️ 上游不可用，本 feed 已停更。原因：" + st.Err + " —— " + meta.Description
+	}
 
 	w.Header().Set("content-type", "application/rss+xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

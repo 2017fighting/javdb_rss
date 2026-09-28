@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestExampleConfigIsValid 把 config.example.yaml 当成一份必须长期可用的文档来测：
@@ -168,5 +169,41 @@ func TestLoadToken(t *testing.T) {
 	}
 	if _, err := LoadToken(bad); err == nil {
 		t.Error("坏 JSON 应当报错")
+	}
+}
+
+// TestProbeIntervalParsesDuration 确认 "15m" 这类写法能解析成 time.Duration。
+// yaml.v3 对 time.Duration 有特殊处理，这一点值得钉住 ——
+// 它要是哪天变成只接受纳秒整数，配置会静默变成 0（探针被关掉）而不是报错。
+func TestProbeIntervalParsesDuration(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "provider: stub\napp_api:\n  probe_interval: \"15m\"\n"))
+	if err != nil {
+		t.Fatalf("加载: %v", err)
+	}
+	if cfg.AppAPI.ProbeInterval != 15*time.Minute {
+		t.Errorf("ProbeInterval = %v, want 15m", cfg.AppAPI.ProbeInterval)
+	}
+}
+
+// TestProbeIntervalDefaultsOn 确认默认是打开的 ——
+// 忘配就等于没有最早期的失效告警，而这个告警正是探针的全部价值。
+func TestProbeIntervalDefaultsOn(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppAPI.ProbeInterval <= 0 {
+		t.Errorf("默认 ProbeInterval = %v，应当大于 0（默认开启探针）", cfg.AppAPI.ProbeInterval)
+	}
+}
+
+// TestProbeIntervalCanBeDisabled 确认能显式关掉，且关掉就是 0 而不是某个默认值。
+func TestProbeIntervalCanBeDisabled(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "provider: stub\napp_api:\n  probe_interval: \"0\"\n"))
+	if err != nil {
+		t.Fatalf("加载: %v", err)
+	}
+	if cfg.AppAPI.ProbeInterval != 0 {
+		t.Errorf("ProbeInterval = %v, want 0", cfg.AppAPI.ProbeInterval)
 	}
 }

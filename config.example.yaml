@@ -37,6 +37,24 @@ app_api:
   lang: "en"
   # 固定设备标识，让一台实例长期保持同一身份。留空则用内置默认值。
   device_uuid: ""
+  # 上游健康检查间隔，如 "15m" / "1h"。
+  #
+  # 它检查的是本服务**唯一已知会失效的输入** —— 签名常量是否还跟服务端兼容。
+  # 与 provider 是否已实现无关，因此现在就可以打开。
+  #
+  # 打开后：
+  #   /readyz           上游坏了返回 503（供 k8s readinessProbe）
+  #   /healthz/upstream 机读详情，含 signature_broken 字段（供 CronJob / 告警）
+  #
+  # k8s 里典型用法：
+  #   livenessProbe:  httpGet: {path: /healthz, port: 8080}
+  #   readinessProbe: httpGet: {path: /readyz,  port: 8080}
+  #
+  # 注意 liveness **必须**打 /healthz 而不是 /readyz ——
+  # 签名失效重启一千次也没用，把上游状态掺进 liveness 会造成重启循环。
+  #
+  # 设为 0 关闭探针。
+  probe_interval: "15m"
 
 # 可选白名单。
 #

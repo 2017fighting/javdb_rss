@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -63,6 +64,17 @@ type AppAPIConfig struct {
 	Lang string `yaml:"lang"`
 	// DeviceUUID 覆盖默认的设备标识，让一台实例长期保持同一身份。
 	DeviceUUID string `yaml:"device_uuid"`
+
+	// ProbeInterval 是上游健康检查的间隔，如 "15m"。
+	//
+	// 0 或未设表示关闭探针。打开后：
+	//   - /readyz 会随上游状态变成 503
+	//   - /healthz/upstream 会返回机读详情
+	//
+	// 它检查的是「签名常量是否还跟服务端兼容」（本服务唯一已知会失效的输入），
+	// 与 provider 是否已实现无关 —— 因此可以在 provider=stub 时就打开，
+	// 先拿到早期告警能力。
+	ProbeInterval time.Duration `yaml:"probe_interval"`
 }
 
 // FeedsConfig 是订阅白名单。
@@ -98,6 +110,9 @@ func Default() *Config {
 		AppAPI: AppAPIConfig{
 			Host: "https://jdforrepam.com",
 			Lang: "en",
+			// 默认打开探针。k8s 下这是 /readyz 的数据来源；
+			// 单纯跑 go run 时它只是一次每 15 分钟的轻请求，代价可忽略。
+			ProbeInterval: 15 * time.Minute,
 		},
 	}
 }

@@ -61,6 +61,50 @@ http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=2026-01-01   只要这个日期
 qBittorrent 订到，你得在配置里显式改 `listen:` —— 让「暴露出去」是一个需要动手的决定，
 而不是一个默认值。
 
+## 健康检查（k8s）
+
+服务暴露三个端点，分别对应不同的故障处置：
+
+| 端点 | 用途 | 上游坏了时 |
+|---|---|---|
+| `/healthz` | **存活**。只回答「进程还在吗」 | **仍然 200** |
+| `/readyz` | **就绪**。上游不可用则 503 | 503 |
+| `/healthz/upstream` | 机读详情（供 CronJob / 告警） | 503 + JSON |
+
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 8080 }
+readinessProbe:
+  httpGet: { path: /readyz,  port: 8080 }
+```
+
+**`livenessProbe` 必须打 `/healthz` 而不是 `/readyz`。** 本服务唯一已知会失效的输入是
+签名常量（它派生自 App 内的 access key，App 升级或服务端轮换都会让它作废）——
+签名失效重启一千次也没用。把上游状态掺进 liveness 只会制造重启循环。
+
+### 这条探针抓过真 bug
+
+它检查 `/startup` 是否能通过签名。打开后：
+
+- 上游坏掉 → `/readyz` 返回 503（实例从 Service 端点摘掉，**不重启**）
+- feed 的 channel 描述里会出现可见告警（`⚠️ 上游不可用，本 feed 已停更…`），
+  你在 qBittorrent 界面里就能看到，而不必盯着一条安静的空 feed 自己猜
+- 日志里打一条 ERROR，只在状态**翻转**时打，不会每 15 分钟刷屏
+
+```json
+// GET /healthz/upstream（上游正常时）
+{"checked":true,"ok":true,"checked_at":"2026-09-28T04:04:35Z","latency_ms":503,"signature_broken":false}
+
+// 签名失效时
+{"checked":true,"ok":false,"action":"InvalidSignature","signature_broken":true,
+ "error":"javdb api (HTTP 400): InvalidSignature: 無效的簽名","latency_ms":457}
+```
+
+告警规则建议匹配 `signature_broken: true` —— 它表示**要改代码，不是重试**。
+普通网络故障不算在内（避免半夜被叫起来改一个其实只需要重试的东西）。
+
+探针间隔由 `app_api.probe_interval` 控制，设 `0` 关闭。
+
 ## feed 的形状
 
 每条 item 对应一部作品，**永远只有一条**，且**字幕优先**：
@@ -104,5 +148,9 @@ go vet ./...
 ## 这一版是怎么定下来的
 
 设计决策的依据不在这个 README 里，而在 `.scratch/javdb-rss/` ——
-那里有一张 wayfinder 地图、9 张决策票和 3 份逆向侦察笔记，
+那里有一张 wayfinder 地图、10 张决策票和 3 份逆向侦察笔记，
 记录了每个取舍、被否掉的方案和仍然未知的部分。改这个项目之前值得先读。
+
+签名算法来自 [javdb-cli](https://github.com/FlanChanXwO/javdb-cli)（MIT），
+归属与改动见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+**如果哪天签名失效了，第一件事是去看那个项目是否已跟进。**

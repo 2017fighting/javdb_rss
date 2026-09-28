@@ -19,8 +19,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/2017fighting/javdb_rss/internal/appapi"
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"github.com/2017fighting/javdb_rss/internal/config"
+	"github.com/2017fighting/javdb_rss/internal/health"
 	"github.com/2017fighting/javdb_rss/internal/httpapi"
 	"github.com/2017fighting/javdb_rss/internal/stub"
 )
@@ -59,18 +61,26 @@ func run() error {
 		return err
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           httpapi.New(holder, src, log).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	tracker := health.NewTracker()
 
 	// 信号处理：SIGHUP 重载配置，INT/TERM 触发退出。
+	// 必须在启动探针 goroutine 之前建好，因为它需要同一个 ctx 来退出。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
+
+	// 上游健康探针。只检查「签名常量与服务端是否还兼容」，
+	// 因此不需要 token，也与 provider 是否已实现无关。
+	go health.Run(ctx, upstreamChecker{holder: holder}, tracker,
+		func() time.Duration { return holder.Current().AppAPI.ProbeInterval }, log)
+
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           httpapi.New(holder, src, log).WithUpstream(tracker).Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	go func() {
 		for range hup {
@@ -123,6 +133,38 @@ func buildSource(cfg *config.Config) (catalog.Source, error) {
 	default:
 		return nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
 	}
+}
+
+// upstreamChecker 在每次检查时**重新读取配置**构造客户端。
+//
+// 不在启动时建好一个长命客户端，是因为 host / lang / device_uuid 都是可热重载的；
+// 提前固化会让「改了配置却不生效」变成一个很难查的问题。
+// 一次探针的开销是一次 HTTP 请求，多构几个临时对象不算代价。
+type upstreamChecker struct{ holder *config.Holder }
+
+func (c upstreamChecker) Check(ctx context.Context) health.Result {
+	ac := c.holder.Current().AppAPI
+
+	identity := appapi.DefaultIdentity()
+	if ac.DeviceUUID != "" {
+		identity.DeviceUUID = ac.DeviceUUID
+	}
+
+	cl := &appapi.Client{
+		Host:     ac.Host,
+		Identity: identity,
+		Signer:   appapi.NewSigner(),
+		Lang:     ac.Lang,
+		// 刻意不带 token：/api/v1/startup 是匿名端点，
+		// 带上 token 只会让「token 过期」污染「签名是否有效」这个信号。
+	}
+
+	// 把 error 翻译成结构化结论。做在这一层而不是 appapi 里，
+	// 是为了让 appapi 保持不知道 health 包的存在。
+	if err := cl.Check(ctx); err != nil {
+		return health.Result{OK: false, Action: appapi.ActionOf(err), Err: err.Error()}
+	}
+	return health.Result{OK: true}
 }
 
 func newLogger(level string) *slog.Logger {

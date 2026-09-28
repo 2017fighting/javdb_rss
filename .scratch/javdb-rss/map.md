@@ -4,11 +4,10 @@
 > 原以为「必须先逆向 APK」是整条路的瓶颈，结果发现已有 MIT 许可的 Go 先例
 > （[`FlanChanXwO/javdb-cli`](https://github.com/FlanChanXwO/javdb-cli)）把 `jdsignature`
 > 完整实现，且已实测对我们目标版本的服务端有效。
-> 9 张票中 4 张被降级或部分解掉，**4 张已关闭**（`01` `03` `04` `08`），
+> 9 张票中 4 张被降级或部分解掉，**5 张已关闭**（`01` `02` `03` `04` `08`），
 > 并新开出 `10`。
-> **代码已存在**：`cmd/` + `internal/` 下已有一个能跑、有测试的 Go 骨架
-> （ticket 03 已交付，2137 行）。
-> **当前前线：`02` `05` `06` `10`。**
+> **代码已存在且签名已打通**：`cmd/` + `internal/` 下是一个能跑、有离线测试的 Go 服务。
+> **当前前线：`05` `06` `10`。**
 
 ## Destination
 
@@ -43,11 +42,16 @@
 **已确认的服务端事实（不要重新试探，直接用）**
 - `jdsignature` 是 **HTTP 请求头**，值为 `"{ts}.{suffix}.{md5(ts + prefix)}"`，
   Prefix/Suffix 是硬编码常量。**已实测对 1.9.35 服务端有效。**
+  实现已在 `internal/appapi/signature.go`（零依赖，拷贝自 javdb-cli / MIT）。
 - 必带 8 个公共 query 参数：`app_channel app_version app_version_number platform
   system_version device_model device_name device_uuid`，缺一即 `ParameterInvalid`。
 - 中文字幕：电影级 `has_cnsub`，**磁链级 `cnsub`** —— 不需要解析文件名。
 - 磁链自带 `hash`（infohash），可直接做 guid。
 - 女优作品列表 = `GET /api/v1/movies/tags?filter_by&filter_by_tags&sort_by&order_by&page&limit`。
+- ⚠️ **签名有两种失败形态，别只处理一种**：
+  `签名缺失 → HTTP 200 + action=ParameterInvalid`；
+  `签名无效 → HTTP 400 + action=InvalidSignature`。
+  这个 API **在 4xx 时仍返回标准信封**，所以不要按状态码提前短路。
 
 **代码骨架已存在（ticket 03），改代码前先看它**
 
@@ -64,6 +68,10 @@ internal/stub/        固定数据的假数据源
 - **唯一外部边界是 `catalog.Source`**（`Code` / `Actress` 两个方法）。
   加缓存/后台刷新就在这层包装饰器，上层一行不改。
 - 当前 `provider: stub` 是唯一可用值；配 `appapi` **直接启动失败**（不静默退回假数据）。
+  接入真实数据源只差 ticket 06（番号 → 作品的解析规则）与在 `buildSource` 里装配。
+- **健康检查三端点**（ticket 02）：`/healthz`（存活，不掺上游）/
+  `/readyz`（就绪）`/healthz/upstream`（机读详情，含 `signature_broken`）。
+  改这块前先读 README 的「健康检查（k8s）」一节 —— 端点职责不能混。
 - `CONTEXT.md` 是领域词汇表，改代码前先对齐用语。
 - 测试全部离线；`go test ./...` / `go vet ./...` / `gofmt -l .` 应当全净。
 
@@ -105,6 +113,14 @@ internal/stub/        固定数据的假数据源
   实测确认：guid 跨请求逐字节稳定、SIGHUP 重载失败保留旧配置。
   顺带修订了 08（标题基名）与 09（`since` 临时按 `release_date` 实现并打 WARN）。
   新暴露缺口：需求 4 在地图终点里没有落脚点 → 已开 ticket 10。
+- [恢复 `jdsignature` 并在 Go 里复现](issues/02-recover-jdsignature.md)
+  — **拷贝而非依赖**（依赖 javdb-cli SDK 实测要 37 个模块、二进制涨到 17.25MB）。
+  已实测打通真实 `/api/v1/startup`。失效探针按用户要求做成 API 给 k8s 打：
+  `/healthz` 不掺上游状态（避免重启循环）、`/readyz` 反映上游、
+  `/healthz/upstream` 出机读详情含 `signature_broken`。
+  **探针先做了一次故意签坏的实测，拓到了一个真 bug**：签名有 `InvalidSignature`(400)
+  与 `ParameterInvalid`(200) 两种形态，而当时 `GetJSON` 按状态码提前短路导致
+  `action` 丢失 —— 告警在最该响的时候是哑的。已修并写进 `notes/api-recon.md`。
 
 ## Not yet specified
 

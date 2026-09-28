@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"github.com/2017fighting/javdb_rss/internal/config"
+	"github.com/2017fighting/javdb_rss/internal/health"
 	"github.com/2017fighting/javdb_rss/internal/stub"
 )
 
@@ -293,5 +295,147 @@ func TestVersionAndHealth(t *testing.T) {
 	}
 	if rec := do(t, h, "/version"); !strings.Contains(rec.Body.String(), `"provider":"stub"`) {
 		t.Errorf("version = %q", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 上游健康检查端点
+// ---------------------------------------------------------------------------
+
+func newTestServerWithHealth(t *testing.T, cfgYAML string, src catalog.Source) (http.Handler, *health.Tracker) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := config.NewHolder(p)
+	if err != nil {
+		t.Fatalf("配置: %v", err)
+	}
+	tr := health.NewTracker()
+	s := New(holder, src, slog.New(slog.NewTextHandler(io.Discard, nil))).WithUpstream(tr)
+	s.now = func() time.Time { return time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC) }
+	return s.Handler(), tr
+}
+
+// TestReadinessBeforeFirstCheck 钉住启动瞬间的行为：
+// 还没检查过时应当**就绪**，否则滚动发布会因为探针还没跑而卡住。
+func TestReadinessBeforeFirstCheck(t *testing.T) {
+	h, _ := newTestServerWithHealth(t, "provider: stub\n", &stub.Source{})
+	if rec := do(t, h, "/readyz"); rec.Code != http.StatusOK {
+		t.Errorf("首次检查前 /readyz = %d, want 200", rec.Code)
+	}
+}
+
+// TestLivenessIgnoresUpstream 是最重要的一条：
+// 签名失效重启一千次也没用，把上游状态掺进 liveness 会造成重启循环。
+func TestLivenessIgnoresUpstream(t *testing.T) {
+	h, tr := newTestServerWithHealth(t, "provider: stub\n", &stub.Source{})
+	tr.Record(health.Status{OK: false, CheckedAt: time.Now(),
+		Action: "InvalidSignature", Err: "無效的簽名"})
+
+	if rec := do(t, h, "/healthz"); rec.Code != http.StatusOK {
+		t.Errorf("上游坏了时 /healthz = %d, want 200（进程还活着）", rec.Code)
+	}
+	if rec := do(t, h, "/readyz"); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("上游坏了时 /readyz = %d, want 503", rec.Code)
+	}
+}
+
+func TestUpstreamDetailJSON(t *testing.T) {
+	h, tr := newTestServerWithHealth(t, "provider: stub\n", &stub.Source{})
+
+	// 未检查过
+	var body map[string]any
+	rec := do(t, h, "/healthz/upstream")
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("不是合法 JSON: %v", err)
+	}
+	if body["checked"] != false {
+		t.Errorf("checked = %v, want false", body["checked"])
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("未检查过时应当 200，得到 %d", rec.Code)
+	}
+
+	// 检查过且失败
+	tr.Record(health.Status{OK: false, CheckedAt: time.Now(), Latency: 444 * time.Millisecond,
+		Action: "InvalidSignature", Err: "javdb api (HTTP 400): InvalidSignature: 無效的簽名"})
+	rec = do(t, h, "/healthz/upstream")
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("不是合法 JSON: %v", err)
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("失败时应当 503，得到 %d", rec.Code)
+	}
+	// signature_broken 是告警规则要匹配的字段，必须准确。
+	if body["signature_broken"] != true {
+		t.Errorf("signature_broken = %v, want true", body["signature_broken"])
+	}
+	if body["action"] != "InvalidSignature" {
+		t.Errorf("action = %v", body["action"])
+	}
+	if body["latency_ms"] != float64(444) {
+		t.Errorf("latency_ms = %v", body["latency_ms"])
+	}
+}
+
+// TestSignatureBrokenFieldForBothShapes 确认两种签名失败形态都被标为 broken。
+func TestSignatureBrokenFieldForBothShapes(t *testing.T) {
+	for _, action := range []string{"InvalidSignature", "ParameterInvalid"} {
+		t.Run(action, func(t *testing.T) {
+			h, tr := newTestServerWithHealth(t, "provider: stub\n", &stub.Source{})
+			tr.Record(health.Status{OK: false, CheckedAt: time.Now(), Action: action, Err: "x"})
+
+			var body map[string]any
+			rec := do(t, h, "/healthz/upstream")
+			_ = json.Unmarshal(rec.Body.Bytes(), &body)
+			if body["signature_broken"] != true {
+				t.Errorf("action=%s 时 signature_broken = %v, want true", action, body["signature_broken"])
+			}
+		})
+	}
+}
+
+// TestTransientFailureIsNotSignatureBroken 确认普通故障不会被标成签名问题 ——
+// 误报的代价是有人半夜被叫起来改代码，而其实只需要重试。
+func TestTransientFailureIsNotSignatureBroken(t *testing.T) {
+	h, tr := newTestServerWithHealth(t, "provider: stub\n", &stub.Source{})
+	tr.Record(health.Status{OK: false, CheckedAt: time.Now(),
+		Err: "请求 /api/v1/startup: dial tcp: connection refused"})
+
+	var body map[string]any
+	rec := do(t, h, "/healthz/upstream")
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("应当 503，得到 %d", rec.Code)
+	}
+	if body["signature_broken"] != false {
+		t.Errorf("普通网络故障不该标成签名问题: %v", body["signature_broken"])
+	}
+}
+
+// TestDegradedFeedCarriesWarning 确认上游坏掉时 feed 描述里有可见告警 ——
+// 用户在 qBittorrent 界面里就能看到，而不是盯着一条安静的空 feed 自己猜。
+func TestDegradedFeedCarriesWarning(t *testing.T) {
+	h, tr := newTestServerWithHealth(t, "provider: stub\n", &stub.Source{})
+	tr.Record(health.Status{OK: false, CheckedAt: time.Now(),
+		Action: "InvalidSignature", Err: "無效的簽名"})
+
+	var f parsedFeed
+	rec := do(t, h, "/rss/code/KV-328.xml")
+	if err := xml.Unmarshal(rec.Body.Bytes(), &f); err != nil {
+		t.Fatalf("不是合法 RSS: %v", err)
+	}
+	if !strings.Contains(f.Channel.Title, "KV-328") {
+		t.Errorf("channel title 被改坏了: %q", f.Channel.Title)
+	}
+	// 描述里要有告警，但**不能**插入占位 item —— 那会被自动下载规则误伤。
+	body := rec.Body.String()
+	if !strings.Contains(body, "停更") {
+		t.Error("降级 feed 的描述里没有可见告警")
+	}
+	if len(f.Channel.Items) != 2 {
+		t.Errorf("降级时不该改变 item 数量: 得到 %d, want 2", len(f.Channel.Items))
 	}
 }

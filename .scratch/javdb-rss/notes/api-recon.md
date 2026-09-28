@@ -51,6 +51,34 @@ $ curl -s https://jdforrepam.com/api/v1/startup
 
 - `GET /api/v1/movies/latest` 同样返回该错误 → **所有端点都强制校验 `jdsignature`**。
 - 服务端错误文案是繁体中文，错误信封为 `{success, action, message, data}`。
+- `jdsignature` 是 **HTTP 请求头**，不是查询参数。
+
+### ⚠️ 两种签名失败形态（实测，极易漏掉一种）
+
+2026-09-28 实测确认，签名问题有**两种不同的服务端表现**：
+
+| 情形 | HTTP 状态 | `success` | `action` | `message` |
+|---|---|---|---|---|
+| **签名值为空/缺失** | **200** | 0 | `ParameterInvalid` | `參數不能爲空: jdsignature` |
+| **签名值无效** | **400** | 0 | `InvalidSignature` | `無效的簽名` |
+
+**这一点真实坑过我们**：健康探针最初只处理了 `ParameterInvalid`（HTTP 200），
+而「签名常量失效」这条真实路径走的是 HTTP **400 + `InvalidSignature`**，
+且当时 `GetJSON` 按状态码提前返回了字符串错误，`action` 根本没到达分类器。
+结果是：**告警在最该响的时候报了 `signature_broken: false`**。
+
+两个教训：
+
+1. 这个 API 在 4xx 时**仍然返回标准信封**，所以不要按状态码提前短路，
+   先把信封解出来拿 `action`。
+2. 分类要按 `action` 而不是按错误文本。
+
+### 其他必带参数
+
+缺任何一个公共参数也会得到 `ParameterInvalid`（HTTP 200），
+message 里的字段名会指出缺的是哪个。因此 `ParameterInvalid` 不完全等于
+「签名无效」，但它同样意味着「我们的请求构造与服务端不一致」——
+处置方式一样（改代码），所以探针把两者归为一类。
 
 ## 4. `libsecurity.so`：签名原料的一半
 
