@@ -100,7 +100,7 @@ type ActressSub struct {
 func Default() *Config {
 	return &Config{
 		Listen:   "127.0.0.1:8080",
-		Provider: ProviderStub,
+		Provider: ProviderAppAPI,
 		Feed: FeedConfig{
 			Title:       "JavDB RSS",
 			Description: "由 JavDB 官方 App 私有 API 生成的订阅源",
@@ -119,13 +119,10 @@ func Default() *Config {
 
 // Provider 取值。
 const (
-	// ProviderStub 使用固定数据，用于在没有真实数据源时跑通链路。
-	ProviderStub = "stub"
-	// ProviderAppAPI 使用真实的 App 私有 API。
-	//
-	// 尚未实现 —— 装配时会返回明确的错误而不是静默降级，
-	// 因为「配了真实源却拿到假数据」是最难发现的一类故障。
+	// ProviderAppAPI 使用真实的 JavDB App 私有 API。
 	ProviderAppAPI = "appapi"
+	// ProviderStub 使用固定数据，不访问网络，用于跑通链路或离线调试。
+	ProviderStub = "stub"
 )
 
 // Load 读取并校验配置文件。path 为空时返回纯默认配置。
@@ -153,9 +150,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("listen 不能为空")
 	}
 	switch c.Provider {
-	case ProviderStub:
-	case ProviderAppAPI:
-		return fmt.Errorf("provider: %s 尚未实现（见 ticket 02 / ticket 06）", ProviderAppAPI)
+	case ProviderStub, ProviderAppAPI:
 	default:
 		return fmt.Errorf("未知的 provider: %q", c.Provider)
 	}

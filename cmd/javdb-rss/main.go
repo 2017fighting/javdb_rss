@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -56,7 +57,7 @@ func run() error {
 	}
 	cfg := holder.Current()
 
-	src, err := buildSource(cfg)
+	src, err := buildSource(cfg, holder)
 	if err != nil {
 		return err
 	}
@@ -118,22 +119,71 @@ func run() error {
 
 // buildSource 根据配置装配数据源。
 //
-// provider: appapi 目前**直接报错**而不是静默退回假数据：
-// 「配了真实源却拿到固定数据」是那种能瞒很久的故障，宁可启动失败。
-func buildSource(cfg *config.Config) (catalog.Source, error) {
+// 返回的是「每次调用都重读配置」的包装，而不是一个固化了 host/token 的客户端 ——
+// 这样 SIGHUP 改了 host / lang / device_uuid / token 能立即生效。
+func buildSource(cfg *config.Config, holder *config.Holder) (catalog.Source, error) {
 	switch cfg.Provider {
 	case config.ProviderStub:
 		slog.Default().Warn("正在使用固定数据源 stub —— 不会访问任何网络，仅用于跑通链路")
 		return &stub.Source{}, nil
 	case config.ProviderAppAPI:
-		// 装配真实数据源需要两件还没定的东西：
-		//   - 签名实现（ticket 02：直接依赖 javdb-cli 还是把算法拷进本仓库）
-		//   - 番号 → 作品 的解析规则（ticket 06）
-		return nil, fmt.Errorf("provider=appapi 尚未实现，见 ticket 02 与 ticket 06；当前请使用 provider=stub")
+		return &appapiSource{holder: holder}, nil
 	default:
 		return nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
 	}
 }
+
+// appapiSource 把真正的 App API 客户端适配成 catalog.Source。
+//
+// 它实现了 catalog.Source 但**不持有任何状态** —— 每次请求都按当前配置
+// 构造一个客户端。相比「启动时建好一个长命客户端」，代价是每次请求多建几个
+// 小对象（含一个 http.Client）；换来的是配置热重载对所有字段都生效，
+// 而且不会出现「改了 token 却还在用旧的」这类难查的问题。
+//
+// 它也需要一个 config.Holder，因此与 main 里其他装配保持一致。
+type appapiSource struct {
+	holder *config.Holder
+}
+
+func (s *appapiSource) client() (*appapi.Client, error) {
+	ac := s.holder.Current().AppAPI
+
+	identity := appapi.DefaultIdentity()
+	if ac.DeviceUUID != "" {
+		identity.DeviceUUID = ac.DeviceUUID
+	}
+
+	token, err := config.LoadToken(ac.TokenFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return &appapi.Client{
+		Host:     ac.Host,
+		Token:    token,
+		Identity: identity,
+		Signer:   appapi.NewSigner(),
+		Lang:     ac.Lang,
+	}, nil
+}
+
+func (s *appapiSource) Code(ctx context.Context, code string) ([]catalog.Work, error) {
+	c, err := s.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.Code(ctx, code)
+}
+
+func (s *appapiSource) Actress(ctx context.Context, id string, params url.Values) ([]catalog.Work, error) {
+	c, err := s.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.Actress(ctx, id, params)
+}
+
+var _ catalog.Source = (*appapiSource)(nil)
 
 // upstreamChecker 在每次检查时**重新读取配置**构造客户端。
 //

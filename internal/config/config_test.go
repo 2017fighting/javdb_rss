@@ -17,8 +17,8 @@ func TestExampleConfigIsValid(t *testing.T) {
 	if cfg.Listen != "127.0.0.1:8080" {
 		t.Errorf("listen = %q", cfg.Listen)
 	}
-	if cfg.Provider != ProviderStub {
-		t.Errorf("示例配置的 provider = %q，应当是当前唯一可用的 stub", cfg.Provider)
+	if cfg.Provider != ProviderAppAPI {
+		t.Errorf("示例配置的 provider = %q，应当是 appapi（真实数据源已可用）", cfg.Provider)
 	}
 }
 
@@ -95,11 +95,21 @@ func TestUnknownKeyRejected(t *testing.T) {
 	}
 }
 
-// TestAppAPIProviderRejectedForNow 配了尚未实现的真实数据源要直接失败，
-// 而不是静默退回假数据 —— 否则「配了真源却拿到固定数据」能瞒很久。
-func TestAppAPIProviderRejectedForNow(t *testing.T) {
-	if _, err := Load(writeConfig(t, "provider: appapi\n")); err == nil {
-		t.Fatal("provider=appapi 目前应当加载失败")
+// TestAppAPIProviderAccepted 确认真实数据源现在能配了（ticket 06 打通后）。
+func TestAppAPIProviderAccepted(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "provider: appapi\n"))
+	if err != nil {
+		t.Fatalf("provider=appapi 应当可用: %v", err)
+	}
+	if cfg.Provider != ProviderAppAPI {
+		t.Errorf("provider = %q", cfg.Provider)
+	}
+}
+
+// TestStubProviderStillAccepted 确认离线调试通道没被拆掉。
+func TestStubProviderStillAccepted(t *testing.T) {
+	if _, err := Load(writeConfig(t, "provider: stub\n")); err != nil {
+		t.Errorf("provider=stub 应当仍可用: %v", err)
 	}
 }
 

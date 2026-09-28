@@ -4,10 +4,10 @@
 > 原以为「必须先逆向 APK」是整条路的瓶颈，结果发现已有 MIT 许可的 Go 先例
 > （[`FlanChanXwO/javdb-cli`](https://github.com/FlanChanXwO/javdb-cli)）把 `jdsignature`
 > 完整实现，且已实测对我们目标版本的服务端有效。
-> 9 张票中 4 张被降级或部分解掉，**5 张已关闭**（`01` `02` `03` `04` `08`），
-> 并新开出 `10`。
-> **代码已存在且签名已打通**：`cmd/` + `internal/` 下是一个能跑、有离线测试的 Go 服务。
-> **当前前线：`05` `06` `10`。**
+> **8 张已关闭**（`01` `02` `03` `04` `06` `08`），并新开出 `10`。
+> **需求 1/2/3 已经真实可用**（实测：`/rss/code/KV-328.xml` 1.2s、
+> `/rss/actress/EvkJ.xml` 6.1s、字幕优先与 `since` 均已验证）。
+> **当前前线：`05` `10`**（两条都只关系需求 4）。
 
 ## Destination
 
@@ -40,18 +40,22 @@
 - 本 effort **允许把执行纳入地图**（用户明确要求做到能跑）——但 ticket 仍以决策为主
 
 **已确认的服务端事实（不要重新试探，直接用）**
+
+> 完整实测契约（字段、样本、分页、耗时）在
+> [`notes/api-recon.md`](notes/api-recon.md) §10 —— **接入前必读**。
+
 - `jdsignature` 是 **HTTP 请求头**，值为 `"{ts}.{suffix}.{md5(ts + prefix)}"`，
   Prefix/Suffix 是硬编码常量。**已实测对 1.9.35 服务端有效。**
-  实现已在 `internal/appapi/signature.go`（零依赖，拷贝自 javdb-cli / MIT）。
-- 必带 8 个公共 query 参数：`app_channel app_version app_version_number platform
-  system_version device_model device_name device_uuid`，缺一即 `ParameterInvalid`。
-- 中文字幕：电影级 `has_cnsub`，**磁链级 `cnsub`** —— 不需要解析文件名。
-- 磁链自带 `hash`（infohash），可直接做 guid。
-- 女优作品列表 = `GET /api/v1/movies/tags?filter_by&filter_by_tags&sort_by&order_by&page&limit`。
-- ⚠️ **签名有两种失败形态，别只处理一种**：
-  `签名缺失 → HTTP 200 + action=ParameterInvalid`；
-  `签名无效 → HTTP 400 + action=InvalidSignature`。
-  这个 API **在 4xx 时仍返回标准信封**，所以不要按状态码提前短路。
+- 必带 8 个公共 query 参数，缺一即 `ParameterInvalid`。
+- 中文字幕：电影级 `has_cnsub`，**磁链级 `cnsub`**。
+  只有 `/api/v1/movies/{id}/magnets` 给磁链级 `cnsub`，`/search_magnet` 不给。
+- ⚠️ **番号：`/api/v2/search` 是模糊搜索**。`q=KV-328` 返回 8 部不同番号的作品。
+  必须按 `number` 精确比对，**绝不能取 `movies[0]`**。
+- ⚠️ **女优：`filter_by` 是复合掩码** `{zone}:{letter}:{id}[:{main}:]:`，
+  如 `0:a:EvkJ`。写成 `a` 或 `apmc` 会**静默返回全站最新作品**。
+- **`limit` 上限 50**；`page` 分页无重叠，按 `release_date` 倒序。
+- ⚠️ **签名有两种失败形态**：缺失 → HTTP 200 + `ParameterInvalid`；
+  无效 → HTTP 400 + `InvalidSignature`。该 API **在 4xx 时仍返回标准信封**。
 
 **代码骨架已存在（ticket 03），改代码前先看它**
 
@@ -67,8 +71,8 @@ internal/stub/        固定数据的假数据源
 
 - **唯一外部边界是 `catalog.Source`**（`Code` / `Actress` 两个方法）。
   加缓存/后台刷新就在这层包装饰器，上层一行不改。
-- 当前 `provider: stub` 是唯一可用值；配 `appapi` **直接启动失败**（不静默退回假数据）。
-  接入真实数据源只差 ticket 06（番号 → 作品的解析规则）与在 `buildSource` 里装配。
+- 当前 **`provider: appapi` 是默认值且已可用**（实测打通）；`stub` 保留为离线调试通道。
+  数据源在每次请求时重建客户端，因此 host / token / lang / device_uuid 都能热重载。
 - **健康检查三端点**（ticket 02）：`/healthz`（存活，不掺上游）/
   `/readyz`（就绪）`/healthz/upstream`（机读详情，含 `signature_broken`）。
   改这块前先读 README 的「健康检查（k8s）」一节 —— 端点职责不能混。
@@ -121,6 +125,14 @@ internal/stub/        固定数据的假数据源
   **探针先做了一次故意签坏的实测，拓到了一个真 bug**：签名有 `InvalidSignature`(400)
   与 `ParameterInvalid`(200) 两种形态，而当时 `GetJSON` 按状态码提前短路导致
   `action` 丢失 —— 告警在最该响的时候是哑的。已修并写进 `notes/api-recon.md`。
+- [数据接口契约测绘](issues/06-api-contract-survey.md)
+  — **真实数据源已接入，需求 1/2/3 端到端可用**。两个高危陷阱已查出并用测试钉死：
+  ① `/api/v2/search` 是**模糊搜索**（`q=KV-328` 返回 8 部不同番号），
+  取 `movies[0]` 会静默发错片 → 改为按 `number` 精确比对，找不到报错；
+  ② `filter_by` 是**复合掩码** `{zone}:{letter}:{id}[:{main}:]:`，
+  写成 `a` 会静默返回**全站最新作品**而不是该女优的。
+  另确定 `limit` 上限 **50**、feed 必须走 `/movies/{id}/magnets`（只有它给 `cnsub`），
+  并量出成本：番号 feed ~1.2s、女优 feed（50 部）**~6.1s**（→ ticket 09 输入）。
 
 ## Not yet specified
 

@@ -160,3 +160,150 @@ T _Z15byteToHexStringPhiPc
 ## 9. 结论
 
 RSS 服务本身、磁链解析、qBittorrent 对接都不难。**整条路只有 `jdsignature` 一个未知数。**排除它之后，剩下的都是常规工程。
+
+---
+
+# 10. 实测契约附录（2026-09-28，ticket 06）
+
+用本服务自己的签名实现打的真实请求，全部记录在此。**每个 session 接手前读这一节。**
+
+## 10.1 番号解析：`/api/v2/search` 是**模糊搜索**
+
+```
+GET /api/v2/search?q=KV-328
+→ data.movies 有 8 条，number 分别是：
+  KV-328  KV-323  KV-322  KV-326  KV-318  KV-324  KV-329  KV-327
+```
+
+**这是一个前缀/模糊搜索，不是精确查询。** 后果：
+
+- 按位置取 `movies[0]` 在多数时候**看起来是对的**（目标常在第一位），
+  但在番号尾部字符不同的情况下会静默命中错误作品 —— 不报错，只是发错片。
+- 必须按 `number` 字段**精确比对**（忽略大小写与首尾空白），找不到就报错，
+  **绝不退回近似结果**。
+
+实测对照：
+
+| 查询 | 命中数 | 首条 | 精确匹配位置 |
+|---|---|---|---|
+| KV-328 | 8 | KV-328 | 0 |
+| REBDB-1047 | 10 | REBDB-1047 | 0 |
+| SSIS-001 | 10 | SSIS-001 | 0 |
+| KV-329 | 8 | KV-329 | 0 |
+| ABC-123 | 0 | — | 无 |
+
+`data` 只有两个键：`movies`、`current_page`。
+
+**作品精简形态**（`/api/v2/search`、`/api/v1/movies/tags`、`/api/v1/movies/latest` 共用）：
+
+```
+id, number, title, origin_title, thumb_url, cover_url, duration,
+magnets_count, can_play, play_subtitle, has_preview_video,
+has_cnsub, has_preview_images, release_date, new_magnets, first_magnets, preview_images[]
+```
+
+## 10.2 女优作品列表：`filter_by` 是**复合掩码**
+
+早期误以为 `filter_by` 是 `a` / `apmc` 这种简单字母组合。
+**错** —— 那样请求不带实体 id，服务端返回的是**全站最新作品**（实测拿到 `CD-26008`）而不是该女优的作品，**而且不报错**。
+
+真实格式（实测确认，javdb-cli 的 `masks.go` 也一致）：
+
+```
+{zone}:{letter}:{id}[:{main}:]:
+```
+
+- `zone`：censored=0 uncensored=1 western=2 fc2=3
+- `letter`：actor=a series=s maker=m director=d code=c list=l
+- `id`：实体 id（如女优 `EvkJ`）
+- `main`（可选）：主属性逗号列表
+
+可用样例：
+
+```
+filter_by=0:a:EvkJ              该女优全部作品
+filter_by=0:a:EvkJ:apmc::       带主属性筛选
+```
+
+主属性字母表：`p`=Playable `m`=Downloadable `c`=Subtitles `s`=Individual `i` `v`。
+
+端点 `GET /api/v1/movies/tags`，参数 `filter_by`、`filter_by_tags`、`sort_by`（默认 `release`）、
+`order_by`（默认 `desc`）、`page`、`limit`。`data` 含 `movies`、`has_collected`、`current_page`。
+
+## 10.3 ⭐ 分页上限：`limit` 最大 **50**
+
+```
+limit=20  -> 20 条
+limit=50  -> 50 条
+limit=100 -> 50 条   ← 被截断
+limit=200 -> 50 条
+limit=500 -> 50 条
+```
+
+分页实测（EvkJ，按 `release_date` 倒序）：
+
+```
+page=1 -> 20 条, SNOS-449 (2026-10-27) .. SNOS-233 (2026-05-26)
+page=2 -> 20 条, OFJE-629 (2026-05-12) .. OAE-293 (2025-12-24)
+page=3 -> 20 条, OFJE-590 (2025-12-23) .. OFJE-609 (2025-07-29)
+（三页之间无重复）
+```
+
+> **注意**：EvkJ 的 `videos_count` 是 229，但作品列表里出现了 `OFJE-*` 合集、
+> 且按 release 倒序时第一页顶部有无中文名的条目。说明这个列表**不纯是单体作品**，
+> 且 `videos_count` 与列表条数的关系不直接。
+
+## 10.4 磁链列表
+
+两个端点给**不同的字段集**，用途不同：
+
+**`/api/v1/movies/{id}/magnets`** ← feed 用它（有 `cnsub`）
+
+```json
+{"magnets":[{"name":"KV-328","hash":"0e8f4789...","size":3110,
+  "cnsub":false,"hd":true,"files_count":2,
+  "created_at":"09/27/2026","pikpak_url":"https://keepshare.org/..."}]}
+```
+
+**`/api/v1/search_magnet?q=`** ← **没有 `cnsub`/`hd`**，且 `created_at` 是 ISO
+
+```json
+{"magnets":[{"id":14460812510,"title":"KV-328","hash":"0e8f4789...",
+  "size":3110,"files_count":2,"created_at":"2026-09-27T23:00:19.000Z"}]}
+```
+
+**结论：feed 必须走 `/movies/{id}/magnets`**，因为只有它给磁链级的 `cnsub`。
+`search_magnet` 的 `created_at` 是 ISO 格式（与另一种的 `09/27/2026` 不同），
+这解释了为什么 `feed.parseCreatedAt` 要接受两种格式。
+
+**一次调用返回全部磁链**（样本 1 条），未见分页。
+
+## 10.5 `/api/v4/movies/{id}` 详情
+
+比列表形态丰富得多：`number_letter`、`summary`、`score`、`reviews_count`、
+`maker_id/name`、`director_id/name`、`series_id/name`、`tags[]`、`actors[]`、
+`relative_movies[]`、`actor_movies[]`、`play_sources[]`。
+
+外层还有 `share_info`（形如 `"KV-328\nhttps://javdb.com/v/82J0Md"`）、`show_vip_banner`。
+
+**注意 `score` 是字符串**（`"4.27"`），不是数字。
+
+## 10.6 成本模型（ticket 09 的输入）
+
+一次女优 feed 的请求数：
+
+```
+1 次 /api/v1/movies/tags（一页最多 50 部）
++ 每部有磁链的作品 1 次 /api/v1/movies/{id}/magnets
+```
+
+实测 EvkJ 第一页 50 部 → 约 **1 + N 次请求**（N 为 magnets_count>0 的条数）。
+端到端实测耗时：
+
+| 请求 | 耗时 |
+|---|---|
+| `/rss/code/KV-328.xml` | ~1.2s |
+| `/rss/actress/EvkJ.xml`（第一页 50 部） | **~6.1s** |
+
+**这就是 ticket 09 要面对的数字**：qBittorrent 每轮询一次就是 6 秒的上游压力，
+而且并发多 feed 会叠加。缓存或后台刷新很可能有必要。

@@ -14,10 +14,9 @@ listen: "127.0.0.1:8080"
 
 # 数据源实现。
 #
-#   stub   —— 固定样例数据，不访问网络。目前唯一可用值，用于跑通链路。
-#   appapi —— 真实的 JavDB App 私有 API。尚未实现（见 ticket 02 / ticket 06）；
-#             配置成它会直接启动失败，而不是静默退回假数据。
-provider: "stub"
+#   appapi —— 真实的 JavDB App 私有 API。
+#   stub   —— 固定样例数据，不访问网络，用于跑通链路或离线调试。
+provider: "appapi"
 
 feed:
   title: "JavDB RSS"
