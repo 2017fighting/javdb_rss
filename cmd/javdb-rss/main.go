@@ -27,6 +27,7 @@ import (
 	"github.com/2017fighting/javdb_rss/internal/dedupe"
 	"github.com/2017fighting/javdb_rss/internal/health"
 	"github.com/2017fighting/javdb_rss/internal/httpapi"
+	"github.com/2017fighting/javdb_rss/internal/pin"
 	"github.com/2017fighting/javdb_rss/internal/stub"
 )
 
@@ -66,7 +67,18 @@ func run() error {
 	}
 	cfg := holder.Current()
 
-	src, err := buildSource(cfg, holder)
+	// 打开 pin 表。这是本服务**唯一**的持久状态（ticket 08）——
+	// 它必须在装配任何东西之前就绪，因为「打不开」是拒绝启动的理由，
+	// 不是降级运行的理由：失效的 pin 会静默改变已下发的 guid。
+	//
+	// Open 会取得独占锁（flock）：两个写者会各钉一套、同一作品两个 guid。
+	pinStore, err := pin.Open(holder.PinPath())
+	if err != nil {
+		return fmt.Errorf("打开 pin 状态文件: %w", err)
+	}
+	defer func() { _ = pinStore.Close() }()
+
+	src, err := buildSource(cfg, holder, pinStore)
 	if err != nil {
 		return err
 	}
@@ -108,6 +120,19 @@ func run() error {
 				continue
 			}
 			log.Info("配置已重载", "path", holder.Path(), "listen", holder.Current().Listen)
+
+			// 顺便重读 pin 表。运维手工删掉一条 pin（「这个作品想重选」）
+			// 是个合理操作，不重读就只能重启进程。
+			// 失败时保留旧表（与配置重载同一套语义）。
+			//
+			// ⚠️ 不跟随 pin_file 的变更：pin 表的**位置**不能热切换，
+			// 因为那需要在两个文件之间迁移状态（而两边都可能被另一个实例占着）。
+			// 改了 pin_file 请重启。
+			if err := pinStore.Reload(); err != nil {
+				log.Error("重读 pin 表失败，继续使用旧表", "path", pinStore.Path(), "err", err)
+			} else {
+				log.Info("pin 表已重载", "path", pinStore.Path(), "条数", pinStore.Len())
+			}
 		}
 	}()
 
@@ -138,22 +163,48 @@ func run() error {
 //
 // 返回的是「每次调用都重读配置」的包装，而不是一个固化了 host/token 的客户端 ——
 // 这样 SIGHUP 改了 host / lang / device_uuid / token 能立即生效。
-func buildSource(cfg *config.Config, holder *config.Holder) (catalog.Source, error) {
+func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store) (catalog.Source, error) {
 	switch cfg.Provider {
 	case config.ProviderStub:
 		slog.Default().Warn("正在使用固定数据源 stub —— 不会访问任何网络，仅用于跑通链路")
 		return &stub.Source{}, nil
 	case config.ProviderAppAPI:
-		// 包一层 dedupe：合并并发的相同请求，只打一次上游。
-		// 它不存任何东西（不是缓存），因此不返回陈旧数据、重启无影响。
+		// ⚠️ 装配顺序是**接线的正确性**，不是风格问题。
+		//
+		//   dedupe.New(pin.New(client))   ✅ 合并成一次，那一次里改完再交给所有调用者（只读）
+		//   pin.New(dedupe.New(client))   ❌ 并发原地改写同一个切片 → 数据竞争
+		//
+		// 原因：dedupe 把**同一个切片**返回给共享同一次上游调用的所有调用者
+		// （见 internal/dedupe/source.go：「返回值在调用者之间共享，因此调用方不得修改」）。
+		// 而 pin 会原地改写 works[i].Magnets —— 把它放在外面就会多个 goroutine
+		// 同时改同一个切片。
 		//
 		// 必须传 log —— tryRelogin 会用它打 WARN。漏传过一次：
 		// s.log 为 nil，自动续期一触发就 panic。而当时所有测试都显式传了 log，
 		// **从没覆盖真实的装配路径**。
-		return dedupe.New(&appapiSource{
+		client := &appapiSource{
 			holder: holder,
 			log:    slog.Default(),
-		}), nil
+		}
+		// st == nil 只会出现在还没建好 store 的调用点，那时退化为不钉住。
+		if st == nil {
+			return dedupe.New(client), nil
+		}
+
+		// 内层：把选中的磁链钉住（ticket 08）。
+		//
+		// 落盘失败是**致命**的：OnFatal 让进程退出，而不是带着
+		//「内存已改、磁盘没改」的状态继续服务。退出后 systemd/k8s/compose
+		// 会把它重启，失败因此是可见的（CrashLoopBackOff）。
+		pinned := pin.New(client, st, nil)
+		pinned.OnFatal = func(err error) {
+			slog.Default().Error("pin 落盘失败，进程即将退出（交由编排器重启）", "err", err)
+			os.Exit(1)
+		}
+		// 外层：合并并发的相同请求，只打一次上游。
+		//
+		// 它不存任何东西（不是缓存），因此不返回陈旧数据、重启无影响。
+		return dedupe.New(pinned), nil
 	default:
 		return nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
 	}

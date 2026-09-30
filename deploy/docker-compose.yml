@@ -1,7 +1,7 @@
 # docker compose 部署示例。
 #
 # 用法：
-#   mkdir -p data token
+#   mkdir -p data token state
 #   cp deploy/config.docker.yaml data/config.yaml
 #   # 编辑 data/config.yaml，特别是 base_url
 #   docker compose up -d
@@ -35,6 +35,17 @@ services:
       # token：只读挂载。目录可不存在 —— 需求 1/2/3 不需要 token，
       # 文件缺失时服务按匿名访问启动。
       - ./token:/token:ro
+      # ⭐ pin 状态：**可写且持久**。这是本服务唯一的持久状态。
+      #
+      # 丢掉它会发生什么：服务按规则重新选磁链 → 约 1/4 的作品 guid 变化
+      # → qBittorrent 各自再下一份，且没有任何告警（见 ticket 08）。
+      #
+      # 因此它是宿主机的**普通目录**（./state），不是匿名卷 ——
+      # 删掉容器、重建、升级都不会丢；它也便于你直接查看/备份那个
+      # pin.json（它就是一个可读的 JSON 文件）。
+      #
+      # 准备：mkdir -p state
+      - ./state:/state
 
     # 让容器内的进程能收到 docker kill -s HUP（配置重载）。
     # 用 exec 形式的 ENTRYPOINT 时不需要 init，但保留 init 更稳妥，

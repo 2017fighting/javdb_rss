@@ -88,6 +88,19 @@ type AppAPIConfig struct {
 	// 与 provider 是否已实现无关 —— 因此可以在 provider=stub 时就打开，
 	// 先拿到早期告警能力。
 	ProbeInterval time.Duration `yaml:"probe_interval"`
+
+	// PinFile 是 pin 状态文件（「每个作品已选中的磁链」）的路径。
+	//
+	// 这是本服务**唯一**的持久状态，也是「无状态」的一处有意例外：
+	// 上游的磁链顺序不可重放，丢 pin 就是丢 guid（qBittorrent 会重下）。
+	// 设计见 ticket 08。
+	//
+	// 留空时默认放在**配置文件旁边**的 pin.json（与 token_file 同一套规则）。
+	//
+	// ⚠️ 它**无法关闭**：留空是「用默认路径」，不是「禁用钉住」。
+	// 默认关闭会让升级后静默退回有抖动的纯函数 —— 而那正是要消除的失败。
+	// 文件不可写时本服务拒绝启动（fail fast）。
+	PinFile string `yaml:"pin_file"`
 }
 
 // FeedsConfig 是订阅白名单。
@@ -261,13 +274,34 @@ func (h *Holder) Path() string { return h.path }
 //
 // 因此 login 命令与服务端**必须都走这个方法**，否则两边会指向不同的文件。
 func (h *Holder) TokenPath() string {
-	if p := strings.TrimSpace(h.Current().AppAPI.TokenFile); p != "" {
+	return h.resolveAlongside(h.Current().AppAPI.TokenFile, "token.json")
+}
+
+// PinPath 返回 pin 状态文件的**实际**路径。
+//
+// app_api.pin_file 留空时，默认放在**配置文件旁边**的 pin.json ——
+// 与 TokenPath 完全同一套规则（共用 resolveAlongside，因此两者不会走偏）。
+//
+// 与 token 的区别：pin 是**必需**的（不可关闭）。裸二进制因此要求配置目录可写，
+// 而容器/k8s/systemd 会在部署清单里把它指到专门的可写卷。
+func (h *Holder) PinPath() string {
+	return h.resolveAlongside(h.Current().AppAPI.PinFile, "pin.json")
+}
+
+// resolveAlongside 实现「配置在哪儿，它的附属文件就在哪儿」这条规则。
+//
+// token.json 与 pin.json 都按它落地。抽出来是因为这两份持久状态**必须**
+// 用同一套解析规则：它们各写一遍的话，任何一边改了默认值都会让「写进去的
+// 和服务读到的不是同一个文件」—— 那个 bug 在 token 上真实发生过一次
+// （见 TokenPath 的注释），而 pin 的后果是每个请求都静默换 guid。
+func (h *Holder) resolveAlongside(explicit, fallback string) string {
+	if p := strings.TrimSpace(explicit); p != "" {
 		return p
 	}
 	if h.path == "" {
-		return "token.json"
+		return fallback
 	}
-	return filepath.Join(filepath.Dir(h.path), "token.json")
+	return filepath.Join(filepath.Dir(h.path), fallback)
 }
 
 // Reload 重新读取配置文件。失败时当前配置保持不变。

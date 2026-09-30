@@ -35,6 +35,12 @@ libflutter.so
 # token 文件（login 写入；token_file 留空时默认就在配置文件旁边）
 token.json
 token.txt
+# pin 状态文件：本服务唯一持久状态（每个作品已选中的磁链）。
+# pin_file 留空时默认在配置文件旁边，因此裸二进制跑一次就会产生它。
+# 它含你的订阅偏好，且**丢掉会让 guid 抖动**，不该被误提交或误删。
+pin.json
+pin.json.lock
+pin.json.tmp
 # 本地配置文件：README 让用户 cp config.example.yaml config.yaml，
 # 而它可能带上 token 路径或（若启用自动续期）凭据
 config.yaml

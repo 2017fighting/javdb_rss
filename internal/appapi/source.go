@@ -348,6 +348,7 @@ func (c *Client) hydrate(ctx context.Context, movies []movieSlim) ([]catalog.Wor
 	var pending []int
 	for i, m := range movies {
 		works[i] = catalog.Work{
+			ID:          m.ID,
 			Number:      m.Number,
 			Title:       m.Title,
 			ReleaseDate: m.ReleaseDate,

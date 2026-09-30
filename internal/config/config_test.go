@@ -393,6 +393,43 @@ func TestTokenPathHonoursExplicitValue(t *testing.T) {
 	}
 }
 
+// TestPinPathDefaultsNextToConfig 确认 pin_file 留空时的落点，与 token 同一套规则。
+//
+// 「配置在哪儿、它的状态就在哪儿」——两份持久状态用同一个规则，
+// 运维只需要记一件事。
+func TestPinPathDefaultsNextToConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("provider: stub\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "pin.json")
+	if got := h.PinPath(); got != want {
+		t.Errorf("PinPath() = %q, want %q", got, want)
+	}
+}
+
+// TestPinPathHonoursExplicitValue 确认显式配了就照用（容器/k8s/systemd 靠它指向可写卷）。
+func TestPinPathHonoursExplicitValue(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := "provider: stub\napp_api:\n  pin_file: \"/state/pin.json\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.PinPath(); got != "/state/pin.json" {
+		t.Errorf("PinPath() = %q", got)
+	}
+}
+
 // TestSaveTokenRejectsEmptyPath 确认空路径报错而不是去写一个叫 ".tmp" 的文件。
 //
 // 上一层的默认值应该保证不会有空路径，但这里再挡一道 —— 静默写错位置

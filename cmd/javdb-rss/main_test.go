@@ -18,6 +18,7 @@ import (
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"github.com/2017fighting/javdb_rss/internal/config"
+	"github.com/2017fighting/javdb_rss/internal/pin"
 )
 
 // oldToken 是初始配置文件里的 token。
@@ -98,11 +99,16 @@ func (f *fakeAPI) handler() http.Handler {
 
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/magnets"):
-			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"magnets":[{"name":"X","hash":"abc","size":1,"cnsub":false,"hd":true,"files_count":1,"created_at":"09/01/2026"}]}}`))
+			// **两条**候选（一中文字幕、一普通）—— 这样「选哪条」才真的有效，
+			// 而 pin 也才有东西可钉。只给一条的话，选与不选结果一样，
+			// 会把 pin 层的测试变成空转。
+			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"magnets":[
+				{"name":"X","hash":"abc","size":1,"cnsub":false,"hd":true,"files_count":1,"created_at":"09/01/2026"},
+				{"name":"X","hash":"def","size":2,"cnsub":true,"hd":true,"files_count":2,"created_at":"09/02/2026"}]}}`))
 		case strings.HasPrefix(r.URL.Path, "/api/v2/search"):
 			// number 必须与查询的番号**精确匹配** ——
 			// resolveExact 的正确行为就是「匹配不上就报错」。
-			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"movies":[{"id":"m1","number":"KV-328"}]}}`))
+			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"movies":[{"id":"m1","number":"KV-328","magnets_count":1}]}}`))
 		default:
 			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{}}`))
 		}
@@ -468,7 +474,12 @@ func TestBuildSourceWiringIsUsable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := buildSource(holder.Current(), holder)
+	st, err := pin.Open(holder.PinPath())
+	if err != nil {
+		t.Fatalf("打开 pin store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	src, err := buildSource(holder.Current(), holder, st)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}
@@ -480,5 +491,144 @@ func TestBuildSourceWiringIsUsable(t *testing.T) {
 	}
 	if fake.logins.Load() == 0 {
 		t.Fatal("应当触发过一次自动续期（否则这条测试没覆盖到装配缺陷）")
+	}
+}
+
+// TestBuildSourcePinsSelections 是**装配路径**上的端到端验收（ticket 08）。
+//
+// 前一条测试只证明「装配出来的 source 能用」。它会通过，即使 pin 那一层
+// 根本没被接进去 —— 因为 fakeAPI 的 magnets 只有一条，选与不选都一样。
+//
+// 这条让上游返回两条候选，然后**直接检查 pin 文件**：
+// 装配正确时里面应当有一条记录。这正是「走真实装配代码而不是手搓结构体」
+// 的教训（见上一条测试的注释）在 pin 上的复现。
+func TestBuildSourcePinsSelections(t *testing.T) {
+	fake := newFakeAPI()
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token.json")
+	if err := config.SaveToken(tokenPath, oldToken); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf("provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  probe_interval: \"0\"\n",
+		srv.URL, tokenPath)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvToken, "")
+	t.Setenv(config.EnvUsername, "alice")
+	t.Setenv(config.EnvPassword, "s3cret")
+
+	holder, err := config.NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := pin.Open(holder.PinPath())
+	if err != nil {
+		t.Fatalf("打开 pin store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	src, err := buildSource(holder.Current(), holder, st)
+	if err != nil {
+		t.Fatalf("buildSource: %v", err)
+	}
+
+	if _, err := src.Code(context.Background(), "KV-328"); err != nil {
+		t.Fatalf("Code: %v", err)
+	}
+
+	// 直接读文件，而不是只读内存 —— **落盘**才是本票的交付物。
+	raw, err := os.ReadFile(holder.PinPath())
+	if err != nil {
+		t.Fatalf("pin 文件应当已被写入: %v", err)
+	}
+	rec, ok := st.Get("m1")
+	if !ok {
+		t.Fatalf("装配路径应当把 m1 钉住，实际 pin 文件: %s", raw)
+	}
+	if rec.Infohash != "def" {
+		t.Errorf("pin 的 infohash = %q, want def（中文字幕那条）", rec.Infohash)
+	}
+	if !strings.Contains(string(raw), "\"m1\"") {
+		t.Errorf("磁盘上的 pin 文件应当包含 m1: %s", raw)
+	}
+}
+
+// TestBuildSourceHandlesConcurrentIdenticalRequests 钉住一件很容易搞错的事：
+// **装配顺序**。
+//
+// dedupe 会把**同一个切片**返回给所有共享同一次上游调用的调用者（见 dedupe 的
+// 注释：返回值在调用者之间共享，调用方不得修改）。而 pin 会原地改写
+// `works[i].Magnets`。
+//
+// 因此 pin 必须在 dedupe **里面**：
+//
+//	dedupe.New(pin.New(client))   ✅ 合并成一次，那一次里改完再交给所有调用者（只读）
+//	pin.New(dedupe.New(client))   ❌ 多个调用者拿到同一个切片并**并发原地改写** → 数据竞争
+//
+// 这条测试用 -race 跑才有意义（CI 的 make race 会跑到）。
+func TestBuildSourceHandlesConcurrentIdenticalRequests(t *testing.T) {
+	fake := newFakeAPI()
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token.json")
+	if err := config.SaveToken(tokenPath, oldToken); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf("provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  probe_interval: \"0\"\n",
+		srv.URL, tokenPath)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvToken, "")
+	t.Setenv(config.EnvUsername, "alice")
+	t.Setenv(config.EnvPassword, "s3cret")
+
+	holder, err := config.NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := pin.Open(holder.PinPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	src, err := buildSource(holder.Current(), holder, st)
+	if err != nil {
+		t.Fatalf("buildSource: %v", err)
+	}
+
+	const n = 16
+	var wg sync.WaitGroup
+	guids := make([]string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			works, err := src.Code(context.Background(), "KV-328")
+			if err != nil {
+				return
+			}
+			// 读一下被改写过的切片 —— 与别的 goroutine 的改写撞在一起就是竞争。
+			if len(works) > 0 && len(works[0].Magnets) > 0 {
+				guids[i] = works[0].Magnets[0].Infohash
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// 所有调用者都应当拿到同一个被钉住的 infohash。
+	for i, g := range guids {
+		if g != "" && g != "def" {
+			t.Errorf("goroutine %d 拿到 %q, want def", i, g)
+		}
 	}
 }

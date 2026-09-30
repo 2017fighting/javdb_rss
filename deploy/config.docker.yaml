@@ -34,6 +34,19 @@ app_api:
   # 容器内路径 —— 由 compose 把宿主机的 token 文件挂到 /token/token.json。
   # 留空或文件不存在 = 匿名访问，这对需求 1/2/3 完全够用。
   token_file: "/token/token.json"
+  # pin 状态文件：「每个作品已选中的磁链」的持久表。
+  #
+  # 这是本服务**唯一**的持久状态，也是「无状态」的一处有意例外。
+  # 丢掉它会怎样：退回按规则重新选磁链 → 约 1/4 的作品 guid 变化 →
+  # qBittorrent 各自再下一份，而没有任何告警。
+  #
+  # 因此它**必须放在可写的持久位置**。容器里由 compose 把宿主机目录挂到
+  # /state（见 deploy/docker-compose.yml）。
+  #
+  # 留空时默认在**配置文件旁边**的 pin.json（与 token_file 同一套规则）。
+  # 注意它**无法关闭** —— 留空是「用默认路径」，不是「禁用钉住」。
+  # 文件不可写时本服务拒绝启动（宁可看见错误，不要静默退回有抖动的行为）。
+  pin_file: "/state/pin.json"
   lang: "zh-CN"
   device_uuid: ""
   # 并行拉磁链的并发上限。8 是实测的收益拐点附近。

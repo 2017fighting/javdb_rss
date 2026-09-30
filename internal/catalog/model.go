@@ -47,6 +47,16 @@ type Magnet struct {
 //
 // Magnets 可能为空 —— 作品存在但尚无磁链候选是常见状态，调用方需要处理。
 type Work struct {
+	// ID 是上游的作品标识（线格式 `id`，如 "82J0Md"）。
+	//
+	// 它**不是**番号：番号在 App API 里可以重复（合集、不同片商同名等），
+	// 而 id 唯一。因此持久状态（pin，ticket 08）按它键 —— 用番号做键会让
+	// 两部不同作品互相钉死。
+	//
+	// 它对 feed 渲染没有用处（item 的身份是 infohash），只用于跨请求/跨 feed
+	// 认出「这是同一部作品」。
+	ID string
+
 	// Number 是番号，如 "KV-328"。它在 App API 里是可以重复的
 	// （合集、不同片商同名等），因此它不是唯一键。
 	Number string

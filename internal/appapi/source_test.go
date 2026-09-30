@@ -242,6 +242,35 @@ func TestActressOverridesPageAndLimit(t *testing.T) {
 
 // TestHydrateSkipsMagnetsWhenCountIsZero 确认省请求的短路生效 ——
 // magnets_count 为 0 时不必去拉一个必然为空的磁链列表。
+// TestHydrateKeepsMovieID 钉住：hydrate 必须把上游的 movie id 带进 catalog.Work。
+//
+// 那个 id 在 feed 渲染里**毫无用处**（item 的身份是 infohash），因此很容易在
+// 「映射线格式到领域模型」时被丢掉 —— 而 pin 表（ticket 08）正是按它键的。
+// 用一个别人看不出用处的字段做持久状态的键，是这里最容易踩空的一步，
+// 所以单列一条测试。
+func TestHydrateKeepsMovieID(t *testing.T) {
+	c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"magnets":[
+			{"name":"A-1","hash":"abc","size":1,"cnsub":false,"hd":false,"files_count":1,"created_at":"09/01/2026"}]}}`))
+	})
+
+	works, err := c.hydrate(context.Background(), []movieSlim{
+		{ID: "82J0Md", Number: "A-1", MagnetsCount: 1},
+		{ID: "kKDgne", Number: "A-2", MagnetsCount: 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(works) != 2 {
+		t.Fatalf("得到 %d 部作品", len(works))
+	}
+	// 有磁链的那部与没磁链的那部都要带 id —— 没磁链的作品也会进候选列表，
+	// 将来补上磁链时仍要能认出来是同一部。
+	if works[0].ID != "82J0Md" || works[1].ID != "kKDgne" {
+		t.Errorf("movie id 被丢了: %q, %q", works[0].ID, works[1].ID)
+	}
+}
+
 func TestHydrateSkipsMagnetsWhenCountIsZero(t *testing.T) {
 	var calls int
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {

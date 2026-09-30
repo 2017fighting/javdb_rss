@@ -35,6 +35,12 @@ data:
     app_api:
       host: "https://jdforrepam.com"
       token_file: "/token/token.json"
+      # pin 状态文件：本服务**唯一**的持久状态（见 ticket 08）。
+      # 🔴 必须挂一个**可写且持久**的卷（下面是 state 这个 PVC）——
+      #    丢掉它会让约 1/4 的作品换磁链、guid 变化、qBittorrent 重复下载。
+      #    不要用 emptyDir：Pod 重建（节点漂移、升级）就会丢掉，
+      #    而那正是最需要 pin 活下来的时刻。
+      pin_file: "/state/pin.json"
       lang: "zh-CN"
       # 别漏了它 —— 上一次这份 ConfigMap 就漏了，与 config.example.yaml 漂移了。
       # 现在三份示例的键集合由 internal/config/examples_sync_test.go 强制一致，
@@ -51,10 +57,14 @@ metadata:
     app: javdb-rss
 spec:
   replicas: 1
-  # 本服务无状态，因此**技术上**可以多副本。
-  # 但每个副本都会各自向上游发请求（singleflight 只在进程内合并），
+  # 单副本现在是**强制**的，不只是礼貌：pin 文件用 flock 做单写者，
+  # 而两个副本各钉一套磁链会让同一部作品产生两个 guid、qBittorrent 重复下载。
+  # 第二个挂着同一个 PVC 的副本会在启动时被 flock 拒绝（可见的失败）。
+  #
+  # 每个副本也都会各自向上游发请求（singleflight 只在进程内合并），
   # 而本服务是第三人上游的客人 —— 单副本通常更礼貌。
-  # 真要扩副本，请把 probe_interval 与 magnet_concurrency 调小。
+  # 真要扩副本，请把 probe_interval 与 magnet_concurrency 调小，
+  # 并把 pin 换成支持多写者的存储（本版本不支持）。
   strategy:
     type: Recreate
   selector:
@@ -126,6 +136,11 @@ spec:
             - name: token
               mountPath: /token
               readOnly: true
+            # ⭐ pin 状态。**必须可写且持久** —— 丢掉它会让约 1/4 的作品
+            # 换磁链、guid 变化、qBittorrent 重复下载（见 ticket 08）。
+            # readOnlyRootFilesystem 保留：可写面只是这一个卷。
+            - name: state
+              mountPath: /state
             - name: tmp
               mountPath: /tmp
 
@@ -140,6 +155,9 @@ spec:
           secret:
             secretName: javdb-rss-token
             optional: true
+        - name: state
+          persistentVolumeClaim:
+            claimName: javdb-rss-state
         - name: tmp
           emptyDir: {}
 ---
@@ -247,3 +265,35 @@ spec:
                       ;;
                   esac
                   echo "✅ 签名仍然有效"
+---
+# ⭐ pin 状态的持久卷（ticket 08）。
+#
+# 为什么必须持久：pin 记住「每个作品已下发的磁链」。丢掉它，服务重启后会
+# 按规则重新选 —— 而实测证明上游的磁链顺序不可用任何字段重放，重选会让
+# 约 1/4 的作品换磁链、guid 变化、qBittorrent 各自再下一份，
+# **而且没有任何告警**。这正是本 effort 要消除的一类失败。
+#
+# 为什么不是 emptyDir：
+#   emptyDir 的生命周期是**Pod**。节点漂移、滚动重启、驱逐都会清空它，
+#   而那恰恰是最需要 pin 活下来的时刻。用 PVC 才能跨 Pod 重建保留。
+#
+# 为什么是 ReadWriteOnce：
+#   pin 用 flock 做单写者，本就只支持单副本。RWO 正好匹配这个语义，
+#   也避免了多个 Pod 同时挂载同一份状态。
+#
+# 备份/迁移提示：pin.json 是一个普通 JSON 文件，直接拷走即可 ——
+#   它同时钉住了「你已下发的那些磁链」，是这份部署里最该备份的小文件。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: javdb-rss-state
+  labels:
+    app: javdb-rss
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # 几千条 pin 约几百 KB。给 64Mi 是很宽松的余量，
+      # 也避免某些存储类对小卷有最小尺寸门槛。
+      storage: 64Mi

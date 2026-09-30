@@ -7,6 +7,13 @@
 #   sudo install -o javdb-rss -g javdb-rss -m 0640 config.example.yaml /etc/javdb-rss/config.yaml
 #   sudo $EDITOR /etc/javdb-rss/config.yaml
 #
+# ⚠️ 必须改一处：把 app_api.pin_file 指到状态目录。
+#   config.example.yaml 里的 pin_file 是 ""，而空值时 pin 默认落在**配置文件旁边**
+#   （/etc/javdb-rss/pin.json）—— 但本 unit 把 /etc/javdb-rss 设为只读，
+#   于是服务会**拒绝启动**（这是刻意的：宁可看见错误）。改成：
+#       app_api:
+#         pin_file: "/var/lib/javdb-rss/pin.json"
+#   那个目录由下面的 StateDirectory=javdb-rss 创建并已可写。
 #   # 若要读 App 里的收藏女优，需要 token。**以服务用户身份**登录，
 #   # 这样写出的 token.json（0600）属主就是它：
 #   sudo -u javdb-rss /usr/local/bin/javdb-rss login -config /etc/javdb-rss/config.yaml
@@ -30,7 +37,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/javdb-rss -config /etc/javdb-rss/config.yaml
-# SIGHUP 触发配置热重载（写坏的配置会被拒绝，旧配置继续生效）
+# SIGHUP 触发配置热重载与 pin 表重读（写坏的配置/状态会被拒绝，旧的继续生效）
 ExecReload=/bin/kill -HUP $MAINPID
 
 # --- 加固 ---------------------------------------------------------------
@@ -48,10 +55,22 @@ ExecReload=/bin/kill -HUP $MAINPID
 User=javdb-rss
 Group=javdb-rss
 
-# 文件系统：只读整个系统，只额外允许读配置与 token。
+# 文件系统：只读整个系统，只额外允许读配置与 token，并给一个可写状态目录。
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/javdb-rss
+
+# ⭐ 状态目录：pin 表（「每个作品已选中的磁链」）落在这里。
+#
+# StateDirectory 由 systemd 创建 /var/lib/javdb-rss、把它 chown 给服务用户，
+# 并在 ProtectSystem=strict 下**自动把它列为可写** —— 不需要额外的
+# ReadWritePaths。目录会在服务停止后保留（不是 /run 那种易失目录）。
+#
+# 为什么必须持久：丢掉 pin 会让服务按规则重新选磁链 → 约 1/4 的作品
+# guid 变化 → qBittorrent 各自再下一份，且没有任何告警（见 ticket 08）。
+#
+# 配置里对应的键是 app_api.pin_file（本部署取 /var/lib/javdb-rss/pin.json）。
+StateDirectory=javdb-rss
 PrivateTmp=yes
 PrivateDevices=yes
 # 核心转储里可能带上 token，关掉。

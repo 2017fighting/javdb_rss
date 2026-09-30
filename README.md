@@ -3,9 +3,44 @@
 把 JavDB 官方 App 里的订阅渲染成 qBittorrent 可以订阅的 RSS。
 
 数据来自官方 App 自己的私有 JSON API —— 不是抓网页，因此字段干净、结构稳定。
-服务本身无状态：它不记录「已经发过什么」，去重完全交给 qBittorrent 按 guid 处理。
+去重完全交给 qBittorrent 按 guid 处理。
+
+服务几乎是**无状态**的：它不记录「已经发过什么」。唯一的例外是 **pin** ——
+它记住「每个作品上次下发的是哪条磁链」（见下）。除此之外，订阅内容完全由 URL 决定。
 
 这是一个单人自用的内网服务。**它不做任何鉴权。**
+
+## pin：本服务唯一的持久状态
+
+feed 条目的身份（`guid`）就是磁链的 infohash，而**选哪条磁链**决定 infohash。
+上游的候选顺序不保证稳定（实测：它既不是时间序，也不可用任何字段重放）。
+不记住选择的话，上游一变、`guid` 就变，qBittorrent 会把它当成新内容再下一份 ——
+而且是**静默的**，磁盘上多一份文件也没人告诉你。
+
+所以服务把「每个作品上次选中的是哪条磁链」持久化成一张表（`pin.json`），
+之后即使上游候选变化也继续发它。
+
+**运维需要知道的三件事**：
+
+1. **pin 不能丢。** 丢了它会按规则重新选 → 约 1/4 的作品 `guid` 变化 →
+   qBittorrent 重复下载。上游无法重建出同一选择，因此 **丢 pin 就是丢 guid**。
+   各部署方式都把它放在持久位置（见下）。
+2. **pin 不可关闭。** 配置里的 `app_api.pin_file` 留空是「用默认路径」
+   （配置文件旁边的 `pin.json`），不是「禁用钉住」。默认关闭会让升级后的实例
+   静默退回有抖动的行为。
+3. **只支持单副本。** pin 用文件锁保证单写者，第二个指向同一文件的实例会
+   **拒绝启动**（可见的失败，好过两个 guid）。
+
+pin 就是一个可读的 JSON 文件，可以直接看、直接改、直接备份：
+
+```json
+{"version": 1, "pins": {"aBc123": {"infohash": "0e8f...", "name": "KV-328",
+  "size_mb": 3110, "cnsub": false, "created_at": "09/27/2026",
+  "pinned_at": "2026-09-30T12:00:00Z"}}}
+```
+
+手工删掉某一条（「这个作品想重选」）后 `kill -HUP` 重读即可。
+文件损坏或版本不认识时会**拒绝启动**，而不是用空表静默覆盖。
 
 ## 现在能跑到哪一步
 
@@ -32,8 +67,8 @@ cp config.example.yaml config.yaml
 kill -HUP $(pidof javdb-rss)
 ```
 
-配置文件写坏了会**保留旧配置继续服务**，并把错误记进日志 ——
-一个手滑的 YAML 不该让正在服务的实例失去配置。
+SIGHUP 会同时重载配置**与重读 pin 表**（手工删掉一条 pin 后用它生效）。
+两件事失败时都**保留旧值**并记日志 —— 一个手滑改坏的文件不该让正在服务的实例失去配置或状态。
 
 `make help` 列出全部命令。
 
@@ -43,14 +78,30 @@ kill -HUP $(pidof javdb-rss)
 
 | 文件 | 场景 |
 |---|---|
-| `deploy/javdb-rss.service` | systemd。已加固（DynamicUser、只读文件系统、零 capability） |
+| `deploy/javdb-rss.service` | systemd。已加固（普通系统用户、`ProtectSystem=strict` 只读文件系统、`StateDirectory` 提供可写状态、零 capability） |
 | `deploy/docker-compose.yml` + `deploy/config.docker.yaml` | Docker Compose |
 | `deploy/k8s.yaml` | Kubernetes（含签名失效告警的 CronJob） |
 
 三份部署配置共用同一套配置结构，**键集合由
 `internal/config/examples_sync_test.go` 强制一致**（取值可以不同：容器 / k8s
-监听 `0.0.0.0`，token 路径也不一样）。改配置项要三处同步，否则 `make test`
+监听 `0.0.0.0`，token 与 pin 路径也不一样）。改配置项要三处同步，否则 `make test`
 会失败 —— 这一条曾经靠人记，结果漏过一次（k8s 少了 `device_uuid`）。
+
+### ⭐ pin 的落点：升级时必须让状态目录可写
+
+pin（见上）是**唯一需要可写磁盘**的东西。三套部署分别把它放在了：
+
+| 部署 | pin 位置 | 怎么提供 |
+|---|---|---|
+| 裸二进制 | `app_api.pin_file` 留空 → 配置文件旁边的 `pin.json` | 配置文件所在目录可写即可 |
+| systemd | `/var/lib/javdb-rss/pin.json` | unit 里的 `StateDirectory=javdb-rss`（**需在配置里显式写上这个路径**） |
+| Docker Compose | `/state/pin.json` | `./state:/state` 卷（先 `mkdir -p state`） |
+| K8s | `/state/pin.json` | `javdb-rss-state` PVC（`ReadWriteOnce`） |
+
+**升级注意**：旧版本没有 pin，没有可写状态目录也能跑。升级后如果目录仍不可写，
+服务会**拒绝启动**并报清楚原因 —— 这是刻意的：默认关闭 pin 会让实例静默退回
+有抖动的行为。裸二进制放在 `/etc` 等只读目录时，请显式把 `pin_file` 指到可写路径
+（systemd 示例里已有说明）。
 
 ### ⚠️ 容器与 K8s 下的监听地址
 
