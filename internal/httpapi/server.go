@@ -284,6 +284,16 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 		since = v
 	}
 
+	// 取作品与取名字是两次**互不依赖**的上游请求，因此并行发起。
+	//
+	// 串行的话每次轮询会白多等一个往返（实测单次约 200-430ms），
+	// 而 qBittorrent 每 15 分钟就会打一次这个 feed —— 这是热路径上的浪费。
+	//
+	// 用带缓冲(1) 的 channel：即使下面提前 return（作品取失败），
+	// goroutine 也能写完而不阻塞，不会泄漏。
+	nameCh := make(chan string, 1)
+	go func() { nameCh <- s.actressTitle(r.Context(), id) }()
+
 	works, err := s.src.Actress(r.Context(), id, toValues(params))
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "取女优作品失败", "id", id, "err", err)
@@ -296,7 +306,7 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderFeed(w, r, feed.Meta{
-		Title:       s.actressTitle(r.Context(), id),
+		Title:       <-nameCh,
 		Link:        s.feedURL(r),
 		Description: "女优 " + id + " 的订阅源",
 		Language:    s.cfg.Current().Feed.Language,

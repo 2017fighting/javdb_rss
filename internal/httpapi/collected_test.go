@@ -7,8 +7,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2017fighting/javdb_rss/internal/appapi"
 	"github.com/2017fighting/javdb_rss/internal/catalog"
@@ -217,4 +219,69 @@ func TestCollectedRejectsNonGET(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /collected = %d, want 405", rec.Code)
 	}
+}
+
+// TestActressFeedFetchesNameConcurrently 钉住一个我引入过又修掉的延迟回归。
+//
+// 最初 actressTitle 在 Actress() **返回之后**才被调用，于是每次女优 feed 轮询
+// 都白多等一个上游往返（实测约 200-430ms）—— 而 qBittorrent 每 15 分钟就会
+// 打一次这个 feed，是热路径。两次请求互不依赖，没有理由串行。
+//
+// 这个测试用「双向依赖」把并发性变成可判定的：
+// ActressName 等 Actress 先开始，Actress 等 ActressName 先被调用。
+// 若两者串行，就会互等到超时；并发则立即通过。
+func TestActressFeedFetchesNameConcurrently(t *testing.T) {
+	actressStarted := make(chan struct{})
+	nameCalled := make(chan struct{})
+
+	// 用一个互相等待的 source —— 串行实现会互等到超时。
+	h := newTestServer(t, "provider: stub\n", &barrierSource{
+		actressStarted: actressStarted,
+		nameCalled:     nameCalled,
+	})
+
+	done := make(chan int, 1)
+	go func() {
+		rec := do(t, h, "/rss/actress/EvkJ.xml")
+		done <- rec.Code
+	}()
+
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Errorf("状态码 = %d", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("取作品与取名字似乎串行了 —— 它们互不依赖，应当并发发起")
+	}
+}
+
+// barrierSource 让 Actress 与 ActressName 互相等待，用来证明它们并发执行。
+type barrierSource struct {
+	stub.Source
+	actressStarted chan struct{}
+	nameCalled     chan struct{}
+}
+
+func (b *barrierSource) Actress(ctx context.Context, _ string, _ url.Values) ([]catalog.Work, error) {
+	close(b.actressStarted)
+	// 等名字请求也被发起。
+	//
+	// ⚠️ 兜底分支必须**返回错误**，不能照常返回数据：
+	// 最初这里写的是「等 2 秒然后照常返回」，结果串行实现也能走完流程，
+	// 测试拿到 200 就通过了 —— 一个测不出它要测的东西的测试。
+	// 返回错误才能让串行实现明确地失败。
+	select {
+	case <-b.nameCalled:
+	case <-time.After(2 * time.Second):
+		return nil, errors.New("名字请求没有被并发发起 —— 它们被串行执行了")
+	}
+	return []catalog.Work{{Number: "A-1", Title: "T",
+		Magnets: []catalog.Magnet{{Infohash: "h"}}}}, nil
+}
+
+func (b *barrierSource) ActressName(ctx context.Context, _ string) (string, error) {
+	<-b.actressStarted
+	close(b.nameCalled)
+	return "并发名字", nil
 }
