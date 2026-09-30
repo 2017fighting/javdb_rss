@@ -141,3 +141,26 @@ Status: resolved
 - `i` / `v` 两个主属性字母的含义
 - `sort_by` 的完整合法取值集（只确认 `release` 与 `score` 有区别；
   无法区分「非法值」与「合法但恰好同序」）
+
+
+### HITL 确认（2026-09-30）
+
+票面要求的「用户确认」已完成，两项：
+
+1. **URL 形态确认可以。** 展示给用户的是：
+
+   ```
+   /rss/actress/{id}.xml                          最常见
+   /rss/actress/{id}.xml?since=2026-01-01         追新
+   /rss/actress/{id}.xml?pages=3                  建库
+   /rss/actress/{id}.xml?filter_by=0:a:{id}:c::   高级：只看中文字幕
+   /rss/actress/{id}.xml?sort_by=score            高级：按评分
+   ```
+
+   用户明确**不需要**给常用筛选加友好短参数（如 `?subs=1`）——
+   接受了「筛选属高级用法、需手写复合掩码」这个取舍。
+
+2. **`filter_by` 拼接笔误保持硬报错（400）。** 用户认可理由：
+   上游静默忽略拼错的掩码，不拦就会拿到「看起来正常但没应用筛选」的 feed。
+
+至此本票全部产出齐备：参数表、README、透传接缝、用户确认。
