@@ -1,0 +1,65 @@
+# docker compose 部署示例。
+#
+# 用法：
+#   mkdir -p data token
+#   cp deploy/config.docker.yaml data/config.yaml
+#   # 编辑 data/config.yaml，特别是 base_url
+#   docker compose up -d
+#   docker compose logs -f
+#
+# 改完配置后重载（不用重启容器）：
+#   docker compose kill -s HUP javdb-rss
+
+services:
+  javdb-rss:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: "dev"
+    # 也可以用现成镜像：把 build 换成 image: ghcr.io/2017fighting/javdb-rss:latest
+    container_name: javdb-rss
+    restart: unless-stopped
+
+    ports:
+      # ⚠️ 这一行决定服务是否对局域网可见。
+      #
+      # 绑 127.0.0.1 = 只有宿主机能访问（推荐，因为本服务不做鉴权）。
+      # 要让它对别的机器可见，改成 "8080:8080" —— 但请先确认你接受
+      #「任何拿到 URL 的人都能看到你的订阅内容」这件事。
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      # 配置：只读挂载。容器内不需要写它。
+      - ./data/config.yaml:/config/config.yaml:ro
+      # token：只读挂载。目录可不存在 —— 需求 1/2/3 不需要 token，
+      # 文件缺失时服务按匿名访问启动。
+      - ./token:/token:ro
+
+    # 让容器内的进程能收到 docker kill -s HUP（配置重载）。
+    # 用 exec 形式的 ENTRYPOINT 时不需要 init，但保留 init 更稳妥，
+    # 能顺带回收僵尸进程。
+    init: true
+
+    # 资源限制：本服务很轻（单个 Go 二进制），上限给宽一点即可。
+    # 主要防止「某个订阅把上游拉爆时连带把机器拖慢」。
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+    healthcheck:
+      # 与镜像里的 HEALTHCHECK 一致：只判断进程存活，不掺上游状态。
+      # 上游是否可用要看 /readyz，那是**就绪**而不是**存活**。
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+    logging:
+      # 结构化 stdout 已经够用；限制一下大小防止长期运行撑满磁盘。
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -139,6 +139,12 @@ internal/stub/        固定数据的假数据源
   从 6.1s 降到 1.8s**，因此不需要引入缓存这个新概念（无陈旧数据风险）。
   另加 singleflight 合并并发相同请求（不是缓存，不存任何东西）。
   压测并发 32 / 34 请求零失败、无限流。新增 `?pages=N`（上限 20 页）供建库场景。
+- [配置与部署模型](issues/04-config-and-deploy.md) —— *实施补记见票面*
+  — 形态已全部落地：`Dockerfile`、`.dockerignore`、systemd unit（含加固）、
+  docker-compose、k8s（含**签名失效告警 CronJob**）、`Makefile`、CI。
+  三个要点：容器内必须监听 `0.0.0.0`（可见性由端口映射决定）；
+  `ca-certificates` 是必需项；k8s 的 liveness/readiness 分工是 ticket 02 的兑现点。
+  **未验证**：docker daemon 未运行，镜像未真正构建过。
 
 ## Not yet specified
 
@@ -150,9 +156,6 @@ internal/stub/        固定数据的假数据源
   这直接决定 `/rss/code/{番号}.xml` 能否实现。
 - **`since=<日期>` 的比较字段**：`movies/latest` 有 `release_date`，但演员页列表里有没有、
   格式是什么，尚未确认。没有它需求 3 的「只追新」就悬空。
-- **Dockerfile 与 systemd unit 尚未写**（ticket 04 定了这个形态，但它没被列进
-  ticket 03 的产出）。二进制已能直接跑，镜像化是随时可做的小事，不构成决策，
-  因此不开票 —— 等真需要部署时顺手做。
 - **`size` 的单位未经核实**：ticket 03 假定 App API 的 `size` 是兆字节，
   并据此填 `enclosure length`。qBittorrent 不会用它做判断，所以不影响功能，
   但 ticket 06 测接口时顺手核一下。

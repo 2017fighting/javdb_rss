@@ -1,0 +1,84 @@
+# systemd 部署示例。
+#
+# 安装：
+#   sudo install -m 0755 javdb-rss /usr/local/bin/javdb-rss
+#   sudo mkdir -p /etc/javdb-rss
+#   sudo cp config.example.yaml /etc/javdb-rss/config.yaml
+#   sudo $EDITOR /etc/javdb-rss/config.yaml
+#   sudo cp deploy/javdb-rss.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now javdb-rss
+#
+# 改完配置后重载（不用重启进程）：
+#   sudo systemctl reload javdb-rss
+#
+# 看日志：
+#   journalctl -u javdb-rss -f
+
+[Unit]
+Description=JavDB App 订阅 → RSS
+Documentation=https://github.com/2017fighting/javdb_rss
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/javdb-rss -config /etc/javdb-rss/config.yaml
+# SIGHUP 触发配置热重载（写坏的配置会被拒绝，旧配置继续生效）
+ExecReload=/bin/kill -HUP $MAINPID
+
+# --- 加固 ---------------------------------------------------------------
+# 本服务只需要读自己的配置与 token，然后往外发 HTTPS 请求。
+# 它可以被削到很窄的权限面。
+
+# 专用低权限用户（不创建家目录，不给登录 shell）
+DynamicUser=yes
+User=javdb-rss
+Group=javdb-rss
+
+# 文件系统：只读整个系统，只额外允许读配置与 token。
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/javdb-rss
+PrivateTmp=yes
+PrivateDevices=yes
+# 核心转储里可能带上 token，关掉。
+LimitCORE=0
+
+# 内核面
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+
+# 命名空间 / 网络
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# 本服务是一个纯 HTTP 客户端 + 服务端，不需要这些特权操作。
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# 能力：全清。绑 8080 不需要 CAP_NET_BIND_SERVICE
+# （只有 <1024 的端口才需要，见配置里为何默认 8080）。
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# --- 资源 ---------------------------------------------------------------
+# 单个 Go 二进制很轻；设个上限防止异常时把机器拖慢。
+MemoryMax=128M
+TasksMax=64
+
+# --- 重启 ---------------------------------------------------------------
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -21,7 +21,7 @@
 ## 跑起来
 
 ```bash
-go build -o javdb-rss ./cmd/javdb-rss
+make build                      # 或 go build -o javdb-rss ./cmd/javdb-rss
 cp config.example.yaml config.yaml
 ./javdb-rss -config config.yaml
 ```
@@ -34,6 +34,33 @@ kill -HUP $(pidof javdb-rss)
 
 配置文件写坏了会**保留旧配置继续服务**，并把错误记进日志 ——
 一个手滑的 YAML 不该让正在服务的实例失去配置。
+
+`make help` 列出全部命令。
+
+## 部署
+
+`deploy/` 下有三套现成的部署方式，**按你用哪套挑一份**：
+
+| 文件 | 场景 |
+|---|---|
+| `deploy/javdb-rss.service` | systemd。已加固（DynamicUser、只读文件系统、零 capability） |
+| `deploy/docker-compose.yml` + `deploy/config.docker.yaml` | Docker Compose |
+| `deploy/k8s.yaml` | Kubernetes（含签名失效告警的 CronJob） |
+
+### ⚠️ 容器与 K8s 下的监听地址
+
+裸机默认监听 `127.0.0.1`，但**容器里必须改成 `0.0.0.0`** ——
+`127.0.0.1` 是容器自己的 loopback，宿主机连不上。`deploy/` 下的配置已经改好了。
+
+改完请想清楚**谁能访问它**：
+
+- Docker：`-p 127.0.0.1:8080:8080` 只绑宿主机 loopback（推荐）；
+  `-p 8080:8080` 则局域网可见。
+- K8s：Service 用 `ClusterIP`（只有集群内可达）。**不要**改成 LoadBalancer
+  或 NodePort 而不先考虑它没有身份验证这件事。
+
+隔离由容器/集群提供，「暴露出去」由端口映射或 Service 类型决定 ——
+请把它当成一个需要动手的决定。
 
 ## 订阅地址
 
@@ -138,9 +165,13 @@ internal/stub/        固定数据的假数据源
 ## 开发
 
 ```bash
-go test ./...      # 全部是离线测试，不访问网络
-go vet ./...
+make check         # gofmt + vet + test
+make race          # 带竞态检测
+make test          # 全部是离线测试，不访问网络
 ```
+
+CI（`.github/workflows/ci.yml`）跑的是同一组命令加容器构建 ——
+本地几秒就能跑完，没有理由让问题只在 CI 里暴露。
 
 ## 这一版是怎么定下来的
 

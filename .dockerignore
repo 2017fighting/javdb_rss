@@ -1,0 +1,60 @@
+# 构建上下文里不需要的东西。
+#
+# 目标：让镜像构建快、且**不会把秘密或无关文件拷进去**。
+
+# 版本控制与协作元数据
+.git
+.gitignore
+.github
+
+# 逆向目标与产物（几十 MB，且与构建无关）
+*.apk
+*.apks
+*.aab
+*.ipa
+extracted/
+unpacked/
+dumps/
+snapshot/
+libapp.so
+libsecurity.so
+
+# 凭据 —— 绝不能进镜像
+token.json
+token.txt
+secrets.yaml
+secrets.yml
+config.local.yaml
+config.local.yml
+.env
+.env.*
+
+# 构建产物与调试文件
+bin/
+dist/
+*.log
+*.xml
+*.out
+coverage.*
+
+# 设计文档与调研笔记（不进镜像，留给仓库）
+.scratch/
+docs/
+*.md
+!README.md
+
+# 开发环境
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

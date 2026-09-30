@@ -1,0 +1,54 @@
+# container 场景的配置示例。
+#
+# 与 config.example.yaml 的**唯一实质差异**：监听 0.0.0.0 而不是 127.0.0.1。
+#
+# 为什么必须改：默认的 127.0.0.1 在容器外访问不到 ——
+# 那是容器自己的 loopback，宿主机连不上。
+#
+# ⚠️ 请读清楚这一点的含义：
+# 本服务**不做鉴权**。在容器里监听 0.0.0.0 意味着「容器的全部网络接口」，
+# 但它是否真的对局域网可见，取决于你怎么做端口映射（见 docker-compose.yml）：
+#
+#   -p 127.0.0.1:8080:8080   只绑宿主机 loopback  → 只有本机能访问（推荐）
+#   -p 8080:8080             绑所有宿主机接口     → 局域网可见，**任何人拿到
+#                                                  URL 都能看到你的订阅内容**
+#
+# 隔离由容器提供，「暴露出去」由端口映射决定 —— 请把它当成一个需要动手的决定。
+
+listen: "0.0.0.0:8080"
+
+provider: "appapi"
+
+feed:
+  title: "JavDB RSS"
+  description: "由 JavDB 官方 App 私有 API 生成的订阅源"
+  language: "zh-CN"
+  # 填宿主机访问这个服务时用的地址，它会出现在 feed 的 <link> 里。
+  base_url: "http://127.0.0.1:8080"
+
+app_api:
+  host: "https://jdforrepam.com"
+  # 容器内路径 —— 由 compose 把宿主机的 token 文件挂到 /token/token.json。
+  # 留空或文件不存在 = 匿名访问，这对需求 1/2/3 完全够用。
+  token_file: "/token/token.json"
+  lang: "en"
+  device_uuid: ""
+  # 并行拉磁链的并发上限。8 是实测的收益拐点附近。
+  magnet_concurrency: 8
+  # 上游健康检查间隔。它是 /readyz 与 /healthz/upstream 的数据来源。
+  # 设 0 关闭。
+  probe_interval: "15m"
+
+# feeds 白名单：不写则 URL 即订阅；写了则只有列出的订阅会被服务。
+#
+# 容器场景下建议**不要**写 —— 白名单要改配置并重载，
+# 而「URL 即订阅」让你直接加订阅就行。
+#
+# feeds:
+#   codes:
+#     - KV-328
+#   actresses:
+#     - id: EvkJ
+#       params:
+#         filter_by: "0:a:EvkJ"
+#       since: "2026-01-01"

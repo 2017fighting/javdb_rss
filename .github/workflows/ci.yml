@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 目标：把「提交前该过的关」固定下来。
+# 这些检查在本地跑只需几秒（make check），因此没有理由让它们只在 CI 里发现。
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 格式与静态分析先行 —— 它们失败得最快，能省下一次跑测试的时间。
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      # -race 是必须的：本服务有并发拉取与 singleflight，
+      # 竞态只会在负载下出现，而那时已经在生产里了。
+      - name: test (race)
+        run: make race
+
+      - name: build
+        run: make build
+
+      # 容器构建单独跑：它慢，且能抓到 .dockerignore / Dockerfile 的问题
+      # （例如忘了 ca-certificates 会导致运行时连不上上游）。
+      - name: docker build
+        run: make docker-build

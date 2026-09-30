@@ -1,0 +1,204 @@
+# kubernetes 部署示例。
+#
+# 这个文件把 ticket 02 做的健康检查三端点用对了 —— 那是它存在的主要理由。
+#
+# 应用：
+#   kubectl create configmap javdb-rss-config --from-file=config.yaml=deploy/config.k8s.yaml
+#   kubectl apply -f deploy/k8s.yaml
+#
+# ⚠️ 读之前先理解一件事：本服务**不做鉴权**。
+# Service 的类型决定了谁能访问它 —— 本示例用 ClusterIP（只有集群内可达）。
+# 不要为了图方便改成 LoadBalancer 或 NodePort 后忘记它没有身份验证。
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: javdb-rss-config
+data:
+  # 注意 listen 必须是 0.0.0.0（默认的 127.0.0.1 在 Pod 外访问不到）。
+  # base_url 要填你实际访问它的地址。
+  config.yaml: |
+    listen: "0.0.0.0:8080"
+    provider: "appapi"
+    feed:
+      title: "JavDB RSS"
+      description: "由 JavDB 官方 App 私有 API 生成的订阅源"
+      language: "zh-CN"
+      base_url: "http://javdb-rss.default.svc.cluster.local:8080"
+    app_api:
+      host: "https://jdforrepam.com"
+      token_file: "/token/token.json"
+      lang: "en"
+      magnet_concurrency: 8
+      probe_interval: "15m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: javdb-rss
+  labels:
+    app: javdb-rss
+spec:
+  replicas: 1
+  # 本服务无状态，因此**技术上**可以多副本。
+  # 但每个副本都会各自向上游发请求（singleflight 只在进程内合并），
+  # 而本服务是第三人上游的客人 —— 单副本通常更礼貌。
+  # 真要扩副本，请把 probe_interval 与 magnet_concurrency 调小。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: javdb-rss
+  template:
+    metadata:
+      labels:
+        app: javdb-rss
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: javdb-rss
+          image: javdb-rss:latest
+          args: ["-config", "/config/config.yaml"]
+
+          ports:
+            - name: http
+              containerPort: 8080
+
+          # ⭐ 存活探针：只判断进程是否还在。
+          #
+          # 必须打 /healthz 而不是 /readyz。本服务唯一已知会失效的输入
+          # 是签名常量（派生自 App 内的 access key，App 升级或服务端轮换
+          # 都可能让它作废）—— 签名失效重启一千次也没用，
+          # 把上游状态掺进 liveness 只会制造重启循环。
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # ⭐ 就绪探针：上游签名坏了就摘掉 endpoint，但**不重启**。
+          # 这会让 Service 不再把流量转给它，同时 Deployment 保持不动。
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 2
+
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 128Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: token
+              mountPath: /token
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: config
+          configMap:
+            name: javdb-rss-config
+        # token 是可选的：需求 1/2/3 不需要它。
+        # 需要读 App 里收藏的女优时才要挂（见 ticket 05）。
+        # 建议用 Secret 而不是直接放文件。
+        - name: token
+          secret:
+            secretName: javdb-rss-token
+            optional: true
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: javdb-rss
+  labels:
+    app: javdb-rss
+spec:
+  # ClusterIP = 只有集群内可达。本服务不做鉴权，**不要**改成 LoadBalancer
+  # 或 NodePort 而不先想清楚谁能访问它。
+  type: ClusterIP
+  selector:
+    app: javdb-rss
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# ⭐ 签名失效告警。
+#
+# 这是 ticket 02 那套探针设计的兑现点：
+#
+#   /readyz            告诉**编排器**把实例摘掉（自动、秒级）
+#   /healthz/upstream  告诉**人**该去改代码了（这个 CronJob）
+#
+# 为什么用 CronJob 而不是 Prometheus 规则：签名失效是一种**月级**的罕见事件，
+# 而它的处置方式是「去改代码」（见 THIRD_PARTY_NOTICES.md 指向上游项目），
+# 不需要秒级检测。一个人读的告警比一个指标更贴合这件事。
+#
+# signature_broken: true 表示「要改代码，不是重试」——
+# 刻意把普通网络故障排除在外，避免半夜被叫起来改一个其实只需重试的东西。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: javdb-rss-signature-check
+spec:
+  # 每小时看一眼。签名失效不是急事，但它会让所有 feed 静默停更，
+  # 所以也不该拖到第二天才发现。
+  schedule: "17 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: check
+              image: curlimages/curl:8.11.1
+              env:
+                - name: URL
+                  value: "http://javdb-rss.default.svc.cluster.local:8080/healthz/upstream"
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  body=$(curl -sS --max-time 20 "$URL")
+                  echo "upstream: $body"
+                  # 用 shell 解析而不是 jq —— 少一个依赖，且这里的 JSON 很浅。
+                  case "$body" in
+                    *'"signature_broken":true'*)
+                      echo "❌ 签名常量已失效 —— 上游拒绝了我们构造的 jdsignature。"
+                      echo "   这不是网络问题，重试无用。处置步骤："
+                      echo "   1. 查 javdb-cli 是否已跟进: https://github.com/FlanChanXwO/javdb-cli"
+                      echo "   2. 若未跟进，见 .scratch/javdb-rss/notes/dart-toolchain-probe.md 的逆向备灾清单"
+                      exit 1
+                      ;;
+                  esac
+                  echo "✅ 签名仍然有效"
