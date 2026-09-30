@@ -148,33 +148,38 @@ internal/stub/        固定数据的假数据源
 
 ## Not yet specified
 
-<!-- 看得出方向、但还捏不成 ticket 的东西 -->
+<!-- 看得出方向、但还捏不成 ticket 的东西。
+     2026-09-30 清理：删掉 6 条在 02/06/09 落地后已解决的（番号链路端点、
+     since 比较字段、Prefix 失效检测、女优 feed 成本量级、番号消歧），
+     以及 2 条其实已是 live ticket 的（token 成本 → 05，需求 4 形态 → 10）。 -->
 
-- **番号订阅 → item 的完整链路**：ticket 08 已定「字幕优先、恒 1 条、guid=infohash」，
-  ticket 07 已定「透传 `/movies/tags` 参数」，但**「番号字符串 → 作品」这一步仍未定**：
-  是走 `/api/v2/search?q=` 还是 `/api/v1/search_magnet`？一个番号多部作品时怎么办？
-  这直接决定 `/rss/code/{番号}.xml` 能否实现。
-- **`since=<日期>` 的比较字段**：`movies/latest` 有 `release_date`，但演员页列表里有没有、
-  格式是什么，尚未确认。没有它需求 3 的「只追新」就悬空。
-- **`size` 的单位未经核实**：ticket 03 假定 App API 的 `size` 是兆字节，
-  并据此填 `enclosure length`。qBittorrent 不会用它做判断，所以不影响功能，
-  但 ticket 06 测接口时顺手核一下。
-- **需求 4 的呈现形态尚未定**：`Source` 端口里根本没有位置放「收藏列表」——
-  ticket 03 实现时才意识到地图的终点描述漏了这一环。见 ticket 10。
-- **Prefix 失效的检测与应对**：Prefix 由 App 内 access key 派生，App 升级或服务端轮换
-  都可能使其作废。需要一个「多久探一次、失效时怎么告警」的判断。
-  也要看一眼 javdb-cli 是否已跟进 —— 它活跃，很可能比我们先发现。
-- **token 的获取成本**：用户要手工从 App 导出。导出路径是 App 本地存储
-  （sqflite/hive/shared_preferences）还是需要 root/adb？多久过期一次？
-  这决定第 4 条需求的**实际可用性** —— 如果一周一导，体验会很差。
-- **女优 feed 的成本量级**：`/api/v1/actors/EvkJ` 显示 `videos_count: 229`，
-  但作品列表走 `/movies/tags`（有 `page`/`limit`）。到底一页能拿多少、
-  要不要为每部再拉一次 magnets —— 量化之后才知道 ticket 09 要不要真做缓存。
-- **磁链数组顺序的稳定性**：用户选了「信任 App 顺序」，但还没确认这个顺序是稳定排序
-  还是每次不同。若不稳定，`guid` 会抖，qBittorrent 会重复下载。
-- **番号消歧**：`/api/v2/search?q=ABC-123` 是否会返回多部（合集、同名不同片商）。
-- **TLS 指纹**：javdb-cli 用 utls 伪装；我们朴素 urllib 也通了。长跑批量请求时是否需要？
-- **TLS/HTTP 长连接下的 WAF 行为**：researcher 标为未验证项。
+- **磁链数组顺序的稳定性（已部分验证）**：用户选了「信任 App 顺序」。
+  2026-09-30 实测：4 部作品 × 每部 4 次请求，顺序**完全一致** ——
+  排除了「每次请求随机」这个最坏情况。
+  仍未知的是**跨天/跨周是否稳定**：如果排序依据是做种数或时间，它会随时间漂移，
+  那时同一部作品会选中不同磁链 → `guid` 抖 → qBittorrent 重复下载。
+  要彻底确认需要隔几天再比一次。
+- **TLS 指纹**：javdb-cli 用 utls 伪装 TLS 指纹；我们用朴素 `net/http` 也通了。
+  短请求没问题，但长跑 / 高并发下是否被 Cloudflare 挑出来，未验证。
+- **WAF 与长连接行为**：实测并发 32 未被限流，但那是短时压测。
+  持续高频轮询下 Cloudflare 是否会开始拦，未知。
+- **`size` 的单位**：假定为兆字节并据此填 `enclosure length`。
+  qBittorrent 不拿它做判断，所以不影响功能 —— 价值低，但确实没核实。
+
+## 已在卡片之外、但确实「完成却未验证」的东西
+
+<!-- 这些不是雾也不是 ticket，是**验收缺口**：代码写完了，但从没在真实环境里跑过。
+     列在这里是因为它们决定「能不能真的用」。 -->
+
+- ⭐ **从未用真实的 qBittorrent 订阅过。** 需求的验收标准是「提供给 qBittorrent」，
+  而我们只验证了「RSS 是合法 XML」，没有验证 qBittorrent 能正确读取、
+  按 guid 去重、并把磁链交给下载器。**这是最大的验收缺口。**
+- **Docker 镜像从未构建过** —— 本机 docker daemon 未运行。
+  Dockerfile 的语法与逻辑经审阅，`docker build` 未执行。
+- **CI 从未运行过** —— workflow 文件已写，但仓库没有 push 过，
+  GitHub Actions 一次都没跑。
+- **token 路径从未走通过** —— `config.LoadToken` 与 `Authorization: Bearer`
+  的管路都写好了，但没有真实 token 验证过端到端。
 
 ## Out of scope
 
