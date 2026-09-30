@@ -147,6 +147,8 @@ internal/stub/        固定数据的假数据源
   三个要点：容器内必须监听 `0.0.0.0`（可见性由端口映射决定）；
   `ca-certificates` 是必需项；k8s 的 liveness/readiness 分工是 ticket 02 的兑现点。
   **未验证**：docker daemon 未运行，镜像未真正构建过。
+  **已兑现（2026-09-30）**：镜像已在真实 Docker 里构建过（见下方验收表，`b1eccf4`），
+  并在 **CI 干净检出**上再次构建成功（`notes/ci.md`）。
 
 ## Not yet specified
 
@@ -193,7 +195,9 @@ internal/stub/        固定数据的假数据源
 
 - **实际下载行为** —— 刻意没做。验收用的是停止态加入（`stopped=true`），
   零流量、验完即删。磁链能被接受这一点已证明；「下不下」是 qBittorrent 的策略。
-- **CI 从未运行过** —— workflow 已写，仓库没 push 过。
+- ~~**CI 从未运行过** —— workflow 已写，仓库没 push 过。~~ **已跑通（2026-09-30）**：
+  首次运行即绿，截至 2026-09-30 共 12 次推送全绿（0 失败），含容器构建那一步。
+  详见 [`notes/ci.md`](notes/ci.md)。
 - **token 路径从未走通** —— 管路写好了，没有真 token（依赖 ticket 05）。
 
 ## Out of scope

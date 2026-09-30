@@ -131,6 +131,13 @@ Dockerfile 的 base image 选择、日志字段的具体命名。
 **Docker 镜像没有真正构建过** —— 本机 docker daemon 未运行
 （`dial unix /var/run/docker.sock: no such file or directory`）。
 Dockerfile 的**语法与逻辑**经过审阅，但 `docker build` 未执行。
+
+**已兑现（2026-09-30）**：此后镜像在真实 Docker 里构建成功（`b1eccf4` 的端到端验收，
+同网起了一个真 qBittorrent），并在 **CI 的干净检出**上再次构建成功
+（首次运行 `36661326933` 第 8 步 `docker build`）。CI 那次还暴露了一个本地看不出的
+观察：`build` 先产出根目录的 `javdb-rss`，而 `.dockerignore` 未排它，导致
+**8 MB 构建上下文**（不影响最终镜像）。已记入 [`../notes/ci.md`](../notes/ci.md)，
+未就地改。
 第一次 `make docker-build` 时请留意构建输出。
 
 ### 补跑的 code-review（2026-09-30）
