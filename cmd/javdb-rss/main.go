@@ -409,10 +409,38 @@ func (c upstreamChecker) Check(ctx context.Context) health.Result {
 
 	// 把 error 翻译成结构化结论。做在这一层而不是 appapi 里，
 	// 是为了让 appapi 保持不知道 health 包的存在。
+	//
+	// 「下一步」也在这里给 —— 它是**本检查方特有**的领域知识（知道
+	// 签名失效该去看哪个项目），因此不能写进 health，否则换一个检查方
+	// 那段文案就会是错的（ticket 05）。
 	if err := cl.Check(ctx); err != nil {
-		return health.Result{OK: false, Action: appapi.ActionOf(err), Err: err.Error()}
+		action := appapi.ActionOf(err)
+		return health.Result{
+			OK:       false,
+			Action:   action,
+			Err:      err.Error(),
+			Guidance: upstreamGuidance(action),
+		}
 	}
 	return health.Result{OK: true}
+}
+
+// upstreamGuidance 把上游错误名翻译成一句**可操作**的处置动作。
+//
+// 两类失败的处置完全不同，因此必须分开：
+//
+//	签名/请求构造不兼容 → 要**改代码**，重启和重试都没用；
+//	其余（网络、上游 5xx） → 等一会儿重试就好，不该把人叫起来。
+//
+// 判据复用 appapi.IsSignatureAction，而不是在这里再写一份名字清单 ——
+// 否则服务端新增一种签名错误时只会在其中一处生效。
+func upstreamGuidance(action string) string {
+	if appapi.IsSignatureAction(action) {
+		return "签名常量已与服务端不兼容，重试无用，需要改代码：" +
+			"先看 javdb-cli 是否已跟进（https://github.com/FlanChanXwO/javdb-cli），" +
+			"否则见 .scratch/javdb-rss/notes/dart-toolchain-probe.md 的逆向备灾清单"
+	}
+	return "这是普通上游/网络故障，稍后会自动重试；持续不变再排查网络与上游可用性"
 }
 
 func newLogger(level string) *slog.Logger {

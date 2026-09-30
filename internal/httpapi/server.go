@@ -124,6 +124,12 @@ func (s *Server) handleUpstreamDetail(w http.ResponseWriter, _ *http.Request) {
 		if st.Err != "" {
 			body["error"] = st.Err
 		}
+		if st.Guidance != "" {
+			// 处置动作也透出给机读的消费方（CronJob / 告警规则）。
+			// 它由检查方提供，因此这里只是转发 —— httpapi 同样不知道
+			// 任何一个具体错误名的含义（ticket 05）。
+			body["next_step"] = st.Guidance
+		}
 	}
 
 	// 单独标出「需要改代码而不是重试」的那类失败，

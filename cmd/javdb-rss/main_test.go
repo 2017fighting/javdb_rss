@@ -632,3 +632,93 @@ func TestBuildSourceHandlesConcurrentIdenticalRequests(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 上游健康探针（ticket 05）
+// ---------------------------------------------------------------------------
+
+// newProbeHolder 造一个指向 srv 的配置，供 upstreamChecker 用。
+func newProbeHolder(t *testing.T, host string) *config.Holder {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf("provider: appapi\napp_api:\n  host: %q\n  probe_interval: \"0\"\n", host)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := config.NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return holder
+}
+
+// TestUpstreamCheckerCarriesGuidance 钉住本票的边界：
+// 「下一步做什么」这段**上游特有**的知识属于检查方（upstreamChecker），
+// 不再属于 health。因此：
+//
+//	签名类失败 → 必须给出「去改代码」的处置（指向先例项目/备灾文档）；
+//	普通网络失败 → 必须给出「重试即可，别叫醒人」的处置，而不是签名那套。
+//
+// 这正是 health 里那条硬编码文案的替代品 —— 它搬到了这里。
+func TestUpstreamCheckerCarriesGuidance(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      http.HandlerFunc
+		wantAction   string
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name: "签名失效",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"success":0,"action":"InvalidSignature","message":"無效的簽名","data":null}`))
+			},
+			wantAction:   "InvalidSignature",
+			wantContains: []string{"javdb-cli", "dart-toolchain-probe.md"},
+		},
+		{
+			name: "普通网络故障",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte("<html>502</html>"))
+			},
+			wantAction:   "",
+			wantContains: []string{"重试"},
+			// 网络抖动时不该把「去改代码」的处置端出来 ——
+			// 那正是 health 里硬编码文案会犯的错。
+			wantAbsent: []string{"javdb-cli", "dart-toolchain-probe.md"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(tt.handler)
+			t.Cleanup(srv.Close)
+
+			c := upstreamChecker{holder: newProbeHolder(t, srv.URL)}
+			got := c.Check(context.Background())
+
+			if got.OK {
+				t.Fatal("应当报告失败")
+			}
+			if got.Action != tt.wantAction {
+				t.Errorf("Action = %q, want %q", got.Action, tt.wantAction)
+			}
+			if got.Guidance == "" {
+				t.Fatal("失败时必须给出处置动作 —— health 已经不再替检查方编造它了")
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got.Guidance, want) {
+					t.Errorf("Guidance 应当包含 %q，实际 %q", want, got.Guidance)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(got.Guidance, absent) {
+					t.Errorf("Guidance 不该包含 %q（那是签名类失败的处置），实际 %q", absent, got.Guidance)
+				}
+			}
+		})
+	}
+}

@@ -46,7 +46,7 @@ func TestTrackerDistinguishesNeverCheckedFromChecked(t *testing.T) {
 		t.Fatal("新 Tracker 不该报告「已检查过」")
 	}
 
-	tr.Record(Status{OK: false, CheckedAt: time.Now(), Err: "boom", Action: "InvalidSignature"})
+	tr.Record(Status{OK: false, CheckedAt: time.Now(), Err: "boom", Action: "SomeUpstreamAction"})
 	st, known := tr.Snapshot()
 	if !known {
 		t.Fatal("记录后应当报告「已检查过」")
@@ -54,7 +54,7 @@ func TestTrackerDistinguishesNeverCheckedFromChecked(t *testing.T) {
 	if st.OK {
 		t.Error("应当记录为失败")
 	}
-	if st.Action != "InvalidSignature" {
+	if st.Action != "SomeUpstreamAction" {
 		t.Errorf("Action = %q", st.Action)
 	}
 }
@@ -201,11 +201,19 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 //
 // 于是「服务一启动时签名就已经失效」这个常见场景（Prefix 在你重启前刚失效）
 // 会得到：唯一一条日志，且不带任何处置指引。
+//
+// 处置动作现在由**检查方**通过 Result.Guidance 提供（ticket 05）：
+// health 不再知道 action 是什么意思，也就不会再替检查方编一句
+// 可能语义错误的「下一步」。因此这里断言的是**检查方给的那句话**出现在日志里。
 func TestFirstCheckFailureCarriesActionableHint(t *testing.T) {
 	var buf syncBuffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	f := newFakeChecker(Result{OK: false, Action: "InvalidSignature", Err: "無效的簽名"})
+	const (
+		action = "UpstreamRejected"
+		hint   = "签名已失效，需要改代码；去看先例项目是否已跟进"
+	)
+	f := newFakeChecker(Result{OK: false, Action: action, Err: "permission denied", Guidance: hint})
 	tr := NewTracker()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -227,11 +235,111 @@ func TestFirstCheckFailureCarriesActionableHint(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	out := buf.String()
-	if !strings.Contains(out, "下一步") {
-		t.Errorf("首次失败的日志必须带上处置动作 —— 它可能是唯一的一条：\n%s", out)
+	if !strings.Contains(out, hint) {
+		t.Errorf("首次失败的日志必须带上检查方给的处置动作 —— 它可能是唯一的一条：\n%s", out)
 	}
-	if !strings.Contains(out, "InvalidSignature") {
+	if !strings.Contains(out, action) {
 		t.Errorf("日志应当带上 action：\n%s", out)
+	}
+}
+
+// TestFailureLogIsDrivenByCheckerGuidance 是本票的核心（ticket 05）：
+// health 只负责**呈现**检查方给的诊断，不替它编造。
+//
+// 因此换一个语义完全不同的检查方（这里虚构一个 SMTP 上游）时：
+//
+//	日志必须出现检查方自己的 action 与 guidance；
+//	日志里不得出现任何 App API 特有的错误名，也不得出现本项目的文档路径。
+//
+// 这条测试是刻意「行为化」的：它不看 health.go 的源码，只看**输出**。
+// 只要有人把上游特有的错误名或本项目文档路径这类字面量
+// 重新写回日志路径，无论写在哪一支，它都会红。
+func TestFailureLogIsDrivenByCheckerGuidance(t *testing.T) {
+	var buf syncBuffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	const (
+		action   = "SMTPAuthFailed"
+		guidance = "检查 SMTP 主机与凭据；这不是本服务的签名问题"
+	)
+	f := newFakeChecker(Result{OK: false, Action: action, Err: "535 authentication failed", Guidance: guidance})
+	tr := NewTracker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, f, tr, func() time.Duration { return time.Hour }, log)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, known := tr.Snapshot(); known {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("首次检查没发生")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	out := buf.String()
+	if !strings.Contains(out, action) {
+		t.Errorf("日志应当带上检查方给的 action %q：\n%s", action, out)
+	}
+	if !strings.Contains(out, guidance) {
+		t.Errorf("日志应当带上检查方给的 guidance：\n%s", out)
+	}
+
+	// health 不该知道任何 App API / 本项目的细节。
+	for _, leak := range []string{"InvalidSignature", "ParameterInvalid", "javdb-cli", ".scratch/"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("health 的日志泄漏了上游特有字面量 %q —— 它必须由检查方提供：\n%s", leak, out)
+		}
+	}
+
+	// 记录下来的状态也要原样保留 guidance，供 /healthz/upstream 这类呈现层使用。
+	if st, _ := tr.Snapshot(); st.Guidance != guidance {
+		t.Errorf("Status.Guidance = %q, want %q", st.Guidance, guidance)
+	}
+}
+
+// TestFailureLogPinsGuidanceAttribute 钉住日志里那个**属性名**本身。
+//
+// 上一条测试只断言「guidance 的文本出现在日志里」，因此把属性名从「下一步」
+// 改成别的、或干脆当成匿名值拼进去，它都会绿 —— 而「下一步」正是运维读日志时
+// 会去瞄的那个键（也是这条日志存在的理由）。这里直接对属性名下钉。
+func TestFailureLogPinsGuidanceAttribute(t *testing.T) {
+	var buf syncBuffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+
+	logUpstreamFailure(log, Status{OK: false, Action: "X", Err: "boom", Guidance: "重启试试"})
+
+	if out := buf.String(); !strings.Contains(out, "下一步") {
+		t.Errorf("失败日志必须用「下一步」这个名字带出处置动作：\n%s", out)
+	}
+	// action / err 不得因为加了 guidance 而被挤掉。
+	if out := buf.String(); !strings.Contains(out, "action=X") || !strings.Contains(out, "err=boom") {
+		t.Errorf("失败日志仍应带 action 与 err：\n%s", out)
+	}
+}
+
+// TestFailureLogOmitsGuidanceWhenCheckerGaveNone 钉住「检查方没给处置时不留空属性」。
+//
+// 一个空的「下一步」比没有更糟：读日志的人会以为自己漏看了什么。
+// （真实场景：检查方只报了个错，还没来得及写处置。）
+func TestFailureLogOmitsGuidanceWhenCheckerGaveNone(t *testing.T) {
+	var buf syncBuffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+
+	logUpstreamFailure(log, Status{OK: false, Action: "X", Err: "boom"})
+
+	out := buf.String()
+	if strings.Contains(out, "下一步") {
+		t.Errorf("没有 guidance 时不该写出「下一步」属性：\n%s", out)
+	}
+	// 但失败本身仍必须被记下来 —— 不能因为没有处置就整条丢掉。
+	if !strings.Contains(out, "上游检查失败") {
+		t.Errorf("没有 guidance 时仍然要记一条失败日志：\n%s", out)
 	}
 }
 

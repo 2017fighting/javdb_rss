@@ -387,7 +387,8 @@ func TestUpstreamDetailJSON(t *testing.T) {
 
 	// 检查过且失败
 	tr.Record(health.Status{OK: false, CheckedAt: time.Now(), Latency: 444 * time.Millisecond,
-		Action: "InvalidSignature", Err: "javdb api (HTTP 400): InvalidSignature: 無效的簽名"})
+		Action: "InvalidSignature", Err: "javdb api (HTTP 400): InvalidSignature: 無效的簽名",
+		Guidance: "去看 javdb-cli 是否已跟进"})
 	rec = do(t, h, "/healthz/upstream")
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("不是合法 JSON: %v", err)
@@ -404,6 +405,11 @@ func TestUpstreamDetailJSON(t *testing.T) {
 	}
 	if body["latency_ms"] != float64(444) {
 		t.Errorf("latency_ms = %v", body["latency_ms"])
+	}
+	// 检查方给的处置动作要原样透出：机读的消费方（CronJob / 告警规则）
+	// 拿到它才能说出「该干什么」，而不是只报一个错误名。
+	if body["next_step"] != "去看 javdb-cli 是否已跟进" {
+		t.Errorf("next_step = %v, want 检查方给的处置动作", body["next_step"])
 	}
 }
 

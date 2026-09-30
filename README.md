@@ -327,8 +327,13 @@ readinessProbe:
 
 // 签名失效时
 {"checked":true,"ok":false,"action":"InvalidSignature","signature_broken":true,
- "error":"javdb api (HTTP 400): InvalidSignature: 無效的簽名","latency_ms":457}
+ "error":"javdb api (HTTP 400): InvalidSignature: 無效的簽名","latency_ms":457,
+ "next_step":"签名常量已与服务端不兼容，重试无用，需要改代码：先看 javdb-cli 是否已跟进…"}
 ```
+
+`next_step` 是**检查方给出的处置动作**，原样透出。`/healthz/upstream` 不知道
+`InvalidSignature` 是什么意思 —— 它只是把上游探针说的话转出去。因此换一个语义
+不同的上游时，这里不需要改一行代码。
 
 告警规则建议匹配 `signature_broken: true` —— 它表示**要改代码，不是重试**。
 普通网络故障不算在内（避免半夜被叫起来改一个其实只需要重试的东西）。
