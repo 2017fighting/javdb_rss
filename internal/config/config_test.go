@@ -217,3 +217,139 @@ func TestProbeIntervalCanBeDisabled(t *testing.T) {
 		t.Errorf("ProbeInterval = %v, want 0", cfg.AppAPI.ProbeInterval)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// token 的来源与优先级
+// ---------------------------------------------------------------------------
+
+// TestTokenFromEnvWinsOverFile 钉住优先顺序：环境变量 > 文件。
+//
+// 环境变量是**正式部署**的通道（k8s Secret / docker env_file）——
+// 容器里不方便挂一个可写文件，而且 env 更符合「凭据不进镜像」的做法。
+// 文件则留给本地开发与 `javdb-rss login` 写入。
+//
+// 两者都用时环境变量赢，因为它是更明确的那一个。
+func TestTokenFromEnvWinsOverFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token.json")
+	if err := os.WriteFile(path, []byte(`{"token":"from-file"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("JAVDB_TOKEN", "from-env")
+	tok, err := LoadToken(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "from-env" {
+		t.Errorf("token = %q，环境变量应当优先于文件", tok)
+	}
+}
+
+// TestTokenFromEnvWithNoFile 确认没有文件时环境变量单独可用 ——
+// 这正是容器里的形态（只给 env，不挂文件）。
+func TestTokenFromEnvWithNoFile(t *testing.T) {
+	t.Setenv("JAVDB_TOKEN", "env-only")
+	tok, err := LoadToken(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err != nil {
+		t.Fatalf("没有文件不该报错: %v", err)
+	}
+	if tok != "env-only" {
+		t.Errorf("token = %q", tok)
+	}
+}
+
+// TestTokenEnvEmptyFallsBackToFile 确认空的环境变量不算「设置了」——
+// 否则一个空的 env（比如 compose 里写了但没填）会让文件里的 token 失效。
+func TestTokenEnvEmptyFallsBackToFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token.json")
+	if err := os.WriteFile(path, []byte("from-file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JAVDB_TOKEN", "   ")
+	tok, err := LoadToken(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "from-file" {
+		t.Errorf("token = %q，空白的环境变量应当被忽略", tok)
+	}
+}
+
+// TestLoadCredentials 确认自动续期的凭据只从环境变量取，且两项齐全才算配置。
+func TestLoadCredentials(t *testing.T) {
+	// 未配置
+	t.Setenv("JAVDB_USERNAME", "")
+	t.Setenv("JAVDB_PASSWORD", "")
+	if _, _, ok := LoadCredentials(); ok {
+		t.Error("两个都没设时不该报告已配置")
+	}
+	// 只设一半 —— 不算配置完成，否则会拿空密码去打上游
+	t.Setenv("JAVDB_USERNAME", "alice")
+	if _, _, ok := LoadCredentials(); ok {
+		t.Error("只设了用户名时不该报告已配置")
+	}
+	// 齐全
+	t.Setenv("JAVDB_PASSWORD", "s3cret")
+	u, p, ok := LoadCredentials()
+	if !ok || u != "alice" || p != "s3cret" {
+		t.Errorf("LoadCredentials = (%q,%q,%v)", u, p, ok)
+	}
+}
+
+// TestSaveTokenWrites0600 确认写出来的 token 文件只有属主可读。
+//
+// 它不是可选项：token 等同于账号的登录态，而 0644 在多用户机器上
+// 等于把账号交出去。测试直接断言权限位。
+func TestSaveTokenWrites0600(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "token.json")
+	if err := SaveToken(path, "eyJhbGciOi.test"); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("权限 = %o，want 600", perm)
+	}
+	// 回读要能拿到同一个值（证明写的形态与 LoadToken 的解析对得上）。
+	got, err := LoadToken(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "eyJhbGciOi.test" {
+		t.Errorf("回读 = %q", got)
+	}
+}
+
+// TestSaveTokenOverwritesTighterPerms 确认已存在的宽松权限文件会被收紧。
+//
+// 场景真实：用户手工创建过一个 0644 的 token 文件，然后跑 login 覆盖它。
+// 如果只是写内容而不改权限，旧权限会留着。
+func TestSaveTokenOverwritesTighterPerms(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token.json")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveToken(path, "new"); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(path)
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("覆盖后权限 = %o，want 600", perm)
+	}
+}
+
+// TestSaveTokenRejectsEmpty 确认不写空 token —— 那会让下一次启动
+// 静默变成匿名访问，而用户以为他登录过了。
+func TestSaveTokenRejectsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token.json")
+	if err := SaveToken(path, "   "); err == nil {
+		t.Error("空 token 应当报错")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("报错时不该留下文件")
+	}
+}

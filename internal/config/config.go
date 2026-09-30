@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -244,15 +245,33 @@ func (h *Holder) Reload() error {
 	return nil
 }
 
-// LoadToken 从文件读取手工导出的 token。
+// 环境变量名。
 //
-// 接受两种形态，因为导出方式尚未固定（ticket 05 待定）：
+// 它们存在的理由是**正式部署**：容器里挂一个可写 token 文件不方便，
+// 而 k8s Secret / docker env_file 是更自然的凭据通道。
+// 本地开发仍然用 `javdb-rss login` 写文件。
+const (
+	// EnvToken 是 token 的环境变量名。它**优先于** token 文件。
+	EnvToken = "JAVDB_TOKEN"
+	// EnvUsername / EnvPassword 启用**自动续期**（见 LoadCredentials）。
+	EnvUsername = "JAVDB_USERNAME"
+	EnvPassword = "JAVDB_PASSWORD"
+)
+
+// LoadToken 解析 token，环境变量**优先于**文件。
+//
+// 文件接受两种形态，因为导出方式尚未固定：
 //
 //	裸 JWT                  eyJhbGciOi...
 //	JSON 对象               {"token": "eyJhbGciOi..."}
 //
 // 文件不存在不算错误 —— 返回空字符串表示匿名访问，这是需求 1/2/3 的正常形态。
+// 空白的值（空字符串或全空白）一律当作「没设置」—— 否则一个空的 env
+// （比如 compose 里写了但没填）会把文件里本来可用的 token 顶掉。
 func LoadToken(path string) (string, error) {
+	if v := strings.TrimSpace(os.Getenv(EnvToken)); v != "" {
+		return v, nil
+	}
 	if path == "" {
 		return "", nil
 	}
@@ -277,4 +296,74 @@ func LoadToken(path string) (string, error) {
 		return strings.TrimSpace(obj.Token), nil
 	}
 	return trimmed, nil
+}
+
+// SaveToken 把 token 写入文件，权限 0600。
+//
+// 写的是 {"token": "..."} 形态 —— 与 LoadToken 兼容，且给将来加字段留了位置。
+//
+// 两处刻意的处理：
+//
+//  1. **先建后收紧权限**：如果文件已存在且是 0644（用户手工建过），
+//     仅覆盖内容会把旧权限留着。因此写完显式 Chmod。
+//  2. **临时文件 + rename**：避免写一半断电留下一个半截的 token 文件，
+//     那会让下次启动读到一个坏 JSON 而报错。
+func SaveToken(path, token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("拒绝写入空 token —— 那会让下次启动静默变成匿名访问")
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("创建 %s: %w", dir, err)
+	}
+	data, err := json.MarshalIndent(struct {
+		Token string `json:"token"`
+	}{Token: token}, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("写入 %s: %w", tmp, err)
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("替换 %s: %w", path, err)
+	}
+	// 目标文件若原本存在，rename 会继承临时文件的权限；但某些文件系统上
+	// 不是这样，所以显式再收紧一次。幂等操作，代价可忽略。
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	return nil
+}
+
+// LoadCredentials 返回用于**自动续期**的账号密码。
+//
+// # ⚠️ 开启它的代价：会挤掉用户手机上的 App 会话
+//
+// 用户实测报告：同一账号只能在一个地方登录，新登录会挤掉之前那个。
+// 因此启用自动续期意味着：token 一失效，本服务就去重新登录，
+// **而用户手机上的 App 会被踢下线**。
+//
+// 所以它是**由凭据是否存在来控制的开关**，而不是默认行为：
+//
+//	不设 JAVDB_PASSWORD  -> 永不自动登录，手机安全；token 失效时只能人工重登
+//	设了 JAVDB_PASSWORD  -> 自动续期，但每次续期都会踢掉手机
+//
+// 两项必须齐全才算配置 —— 只设用户名会让我们拿空密码去打上游。
+func LoadCredentials() (username, password string, ok bool) {
+	u := strings.TrimSpace(os.Getenv(EnvUsername))
+	p := os.Getenv(EnvPassword)
+	if u == "" || strings.TrimSpace(p) == "" {
+		return "", "", false
+	}
+	return u, p, true
 }

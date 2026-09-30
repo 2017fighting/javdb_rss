@@ -202,6 +202,37 @@ func successTruthy(v any) bool {
 //
 // dest 为 nil 时只校验成功与否，不解析负载。
 func (c *Client) GetJSON(ctx context.Context, path string, params url.Values, dest any) error {
+	req, err := c.newRequest(ctx, http.MethodGet, path, params, nil)
+	if err != nil {
+		return err
+	}
+	raw, err := c.do(req, path)
+	if err != nil {
+		return err
+	}
+	return decodeInto(path, raw, dest)
+}
+
+// PostFormJSON 发一次签名的 POST（application/x-www-form-urlencoded）。
+//
+// 登录走的就是这条：`POST /api/v1/sessions` 收的是表单，不是 JSON。
+func (c *Client) PostFormJSON(ctx context.Context, path string, form url.Values, dest any) error {
+	req, err := c.newRequest(ctx, http.MethodPost, path, nil, form)
+	if err != nil {
+		return err
+	}
+	raw, err := c.do(req, path)
+	if err != nil {
+		return err
+	}
+	return decodeInto(path, raw, dest)
+}
+
+// newRequest 组装一次签名请求：公共参数进 query，jdsignature 进头。
+//
+// GET 与 POST 的区别只是 body 与 method，其余（签名、公共参数、UA）完全一致 ——
+// 因此只在这里写一遍。
+func (c *Client) newRequest(ctx context.Context, method, path string, params, form url.Values) (*http.Request, error) {
 	q := c.Identity.values()
 	for k, vs := range params {
 		for _, v := range vs {
@@ -214,15 +245,22 @@ func (c *Client) GetJSON(ctx context.Context, path string, params url.Values, de
 		u += "?" + enc
 	}
 
-	ts := time.Now().Unix()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
-		return fmt.Errorf("构造请求: %w", err)
+		return nil, fmt.Errorf("构造请求: %w", err)
+	}
+	if form != nil {
+		req.Header.Set("content-type", "application/x-www-form-urlencoded")
 	}
 
 	// jdsignature 是请求头 —— 这一条是 2026-09-28 实测确认的，
 	// 早期把它当查询参数试探得到的 ParameterInvalid 是误判。
-	req.Header.Set("jdsignature", c.Signer.Sign(ts))
+	req.Header.Set("jdsignature", c.Signer.Sign(time.Now().Unix()))
 	req.Header.Set("user-agent", "Dart/3.4 (dart:io)")
 	req.Header.Set("connection", "keep-alive")
 	if c.Lang != "" {
@@ -231,16 +269,20 @@ func (c *Client) GetJSON(ctx context.Context, path string, params url.Values, de
 	if c.Token != "" {
 		req.Header.Set("authorization", "Bearer "+c.Token)
 	}
+	return req, nil
+}
 
+// do 发请求并把响应体解析成信封，返回其中的 data。
+func (c *Client) do(req *http.Request, path string) (json.RawMessage, error) {
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("请求 %s: %w", path, err)
+		return nil, fmt.Errorf("请求 %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return fmt.Errorf("读取 %s 响应: %w", path, err)
+		return nil, fmt.Errorf("读取 %s 响应: %w", path, err)
 	}
 
 	// 先尽力解析信封，**不管 HTTP 状态码**。
@@ -261,26 +303,32 @@ func (c *Client) GetJSON(ctx context.Context, path string, params url.Values, de
 
 	if envelopeOK && !successTruthy(env.Success) {
 		if authActions[env.Action] {
-			return &AuthError{Action: env.Action, Message: env.Message}
+			return nil, &AuthError{Action: env.Action, Message: env.Message}
 		}
-		return &APIError{Action: env.Action, Message: env.Message, Status: resp.StatusCode}
+		return nil, &APIError{Action: env.Action, Message: env.Message, Status: resp.StatusCode}
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("请求 %s 返回 HTTP %d: %s", path, resp.StatusCode, truncate(string(body), 200))
+		return nil, fmt.Errorf("请求 %s 返回 HTTP %d: %s", path, resp.StatusCode, truncate(string(body), 200))
 	}
 	if !envelopeOK {
-		return fmt.Errorf("解析 %s 信封失败; body=%s", path, truncate(string(body), 200))
+		return nil, fmt.Errorf("解析 %s 信封失败; body=%s", path, truncate(string(body), 200))
 	}
 
-	if dest == nil || len(env.Data) == 0 || string(env.Data) == "null" {
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return nil, nil
+	}
+	return env.Data, nil
+}
+
+func decodeInto(path string, raw json.RawMessage, dest any) error {
+	if dest == nil || len(raw) == 0 {
 		return nil
 	}
-	if err := json.Unmarshal(env.Data, dest); err != nil {
+	if err := json.Unmarshal(raw, dest); err != nil {
 		return fmt.Errorf("解析 %s 负载: %w", path, err)
 	}
 	return nil
-
 }
 
 // IsAuthError 报告 err 链上是否有凭据类错误。

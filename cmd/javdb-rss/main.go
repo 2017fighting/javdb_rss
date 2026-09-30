@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,7 +31,14 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	// 子命令分流。只有一个子命令，因此不必引入 flag 库的子命令框架。
+	var err error
+	if len(os.Args) > 1 && os.Args[1] == "login" {
+		err = runLogin(os.Args[2:])
+	} else {
+		err = run()
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		os.Exit(1)
 	}
@@ -146,6 +154,16 @@ func buildSource(cfg *config.Config, holder *config.Holder) (catalog.Source, err
 // 它也需要一个 config.Holder，因此与 main 里其他装配保持一致。
 type appapiSource struct {
 	holder *config.Holder
+	log    *slog.Logger
+
+	// reloginMu 串行化自动续期。
+	//
+	// 它不只是为了数据竞争：多个并发请求同时发现 token 失效时，
+	// 若各登各的，会**互相把对方刚拿到的 token 挤掉**（单会话账号），
+	// 结果是永远在登录、永远有一个请求拿到刚被作废的 token。
+	// 加锁之后再看一眼当前 token 是否已经变了，就能只登一次。
+	reloginMu   sync.Mutex
+	lastRelogin string
 }
 
 func (s *appapiSource) client() (*appapi.Client, error) {
@@ -174,35 +192,105 @@ func (s *appapiSource) client() (*appapi.Client, error) {
 }
 
 func (s *appapiSource) Code(ctx context.Context, code string) ([]catalog.Work, error) {
-	c, err := s.client()
-	if err != nil {
-		return nil, err
-	}
-	return c.Code(ctx, code)
+	var out []catalog.Work
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.Code(ctx, code)
+		return e
+	})
+	return out, err
 }
 
 func (s *appapiSource) Actress(ctx context.Context, id string, params url.Values) ([]catalog.Work, error) {
-	c, err := s.client()
-	if err != nil {
-		return nil, err
-	}
-	return c.Actress(ctx, id, params)
+	var out []catalog.Work
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.Actress(ctx, id, params)
+		return e
+	})
+	return out, err
 }
 
 func (s *appapiSource) ActressName(ctx context.Context, id string) (string, error) {
-	c, err := s.client()
-	if err != nil {
-		return "", err
-	}
-	return c.ActressName(ctx, id)
+	var out string
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.ActressName(ctx, id)
+		return e
+	})
+	return out, err
 }
 
 func (s *appapiSource) CollectedActresses(ctx context.Context) ([]catalog.Actress, error) {
+	var out []catalog.Actress
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.CollectedActresses(ctx)
+		return e
+	})
+	return out, err
+}
+
+// withRelogin 发一次请求；若因**凭据失效**失败且配了账号密码，则重登一次并重试。
+//
+// 只对凭据类错误重试（appapi.IsAuthError）：
+// 网络抖动、上游 5xx、参数写错都不该触发一次登录 —— 那会白白踢掉用户手机。
+func (s *appapiSource) withRelogin(ctx context.Context, fn func(*appapi.Client) error) error {
 	c, err := s.client()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return c.CollectedActresses(ctx)
+	err = fn(c)
+	if err == nil || !appapi.IsAuthError(err) {
+		return err
+	}
+	if ok := s.tryRelogin(ctx, c); !ok {
+		return err
+	}
+	// 只重试一次。再失败就如实返回 —— 反复登录只会反复踢手机。
+	return fn(c)
+}
+
+// tryRelogin 尝试用配置里的账号密码换一个新 token。返回是否换成功了。
+//
+// ⚠️ 它会让用户手机上的 App 被挤下线。这是用户选定的取舍（他要在部署里
+// 自动续期），但每次触发都会打 WARN —— 否则「手机怎么突然要重新登录」
+// 是没别的途径能查出来的。
+func (s *appapiSource) tryRelogin(ctx context.Context, c *appapi.Client) bool {
+	user, pass, ok := config.LoadCredentials()
+	if !ok {
+		return false
+	}
+
+	s.reloginMu.Lock()
+	defer s.reloginMu.Unlock()
+
+	// 拿到锁之后再看一眼：可能另一个请求已经登过了。
+	// 没有这一步的话，N 个并发请求会登 N 次，每次都挤掉上一次的 token。
+	if cur, _ := config.LoadToken(s.holder.Current().AppAPI.TokenFile); cur != "" && cur == s.lastRelogin {
+		c.Token = cur
+		return true
+	}
+
+	s.log.Warn("token 已失效，正在用配置里的账号密码自动续期 —— " +
+		"⚠️ 你手机上的 App 会话会被挤下线")
+
+	token, err := c.Login(ctx, user, pass)
+	if err != nil {
+		s.log.Error("自动续期失败，token 仍是失效的那一个（/collected 会继续 503）", "err", err)
+		return false
+	}
+
+	// 尽量落盘，让重启后还能用新 token。落盘失败不算致命 ——
+	// 本次进程内存里的 token 已经是新的了。但要说出来，否则用户会以为
+	// 「自动续期了」，而重启后又拿到旧的。
+	if err := config.SaveToken(s.holder.Current().AppAPI.TokenFile, token); err != nil {
+		s.log.Warn("自动续期成功但写入 token 文件失败 —— 重启后会退回旧 token", "err", err)
+	}
+	s.lastRelogin = token
+	c.Token = token
+	s.log.Info("自动续期成功")
+	return true
 }
 
 var _ catalog.Source = (*appapiSource)(nil)

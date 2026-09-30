@@ -27,13 +27,28 @@ feed:
 
 app_api:
   host: "https://jdforrepam.com"
-  # 手工从 App 导出的 token 路径。
+  # token 文件路径（由 `javdb-rss login` 写入，权限 0600）。
   #
   # 留空或文件不存在 = 匿名访问，这对「番号追新」和「女优追新」完全够用。
   # 只有需要读取你在 App 里收藏的女优时才需要它。
   # 支持裸 JWT，或 {"token": "..."} 形式的 JSON。
+  #
+  # ⚠️ 环境变量 JAVDB_TOKEN **优先于**这个文件。正式部署用它更合适
+  #    （容器里不方便挂可写文件），本地开发用 `javdb-rss login`。
   token_file: ""
   lang: "zh-CN"
+
+  # -- 以下两个环境变量启用「自动续期」 --
+  #
+  # ⚠️ 本账号是**单会话**：新登录会挤掉之前那个。也就是说自动续期
+  #    每次都会把你手机 App 上的会话踢下线。因此它是个由凭据存在与否
+  #    控制的开关，而不是默认行为：
+  #
+  #      不设 JAVDB_PASSWORD -> 永不自动登录，手机安全；token 失效时人工重登
+  #      设了 JAVDB_PASSWORD -> 自动续期，但每次续期都会踢掉手机
+  #
+  #    JAVDB_USERNAME=...
+  #    JAVDB_PASSWORD=...
   # 固定设备标识，让一台实例长期保持同一身份。留空则用内置默认值。
   device_uuid: ""
   # 上游健康检查间隔，如 "15m" / "1h"。
