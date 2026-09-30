@@ -349,10 +349,10 @@ func (c upstreamChecker) Check(ctx context.Context) health.Result {
 		Identity: identity,
 		Signer:   appapi.NewSigner(),
 		Lang:     ac.Lang,
-		// 并行拉磁链。串行时一个 50 部的女优页要 6.75s，
-		// 并发 8 降到 1.30s（上游本身只需 ~218ms，瓶颈在我们自己）。
-		MagnetConcurrency: ac.MagnetConcurrency,
-		// 刻意不带 token：/api/v1/startup 是匿名端点，
+		// ⚠️ 刻意**不带** MagnetConcurrency：探针只打 /api/v1/startup，从不拉磁链。
+		// 带上它只是把一个无关参数搬过来，还会让读的人以为探针会拉磁链。
+		//
+		// 也不带 token：/api/v1/startup 是匿名端点，
 		// 带上 token 只会让「token 过期」污染「签名是否有效」这个信号。
 	}
 

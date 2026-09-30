@@ -27,9 +27,12 @@ const (
 	// signPrefix 是签名前缀常量。
 	//
 	// 它由 App 内的 access key（"30820"）与包内的 CONST_PREFIX/CONST_SUFFIX
-	// 派生而成。**这是本服务唯一已知会失效的输入** ——
-	// JavDB 升级 App 或轮换服务端都可能让它作废，症状是 ParameterInvalid
-	// 重新出现。检测机制见 probe.go。
+	// 派生而成。**这是本服务唯一已知会失效的输入**。
+	//
+	// ⚠️ 失效的症状是 **HTTP 400 + action=InvalidSignature**（实测确认），
+	// 不是 ParameterInvalid —— 后者是「签名缺失或公共参数缺了」。
+	// （这里曾经写错成 ParameterInvalid，会把查日志的人引向错误的排查方向。）
+	// 检测机制见 probe.go 与 health 包的后台探针。
 	signPrefix = "71cf27bb3c0bcdf207b64abecddc970098c7421ee7203b9cdae54478478a199e7d5a6e1a57691123c1a931c057842fb73ba3b3c83bcd69c17ccf174081e3d8aa"
 
 	// signSuffix 是签名中段常量。

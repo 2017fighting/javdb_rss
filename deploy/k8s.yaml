@@ -37,7 +37,6 @@ data:
       # 这是「配置结构在三个文件里各写一份」的代价，见 ticket 04 的审查记录。
       device_uuid: ""
       magnet_concurrency: 8
-      magnet_concurrency: 8
       probe_interval: "15m"
 ---
 apiVersion: apps/v1

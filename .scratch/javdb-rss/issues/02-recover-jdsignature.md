@@ -211,3 +211,29 @@ Spec 轴找出两条**真缺陷**，另有一条基础设施失败（Standards �
    「不会访问任何网络」。已改为 stub 不启动探针。
 5. **`upstreamChecker` 带了无关的 `MagnetConcurrency`** —— 探针只打 `/startup`。
    已删（它会让读的人以为探针会拉磁链）。
+   ⚠️ **这条第一次报「已删」是假的**：那次 `edit` 是原子的，其中一个 hunk 失配
+   导致整批没应用，而我只补做了另一处。工具报过失败，我没注意到。
+   补跑 Standards 车道时发现代码里还在，现已真删。
+   （教训：`edit`/`str.replace` 之后必须回读确认，我在同一轮里已经因此栽过多次。）
+
+
+### 补跑 Standards 车道（2026-09-30，上次超时失败）
+
+5 条发现，全部已修：
+
+1. **`deploy/k8s.yaml` 里 `magnet_concurrency: 8` 写了两遍**（YAML 重复键，
+   后者覆盖前者 —— 不报错但显然是错的）。已删一条。
+2. **`upstreamChecker` 的 `MagnetConcurrency` 其实没删掉**（见上）。
+   已在装配处回读确认。
+3. ⭐ **首次检查失败时日志缺了处置动作，而之后永远不会再报。**
+   这是我为了让冷启动「成功保持静默」而引入的回归：首次那一支被简化成
+   只记 action/err/latency，而后续轮次因 `prev.OK == st.OK == false` 不再触发。
+   于是「服务一启动时签名就已失效」（Prefix 在你重启前刚失效）会得到
+   **唯一一条不带任何指引的日志**。已抽出 `logUpstreamFailure` 让两种失败
+   说同样的话，并加测试钉住（已验证「改回简化版该测试会失败」）。
+4. **`health` 包硬编码了 App API 特定的 action 名与备灾 issue 路径**，
+   而它自称「不依赖任何内部包」。**未修** —— 让 `Checker` 返回带诊断动作的
+   富上下文是更大的重构，收益不如现在直白。记为已知取舍。
+5. **`signature.go` 的注释说失效症状是 `ParameterInvalid`** —— 实测
+   Prefix 失效表现为 **HTTP 400 + `InvalidSignature`**。这会把查日志的人
+   引向错误的排查方向。已更正。

@@ -1,9 +1,11 @@
 package health
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -164,5 +166,78 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if f.calls.Load() != n {
 		t.Error("ctx 取消后仍在检查")
+	}
+}
+
+// TestFirstCheckFailureCarriesActionableHint 钉住一个我引入过的回归。
+//
+// 为了让冷启动「成功时保持静默」，我把首次检查单独分了一支；
+// 结果首次**失败**那条也走了简化分支 —— 只记 action/err/latency，
+// **没有那句「下一步」**。而后续轮次因为 prev.OK == st.OK == false
+// 再也不会打日志。
+//
+// 于是「服务一启动时签名就已经失效」这个常见场景（Prefix 在你重启前刚失效）
+// 会得到：唯一一条日志，且不带任何处置指引。
+func TestFirstCheckFailureCarriesActionableHint(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	f := newFakeChecker(Result{OK: false, Action: "InvalidSignature", Err: "無效的簽名"})
+	tr := NewTracker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, f, tr, func() time.Duration { return time.Hour }, log)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, known := tr.Snapshot(); known {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("首次检查没发生")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	// 给日志落盘一点时间（Run 里 Record 之后才打日志）。
+	time.Sleep(50 * time.Millisecond)
+
+	out := buf.String()
+	if !strings.Contains(out, "下一步") {
+		t.Errorf("首次失败的日志必须带上处置动作 —— 它可能是唯一的一条：\n%s", out)
+	}
+	if !strings.Contains(out, "InvalidSignature") {
+		t.Errorf("日志应当带上 action：\n%s", out)
+	}
+}
+
+// TestFirstCheckSuccessIsSilent 确认「成功保持静默」这条没被上一条测试改坏。
+func TestFirstCheckSuccessIsSilent(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	f := newFakeChecker(Result{OK: true})
+	tr := NewTracker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, f, tr, func() time.Duration { return time.Hour }, log)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, known := tr.Snapshot(); known {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("首次检查没发生")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	if out := buf.String(); strings.Contains(out, "恢复正常") {
+		t.Errorf("冷启动成功不该打「恢复正常」—— 它没有恢复过任何东西：\n%s", out)
 	}
 }

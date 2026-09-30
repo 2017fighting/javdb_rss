@@ -117,19 +117,20 @@ func Run(ctx context.Context, c Checker, t *Tracker, interval func() time.Durati
 		switch {
 		case !known:
 			// 首次检查：**成功保持静默**。
-			// 冷启动时打一句「恢复正常」是错的 —— 它没有「恢复」过任何东西，
-			// 而且会让「正常签名日志保持静默」这条约定失效。
+			//
+			// （冷启动时打一句「恢复正常」是错的 —— 它没有「恢复」过任何东西，
+			// 而且会让「正常签名保持静默」这条约定失效。）
+			//
+			// 但首次**失败**必须与后续失败说同样的话：服务一启动就是坏的场景很常见
+			// （Prefix 在你重启前刚失效），而那时它是你唯一的一条日志。
 			if !st.OK {
-				log.Error("上游检查失败（首次）", "action", st.Action, "err", st.Err, "latency", st.Latency)
+				logUpstreamFailure(log, st)
 			}
 		case prev.OK != st.OK:
 			if st.OK {
 				log.Info("上游检查恢复正常", "latency", st.Latency)
 			} else {
-				// 这条日志是「签名失效」最有可能的第一个信号，必须显眼。
-				log.Error("上游检查失败 —— 若 action 是 InvalidSignature / ParameterInvalid，说明签名已与服务端不兼容",
-					"action", st.Action, "err", st.Err, "latency", st.Latency,
-					"下一步", "确认 javdb-cli 是否已跟进，见 .scratch/javdb-rss/issues/02-recover-jdsignature.md")
+				logUpstreamFailure(log, st)
 			}
 		}
 	}
@@ -153,6 +154,24 @@ func Run(ctx context.Context, c Checker, t *Tracker, interval func() time.Durati
 	}
 }
 
+// logUpstreamFailure 打一条**带处置动作**的上游失败日志。
+//
+// 抽成一个函数而不是在两处各写一遍，是因为两处必须说同样的话：
+// 首次检查失败与后续状态翻转失败，对读日志的人来说是同一件事。
+// 曾经首次那条少了一句「下一步」，而它偏偏是「服务一启动就已经坏了」
+// 这个常见场景下**唯一**的一条日志。
+//
+// 注意日志只在状态**翻转**时打一次（否则每 15 分钟刷一行噪音）。
+// 「持续坏着」的可见性靠另外两条通道：/readyz 返回 503、
+// 以及 k8s 里那个每小时跑一次的告警 CronJob。
+func logUpstreamFailure(log *slog.Logger, st Status) {
+	log.Error("上游检查失败 —— 若 action 是 InvalidSignature / ParameterInvalid，说明签名已与服务端不兼容",
+		"action", st.Action, "err", st.Err, "latency", st.Latency,
+		"下一步", "确认 javdb-cli 是否已跟进，见 .scratch/javdb-rss/issues/02-recover-jdsignature.md")
+}
+
+// 探针关闭（interval <= 0）时用一个很长的退避值而不是 0 ——
+// time.Timer 的 0 或负值会立即触发，变成忙循环。
 // nextInterval 保证 Timer 拿到一个正数周期。
 //
 // 探针关闭（interval <= 0）时用一个很长的退避值而不是 0 ——
