@@ -6,10 +6,33 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// syncBuffer 是并发安全的日志收集器。
+//
+// 裸 bytes.Buffer 不行：Run 在自己的 goroutine 里写日志，测试在另一个
+// goroutine 里读 —— `go test -race` 会直接报 DATA RACE。
+// （我第一版就是这么写的，被 -race 抓到。）
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -179,7 +202,7 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 // 于是「服务一启动时签名就已经失效」这个常见场景（Prefix 在你重启前刚失效）
 // 会得到：唯一一条日志，且不带任何处置指引。
 func TestFirstCheckFailureCarriesActionableHint(t *testing.T) {
-	var buf bytes.Buffer
+	var buf syncBuffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	f := newFakeChecker(Result{OK: false, Action: "InvalidSignature", Err: "無效的簽名"})
@@ -214,7 +237,7 @@ func TestFirstCheckFailureCarriesActionableHint(t *testing.T) {
 
 // TestFirstCheckSuccessIsSilent 确认「成功保持静默」这条没被上一条测试改坏。
 func TestFirstCheckSuccessIsSilent(t *testing.T) {
-	var buf bytes.Buffer
+	var buf syncBuffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	f := newFakeChecker(Result{OK: true})
