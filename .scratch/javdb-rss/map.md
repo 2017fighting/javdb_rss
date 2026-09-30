@@ -166,20 +166,33 @@ internal/stub/        固定数据的假数据源
 - **`size` 的单位**：假定为兆字节并据此填 `enclosure length`。
   qBittorrent 不拿它做判断，所以不影响功能 —— 价值低，但确实没核实。
 
-## 已在卡片之外、但确实「完成却未验证」的东西
+## 验收状态（2026-09-30 用真实 qBittorrent 走通）
 
-<!-- 这些不是雾也不是 ticket，是**验收缺口**：代码写完了，但从没在真实环境里跑过。
-     列在这里是因为它们决定「能不能真的用」。 -->
+<!-- 这一节记录**真实验收**结果，不是代码写完就算。
+     wayfinder 的终点是「qBittorrent 能订阅」，代理指标（RSS 是合法 XML）不算数。 -->
 
-- ⭐ **从未用真实的 qBittorrent 订阅过。** 需求的验收标准是「提供给 qBittorrent」，
-  而我们只验证了「RSS 是合法 XML」，没有验证 qBittorrent 能正确读取、
-  按 guid 去重、并把磁链交给下载器。**这是最大的验收缺口。**
-- **Docker 镜像从未构建过** —— 本机 docker daemon 未运行。
-  Dockerfile 的语法与逻辑经审阅，`docker build` 未执行。
-- **CI 从未运行过** —— workflow 文件已写，但仓库没有 push 过，
-  GitHub Actions 一次都没跑。
-- **token 路径从未走通过** —— `config.LoadToken` 与 `Authorization: Bearer`
-  的管路都写好了，但没有真实 token 验证过端到端。
+用 Docker 起了一个真实的 qBittorrent（v5.2.4）与我们自己的镜像，同网互通，
+通过 qBittorrent 的 Web API 完成端到端验收：
+
+| 验收项 | 结果 |
+|---|---|
+| **Docker 镜像能构建** | ✅ `docker build` 成功（此前从未构建过） |
+| **qBittorrent 能订阅番号 feed** | ✅ 正确解出 `guid` / `title` / `torrentURL` / `date` / `category`，`hasError: false` |
+| **qBittorrent 能订阅女优 feed** | ✅ 17 条，`title: JavDB · EvkJ` |
+| **磁链能被 BitTorrent 引擎接受** | ✅ `success_count: 1`，正确解出 infohash，`dn` 渲染为正常空格（`%20` 修复生效） |
+| **`guid` 跨轮询稳定** | ✅ 连续刷新 3 次 article id 不变 → 不会重复下载 |
+| **需求 3 `since`** | ✅ `17 条 → 5 条`（`?since=2026-06-01`） |
+| **需求 2 字幕优先** | ✅ feed 里出现「中文字幕 ·」条目 |
+| **健康三端点** | ✅ `/healthz` `ok`、`/readyz` `ok`、`/healthz/upstream` `signature_broken: false` |
+
+**至此需求 1/2/3 不再是「代码写完了」，而是「真的能用」。**
+
+仍未验收的：
+
+- **实际下载行为** —— 刻意没做。验收用的是停止态加入（`stopped=true`），
+  零流量、验完即删。磁链能被接受这一点已证明；「下不下」是 qBittorrent 的策略。
+- **CI 从未运行过** —— workflow 已写，仓库没 push 过。
+- **token 路径从未走通** —— 管路写好了，没有真 token（依赖 ticket 05）。
 
 ## Out of scope
 
