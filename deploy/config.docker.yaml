@@ -31,7 +31,7 @@ app_api:
   # 容器内路径 —— 由 compose 把宿主机的 token 文件挂到 /token/token.json。
   # 留空或文件不存在 = 匿名访问，这对需求 1/2/3 完全够用。
   token_file: "/token/token.json"
-  lang: "en"
+  lang: "zh-CN"
   device_uuid: ""
   # 并行拉磁链的并发上限。8 是实测的收益拐点附近。
   magnet_concurrency: 8

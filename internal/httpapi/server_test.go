@@ -33,6 +33,13 @@ type recordingSource struct {
 	gotActressCur url.Values
 	gotCode       string
 	err           error
+
+	// 收藏列表相关的可控制行为
+	collected       []catalog.Actress
+	collectedErr    error
+	collectedCalled int
+	// names 控制 ActressName 的返回；不在表里的 id 返回错误。
+	names map[string]string
 }
 
 func (r *recordingSource) Code(_ context.Context, code string) ([]catalog.Work, error) {
@@ -41,6 +48,23 @@ func (r *recordingSource) Code(_ context.Context, code string) ([]catalog.Work, 
 		return nil, r.err
 	}
 	return r.works, nil
+}
+
+func (r *recordingSource) ActressName(_ context.Context, id string) (string, error) {
+	if r.names != nil {
+		if n, ok := r.names[id]; ok {
+			return n, nil
+		}
+	}
+	return "", errors.New("没有名字")
+}
+
+func (r *recordingSource) CollectedActresses(context.Context) ([]catalog.Actress, error) {
+	r.collectedCalled++
+	if r.collectedErr != nil {
+		return nil, r.collectedErr
+	}
+	return r.collected, nil
 }
 
 func (r *recordingSource) Actress(_ context.Context, id string, params url.Values) ([]catalog.Work, error) {

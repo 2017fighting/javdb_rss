@@ -1,7 +1,7 @@
 # 需求 4 的呈现形态：读到的 App 收藏女优怎么变成 feed
 
 Type: grilling
-Status: open
+Status: resolved
 
 ## Question
 
@@ -56,3 +56,76 @@ ticket 05（手工导出 token）先通，否则没有东西可测。
 
 - 写进 map 的 Decisions-so-far
 - 路由形态定下来后回写 README 与 config.example.yaml
+
+
+## Answer
+
+**已定（2026-09-30 与用户 grill 得出）并已实现。**
+
+### 决定
+
+1. **呈现形态 = 只做发现**：新增 `GET /collected`，返回收藏女优的 JSON 清单。
+   **不做**聚合 feed，**不做**自动填充白名单。
+2. **没有 token 时返回 503 + 明确文案**，不是 200 + 空列表，也不是 404。
+3. **现算、翻页到底、不缓存。**
+4. **女优 feed 标题用真名字**，拿不到退回 id。
+
+### 为什么否掉了聚合 feed（这是本票最有价值的一条推理）
+
+按票里的方案 1，`/rss/collected.xml` 要为每个收藏女优各拉一次列表 + 每部作品的磁链。
+用 ticket 06/09 量出的真实数字算：
+
+```
+每个女优 ≈ 1 次列表 + 17 次磁链 = 18 次请求
+20 个收藏女优 ≈ 360 次请求 ≈ 19 秒（并发 8，每次 ~430ms）
+qBittorrent 每 15 分钟轮询一次就重来一遍
+```
+
+而 ticket 09 已定「不做缓存、不做后台刷新」。**方案 1 与已定的成本策略直接冲突** ——
+要么接受这个成本，要么推翻票 09。用户选择了不引入这个矛盾。
+
+`/collected` 的成本是「每次访问 1 次请求/页」，而它是**给人看的、低频的**，
+qBittorrent 不会碰它 —— 缓存毫无意义。
+
+### 实现
+
+- `catalog.Source` 端口新增两个方法：
+  - `CollectedActresses(ctx) ([]Actress, error)` —— 需要 token
+  - `ActressName(ctx, id) (string, error)` —— 匿名可用
+- 新增 `catalog.Actress` 类型与 `catalog.ErrNoToken` 哨兵错误
+- `internal/appapi/collected.go`：实现两者
+- `internal/httpapi`：`GET /collected` 路由 + `handleCollected` + `writeCollectedError`
+- 女优 feed 标题经 `actressTitle` 取名字，**失败只记 debug 级且不影响 feed**
+
+### 两处实现中发现的事实（与票面假设不同）
+
+**① `name_zht` 恒为空，不要读它。** 实测（2026-09-30）：
+
+```
+accept-language: en     -> name = "Kawakita Saika"
+accept-language: zh-CN  -> name = "河北彩花"
+```
+
+随 lang 变化的是 `name` 字段本身。先例项目 javdb-cli 的测试夹具给 `name_zht`
+填了值，**照抄会写出一个永远落到 fallback 的实现**。
+
+**② `lang` 默认从 `en` 改为 `zh-CN`。** 既然它决定名字语言，而本服务的用户与内容
+都是中文的，默认 `en` 会让标题显示罗马音。这是一个**行为变更**，已写进 README。
+
+### 验收
+
+**已验证**（离线 + 真实上游）：
+
+| 项 | 结果 |
+|---|---|
+| `/collected` 无 token | ✅ 503 + 可操作文案 |
+| 女优 feed 标题 | ✅ `JavDB · 河北彩花`（真实上游，此前是 `JavDB · EvkJ`） |
+| 番号 feed 不受影响 | ✅ `JavDB · KV-328` |
+| `/collected` 给出的 feed 路径真的可访问 | ✅ 一致性测试 |
+| `name_zht` 不被读取 | ✅ 测试里给它填了值，断言实现仍用 `name` |
+| 跨页去重 / 翻页上限 / token 过期与缺失分开 | ✅ 各有测试 |
+
+**未验证（诚实标注）**：`/collected` 的**成功路径从未对着真实 API 跑过** ——
+它需要 token，而 ticket 05 未做。契约来自先例项目的实现与夹具
+（`{actors: [...]}` + page 翻页），形状可信但未在 1.9.35 上复验。
+一旦 ticket 05 通了，第一件事就是跑一次 `curl /collected` 确认。

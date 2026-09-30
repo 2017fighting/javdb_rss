@@ -1,0 +1,220 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/2017fighting/javdb_rss/internal/appapi"
+	"github.com/2017fighting/javdb_rss/internal/catalog"
+	"github.com/2017fighting/javdb_rss/internal/stub"
+)
+
+type collectedResponse struct {
+	Actresses []struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		VideosCount int    `json:"videos_count"`
+		Feed        string `json:"feed"`
+	} `json:"actresses"`
+}
+
+// TestCollectedReturnsTheList 是发现端点的正常路径。
+//
+// 它的产物是**给人看的清单**，不是 feed —— 用户看到后自己决定把哪些 id
+// 填进配置或 URL。因此每一条都要带上可以直接用的 feed 路径。
+func TestCollectedReturnsTheList(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+
+	rec := do(t, h, "/collected")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("content-type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("content-type = %q，它不该是 feed", ct)
+	}
+
+	var got collectedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("不是合法 JSON: %v\n%s", err, rec.Body.String())
+	}
+	if len(got.Actresses) != 2 {
+		t.Fatalf("得到 %d 条，want 2", len(got.Actresses))
+	}
+	a := got.Actresses[0]
+	if a.ID != "EvkJ" || a.Name != "河北彩花" || a.VideosCount != 229 {
+		t.Errorf("字段映射不对: %+v", a)
+	}
+	if a.Feed != "/rss/actress/EvkJ.xml" {
+		t.Errorf("feed 路径 = %q，用户要能直接拿去用", a.Feed)
+	}
+}
+
+// TestCollectedWithoutTokenReturns503 是最要紧的一条。
+//
+// 没有 token 时**绝不能**返回 200 + 空列表：用户会以为「我没收藏任何人」，
+// 而真相是「服务读不到」。两者需要完全不同的动作。
+func TestCollectedWithoutTokenReturns503(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{NoToken: true})
+
+	rec := do(t, h, "/collected")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("状态码 = %d，want 503（不能是 200，也不能是 404）", rec.Code)
+	}
+	body := rec.Body.String()
+	// 文案必须指向动作，而不只是报一个状态码。
+	if !strings.Contains(body, "token") {
+		t.Errorf("文案里应当说明是 token 的问题: %s", body)
+	}
+	// 必须解释清楚，而不是一个光秃秃的空列表。
+	var parsed map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &parsed)
+	if _, isList := parsed["actresses"]; isList {
+		t.Error("不该返回一个空列表字段 —— 那会被理解成「确实没收藏」")
+	}
+}
+
+// TestCollectedAuthErrorAlsoReturns503 确认 token 过期与 token 缺失都被判为
+// 「需要用户动手」，但文案不同。
+func TestCollectedAuthErrorAlsoReturns503(t *testing.T) {
+	src := &stub.Source{}
+	// 用一个会返回 AuthError 的包装来模拟 token 过期。
+	h := newTestServer(t, "provider: stub\n", authErrSource{src})
+	rec := do(t, h, "/collected")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("状态码 = %d，want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "token") {
+		t.Errorf("文案里应当提到 token: %s", rec.Body.String())
+	}
+}
+
+// authErrSource 让 CollectedActresses 返回一个凭据类错误。
+//
+// 嵌入指针而不是值：stub.Source 的方法都是指针接收者，
+// 按值嵌入不会提升它们。
+type authErrSource struct{ *stub.Source }
+
+func (authErrSource) CollectedActresses(context.Context) ([]catalog.Actress, error) {
+	return nil, &appapi.AuthError{Action: "TokenExpired", Message: "token 已過期"}
+}
+
+// TestCollectedUpstreamErrorReturns502 确认普通上游故障与凭据问题分开 ——
+// 一个要重试，一个要用户动手。
+func TestCollectedUpstreamErrorReturns502(t *testing.T) {
+	src := &recordingSource{collectedErr: errors.New("上游炸了")}
+	h := newTestServer(t, "provider: stub\n", src)
+
+	rec := do(t, h, "/collected")
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("状态码 = %d，want 502", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "上游炸了") {
+		t.Errorf("原因没有透出: %s", rec.Body.String())
+	}
+}
+
+// TestCollectedIsNotAFeed 确认它不是 feed 路由 ——
+// 别的路由都带 .xml 后缀且在 /rss/ 下。
+func TestCollectedIsNotAFeed(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+	if rec := do(t, h, "/rss/collected.xml"); rec.Code != http.StatusNotFound {
+		t.Errorf("/rss/collected.xml = %d，发现端点不该伪装成 feed", rec.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 女优 feed 标题用真名字
+// ---------------------------------------------------------------------------
+
+// TestActressFeedTitleUsesRealName 确认标题从 id 换成了真名字。
+func TestActressFeedTitleUsesRealName(t *testing.T) {
+	src := &stub.Source{Names: map[string]string{"EvkJ": "河北彩花"}}
+	h := newTestServer(t, "provider: stub\n", src)
+
+	var f parsedFeed
+	rec := do(t, h, "/rss/actress/EvkJ.xml")
+	if err := xml.Unmarshal(rec.Body.Bytes(), &f); err != nil {
+		t.Fatalf("不是合法 RSS: %v", err)
+	}
+	if f.Channel.Title != "JavDB · 河北彩花" {
+		t.Errorf("channel title = %q，应当用真名字", f.Channel.Title)
+	}
+}
+
+// TestActressFeedTitleFallsBackToID 是配套的兜底：
+// 拿不到名字时标题退回 id，而且 **feed 必须照常工作**。
+//
+// 这是刻意的设计取舍：名字只是好看，不该因为一次取名失败就让整个 feed 挂掉。
+func TestActressFeedTitleFallsBackToID(t *testing.T) {
+	src := &stub.Source{} // Names 为 nil，且只有一个样例名字
+	h := newTestServer(t, "provider: stub\n", src)
+
+	var f parsedFeed
+	rec := do(t, h, "/rss/actress/unknown-id.xml")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("取名失败不该影响 feed：状态码 = %d", rec.Code)
+	}
+	if err := xml.Unmarshal(rec.Body.Bytes(), &f); err != nil {
+		t.Fatalf("不是合法 RSS: %v", err)
+	}
+	if f.Channel.Title != "JavDB · unknown-id" {
+		t.Errorf("channel title = %q，应当退回 id", f.Channel.Title)
+	}
+	if len(f.Channel.Items) == 0 {
+		t.Error("内容不该受影响")
+	}
+}
+
+// TestCodeFeedTitleUnchanged 确认番号 feed 的标题没被这次改动波及。
+func TestCodeFeedTitleUnchanged(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+	var f parsedFeed
+	rec := do(t, h, "/rss/code/KV-328.xml")
+	_ = xml.Unmarshal(rec.Body.Bytes(), &f)
+	if f.Channel.Title != "JavDB · KV-328" {
+		t.Errorf("番号 feed 标题 = %q", f.Channel.Title)
+	}
+}
+
+// TestCollectedFeedPathsMatchRealRoutes 是一致性检查：
+// /collected 里给出的 feed 路径必须真的能被访问。
+//
+// 这条能抓到「清单里写了一个不存在的路由」这种低级但很难发现的错误 ——
+// 用户会照着它去 qBittorrent 里填，然后拿到 404。
+func TestCollectedFeedPathsMatchRealRoutes(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+
+	rec := do(t, h, "/collected")
+	var got collectedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range got.Actresses {
+		if a.Feed == "" {
+			t.Errorf("%s 没有 feed 路径", a.ID)
+			continue
+		}
+		rr := do(t, h, a.Feed)
+		if rr.Code != http.StatusOK {
+			t.Errorf("/collected 给出的路径 %s 实际返回 %d —— 用户会照着它填进 qBittorrent",
+				a.Feed, rr.Code)
+		}
+	}
+}
+
+// TestCollectedRejectsNonGET 确认只接受 GET（与其它路由一致）。
+func TestCollectedRejectsNonGET(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+	req := httptest.NewRequest(http.MethodPost, "/collected", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /collected = %d, want 405", rec.Code)
+	}
+}

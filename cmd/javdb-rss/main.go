@@ -189,6 +189,22 @@ func (s *appapiSource) Actress(ctx context.Context, id string, params url.Values
 	return c.Actress(ctx, id, params)
 }
 
+func (s *appapiSource) ActressName(ctx context.Context, id string) (string, error) {
+	c, err := s.client()
+	if err != nil {
+		return "", err
+	}
+	return c.ActressName(ctx, id)
+}
+
+func (s *appapiSource) CollectedActresses(ctx context.Context) ([]catalog.Actress, error) {
+	c, err := s.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.CollectedActresses(ctx)
+}
+
 var _ catalog.Source = (*appapiSource)(nil)
 
 // upstreamChecker 在每次检查时**重新读取配置**构造客户端。

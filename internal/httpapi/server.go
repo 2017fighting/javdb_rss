@@ -5,7 +5,9 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -51,6 +53,10 @@ func (s *Server) WithUpstream(t *health.Tracker) *Server {
 // Handler 返回完整的 HTTP 处理器。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// 发现端点 —— **不是 feed**。刻意放在 /rss/ 之外、也不带 .xml，
+	// 因为它的产物是给人看的清单（拿去填配置或 URL），qBittorrent 不会碰它。
+	mux.HandleFunc("GET /collected", s.handleCollected)
 
 	// 用前缀匹配而不是 {code} 通配符：Go 的 ServeMux 要求通配符占满整个
 	// 路径段，而我们要容忍结尾的 .xml，因此在这里自己剥。
@@ -140,6 +146,73 @@ func (s *Server) upstreamStatus() (health.Status, bool) {
 	return s.upstream.Snapshot()
 }
 
+// ---------------------------------------------------------------------------
+// 收藏女优发现端点（需求 4）
+// ---------------------------------------------------------------------------
+
+// collectedEntry 是 /collected 里的一条。
+type collectedEntry struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	VideosCount int    `json:"videos_count"`
+	// Feed 是可以直接拿去用的 feed 路径。
+	//
+	// 给出它而不是让用户自己拼：拼错了只会得到 404，而用户会以为服务坏了。
+	// 测试里有一条一致性检查，保证这里给出的路径真的能访问。
+	Feed string `json:"feed"`
+}
+
+// handleCollected 服务 GET /collected：列出 App 里收藏的女优。
+//
+// 这是需求 4 的落点。本服务**不**因为你收藏了谁就自动为它建 feed ——
+// 它只把列表（带现成的 feed 路径）交给你，由你决定订哪些。
+// 这样既满足了「读取订阅的女优」，又不破坏已定的「URL 即订阅」形态，
+// 也不引入「一条 feed 对应 N 个订阅」那个高成本形态。
+func (s *Server) handleCollected(w http.ResponseWriter, r *http.Request) {
+	actresses, err := s.src.CollectedActresses(r.Context())
+	if err != nil {
+		s.log.ErrorContext(r.Context(), "取收藏女优失败", "err", err)
+		writeCollectedError(w, err)
+		return
+	}
+
+	out := struct {
+		Actresses []collectedEntry `json:"actresses"`
+	}{Actresses: make([]collectedEntry, 0, len(actresses))}
+	for _, a := range actresses {
+		out.Actresses = append(out.Actresses, collectedEntry{
+			ID:          a.ID,
+			Name:        a.Name,
+			VideosCount: a.VideosCount,
+			Feed:        "/rss/actress/" + url.PathEscape(a.ID) + ".xml",
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// writeCollectedError 把三种失败分开。
+//
+// 关键是**不能返回 200 + 空列表**：那会被理解成「你没收藏任何人」，
+// 而真相是「服务读不到」—— 两者的下一步动作完全不同。
+func writeCollectedError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, catalog.ErrNoToken):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "尚未配置 token，读不到 App 里的收藏女优。" +
+				"请从 App 导出后配置 app_api.token_file（见 README）。" +
+				"注意：番号订阅与女优订阅不需要 token，不受此影响。",
+		})
+	case appapi.IsAuthError(err):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "token 已失效，请重新从 App 导出并更新 token_file。原因：" + err.Error(),
+		})
+	default:
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "读取收藏女优失败：" + err.Error(),
+		})
+	}
+}
+
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"version":  Version,
@@ -223,11 +296,25 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderFeed(w, r, feed.Meta{
-		Title:       "JavDB · " + id,
+		Title:       s.actressTitle(r.Context(), id),
 		Link:        s.feedURL(r),
 		Description: "女优 " + id + " 的订阅源",
 		Language:    s.cfg.Current().Feed.Language,
 	}, works)
+}
+
+// actressTitle 拼女优 feed 的标题，能用真名字就用。
+//
+// 这是**刻意的非关键路径**：名字只是好看，任何失败（上游出错、没名字、
+// 超时）都退回 id，绝不让取名失败把一个本来能用的 feed 弄挂。
+// 因此这里的错误只记 debug 级，且不返回给调用方。
+func (s *Server) actressTitle(ctx context.Context, id string) string {
+	name, err := s.src.ActressName(ctx, id)
+	if err != nil || strings.TrimSpace(name) == "" {
+		s.log.DebugContext(ctx, "取女优名字失败，标题退回 id", "id", id, "err", err)
+		return "JavDB · " + id
+	}
+	return "JavDB · " + name
 }
 
 // renderFeed 是两条路由共用的收尾：选磁链、渲染 RSS。

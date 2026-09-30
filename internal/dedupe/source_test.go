@@ -26,6 +26,16 @@ func (c *countingSource) Code(context.Context, string) ([]catalog.Work, error) {
 	return []catalog.Work{{Number: "X-1"}}, nil
 }
 
+func (c *countingSource) ActressName(_ context.Context, id string) (string, error) {
+	return "名字-" + id, nil
+}
+
+func (c *countingSource) CollectedActresses(context.Context) ([]catalog.Actress, error) {
+	c.actressCalls.Add(1)
+	time.Sleep(c.delay)
+	return []catalog.Actress{{ID: "EvkJ", Name: "河北彩花"}}, nil
+}
+
 func (c *countingSource) Actress(_ context.Context, _ string, params url.Values) ([]catalog.Work, error) {
 	c.actressCalls.Add(1)
 	c.mu.Lock()
@@ -218,5 +228,9 @@ type emptySource struct{}
 
 func (emptySource) Code(context.Context, string) ([]catalog.Work, error) { return nil, nil }
 func (emptySource) Actress(context.Context, string, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}
+func (emptySource) ActressName(context.Context, string) (string, error) { return "", nil }
+func (emptySource) CollectedActresses(context.Context) ([]catalog.Actress, error) {
 	return nil, nil
 }

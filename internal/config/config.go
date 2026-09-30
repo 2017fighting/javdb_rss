@@ -60,7 +60,13 @@ type AppAPIConfig struct {
 	// TokenFile 是手工从 App 导出的 token 存放路径。
 	// 留空表示匿名访问 —— 需求 1/2/3 不需要 token。
 	TokenFile string `yaml:"token_file"`
-	// Lang 是 accept-language，影响服务端返回的文案语言。
+	// Lang 是 accept-language。它决定了上游返回的**女优名字用哪种语言**：
+	//
+	//	en     -> "Kawakita Saika"
+	//	zh-CN  -> "河北彩花"
+	//
+	// （实测 2026-09-30。注意不要指望 name_zht 字段 —— 它在新版服务端恒为空。）
+	// 默认 zh-CN，因为本服务的用户与内容都是中文的。
 	Lang string `yaml:"lang"`
 	// DeviceUUID 覆盖默认的设备标识，让一台实例长期保持同一身份。
 	DeviceUUID string `yaml:"device_uuid"`
@@ -113,7 +119,8 @@ func Default() *Config {
 		},
 		AppAPI: AppAPIConfig{
 			Host: "https://jdforrepam.com",
-			Lang: "en",
+			// zh-CN 而不是 en：它决定女优名字的语言（见 Lang 字段的说明）。
+			Lang: "zh-CN",
 			// 默认打开探针。k8s 下这是 /readyz 的数据来源；
 			// 单纯跑 go run 时它只是一次每 15 分钟的轻请求，代价可忽略。
 			ProbeInterval: 15 * time.Minute,

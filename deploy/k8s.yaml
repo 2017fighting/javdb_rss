@@ -28,7 +28,7 @@ data:
     app_api:
       host: "https://jdforrepam.com"
       token_file: "/token/token.json"
-      lang: "en"
+      lang: "zh-CN"
       magnet_concurrency: 8
       probe_interval: "15m"
 ---

@@ -25,6 +25,14 @@ type Source struct {
 	CodeWorks []catalog.Work
 	// ActressWorks 是 Actress 的返回值；为 nil 时用内置的样例数据。
 	ActressWorks []catalog.Work
+	// Names 覆盖 ActressName 的返回值。不在表里的 id 返回错误
+	// （模拟上游没有这个名字），调用方据此退回 id。
+	Names map[string]string
+	// Collected 是 CollectedActresses 的返回值；为 nil 时用内置样例。
+	Collected []catalog.Actress
+	// NoToken 为 true 时 CollectedActresses 返回 catalog.ErrNoToken，
+	// 用来验证上层对「没配 token」的处置。
+	NoToken bool
 }
 
 // 样例数据刻意覆盖三种关键形态，好让端到端跑起来时一眼能看出规则生效：
@@ -94,4 +102,38 @@ func (s *Source) Actress(_ context.Context, id string, params url.Values) ([]cat
 		return nil, fmt.Errorf("女优 id 为空")
 	}
 	return s.actressWorks(), nil
+}
+
+// ActressName 实现 catalog.Source。
+//
+// 默认只给样例里的那个女优名字，其余返回错误 —— 这样既测得到「用名字」
+// 又测得到「拿不到就退回 id」两条路径。
+func (s *Source) ActressName(_ context.Context, id string) (string, error) {
+	if s.Err != nil {
+		return "", s.Err
+	}
+	if name, ok := s.Names[id]; ok && name != "" {
+		return name, nil
+	}
+	if s.Names == nil && id == "EvkJ" {
+		return "河北彩花", nil
+	}
+	return "", fmt.Errorf("女优 %s 没有名字", id)
+}
+
+// CollectedActresses 实现 catalog.Source。
+func (s *Source) CollectedActresses(_ context.Context) ([]catalog.Actress, error) {
+	if s.NoToken {
+		return nil, fmt.Errorf("取收藏女优: %w", catalog.ErrNoToken)
+	}
+	if s.Err != nil {
+		return nil, s.Err
+	}
+	if s.Collected != nil {
+		return s.Collected, nil
+	}
+	return []catalog.Actress{
+		{ID: "EvkJ", Name: "河北彩花", VideosCount: 229},
+		{ID: "xyz1", Name: "Another Name", VideosCount: 57},
+	}, nil
 }

@@ -56,6 +56,42 @@ func (s *Source) Actress(ctx context.Context, id string, params url.Values) ([]c
 	})
 }
 
+// ActressName 实现 catalog.Source。
+//
+// 它没有参数，因此按 id 合并即可。值得合并的理由：一个女优 feed 每次渲染
+// 都会问一次名字，而 qBittorrent 可能同时拉同一个 feed 的多个连接。
+func (s *Source) ActressName(ctx context.Context, id string) (string, error) {
+	v, err, sharedCall := s.group.Do("name:"+id, func() (any, error) {
+		return s.inner.ActressName(ctx, id)
+	})
+	if sharedCall {
+		s.shared.Add(1)
+	}
+	if err != nil {
+		return "", err
+	}
+	name, _ := v.(string)
+	return name, nil
+}
+
+// CollectedActresses 实现 catalog.Source。
+//
+// 它没有参数，因此所有并发调用合并成一次 —— 这是最划算的一处合并：
+// 收藏列表要翻好几页，而它只有在你打开 /collected 时才会被请求。
+func (s *Source) CollectedActresses(ctx context.Context) ([]catalog.Actress, error) {
+	v, err, sharedCall := s.group.Do("collected", func() (any, error) {
+		return s.inner.CollectedActresses(ctx)
+	})
+	if sharedCall {
+		s.shared.Add(1)
+	}
+	if err != nil {
+		return nil, err
+	}
+	got, _ := v.([]catalog.Actress)
+	return got, nil
+}
+
 // do 是两条路由共用的收尾，顺便统计命中情况。
 func (s *Source) do(key string, fn func() ([]catalog.Work, error)) ([]catalog.Work, error) {
 	v, err, sharedCall := s.group.Do(key, func() (any, error) {

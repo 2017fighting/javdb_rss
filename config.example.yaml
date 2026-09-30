@@ -33,7 +33,7 @@ app_api:
   # 只有需要读取你在 App 里收藏的女优时才需要它。
   # 支持裸 JWT，或 {"token": "..."} 形式的 JSON。
   token_file: ""
-  lang: "en"
+  lang: "zh-CN"
   # 固定设备标识，让一台实例长期保持同一身份。留空则用内置默认值。
   device_uuid: ""
   # 上游健康检查间隔，如 "15m" / "1h"。
