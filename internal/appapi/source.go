@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 )
@@ -23,11 +25,11 @@ type movieSlim struct {
 	ReleaseDate string `json:"release_date"`
 	// HasCNSub 是**作品级**的中文字幕标记。
 	//
-	// 注意它与磁链级的 `cnsub` 不是一回事：作品级只是「这片有字幕版」，
+	// 注意它与磁链级的 `cnsub` 不是一回事：作品级只是「该作品有中文字幕版」，
 	// 而 feed 要选的是具体某条磁链，因此槽位规则用的是磁链级的那个。
-	// 这里保留它是因为它能在不拉磁链的情况下先做一次筛选。
+	// 这里保留它是因为它能在不拉磁链的情况下先按中文字幕筛一遍。
 	HasCNSub bool `json:"has_cnsub"`
-	// MagnetsCount 是磁链数量。为 0 表示还没人发种 —— 此时不必去拉磁链列表。
+	// MagnetsCount 是磁链数量。为 0 表示尚无磁链候选 —— 此时不必去拉磁链列表。
 	MagnetsCount int `json:"magnets_count"`
 }
 
@@ -51,28 +53,26 @@ type magnetsEnvelope struct {
 	Magnets []magnetWire `json:"magnets"`
 }
 
-// resolveExact 把番号解析成作品 id，**只接受番号精确匹配的那一条**。
+// resolveExact 把番号解析成**精确匹配**的作品。
 //
-// 这是本包最容易写错、后果又最隐蔽的一处。实测（2026-09-28）发现：
-//
-//	GET /api/v2/search?q=KV-328
-//	→ 8 部作品，番号分别是 KV-328 / KV-323 / KV-322 / KV-326 / KV-318 / KV-324 / KV-329 / KV-327
-//
-// 这是一个**模糊/前缀搜索**，不是精确查询。如果按位置取 movies[0]，
-// 番号尾部稍有不同就会静默命中错误的作品 —— 而且不会报错，
-// 只会给用户发一个他根本没订阅的作品。这是本服务最不该犯的一类错误。
-//
-// 所以这里显式按 `number` 字段精确比对（忽略大小写与首尾空白）。
-// 找不到就返回错误，**绝不退回「取第一个」**。
-func (c *Client) resolveExact(ctx context.Context, code string) (string, error) {
+// 返回完整的 movieSlim 而不是光秃秃的 id，因为搜索响应里已经带了
+// number/title/release_date/magnets_count —— 丢掉它们就得再打一次
+// `/api/v4/movies/{id}` 详情端点（之前就是这样：白花 200~400ms，
+// 还丢掉了 magnets_count，因而无法对零做种的作品短路跳过磁链请求）。
+func (c *Client) resolveExact(ctx context.Context, code string) ([]movieSlim, error) {
 	want := normalizeCode(code)
 	if want == "" {
-		return "", fmt.Errorf("番号为空")
+		return nil, fmt.Errorf("番号为空")
 	}
 
+	// limit 必须显式给。这是一个**模糊/前缀搜索**，默认只返回 10 条，
+	// 而精确匹配不一定排在前 10。实测（2026-09-30）limit 生效且上限就是 50，
+	// 因此要满上限 —— 否则近似结果多于 10 条时真目标会被挤出，
+	// 表现为一个莫名其妙的「没有精确匹配」。
 	var env movieListEnvelope
-	if err := c.GetJSON(ctx, "/api/v2/search", url.Values{"q": {code}}, &env); err != nil {
-		return "", err
+	if err := c.GetJSON(ctx, "/api/v2/search",
+		url.Values{"q": {code}, "limit": {strconv.Itoa(limitPerPage)}}, &env); err != nil {
+		return nil, err
 	}
 
 	var matches []movieSlim
@@ -81,21 +81,14 @@ func (c *Client) resolveExact(ctx context.Context, code string) (string, error) 
 			matches = append(matches, m)
 		}
 	}
-
-	switch len(matches) {
-	case 0:
-		return "", fmt.Errorf("番号 %q 没有精确匹配的作品（搜索返回 %d 条，均为近似结果）", code, len(env.Movies))
-	case 1:
-		return matches[0].ID, nil
-	default:
-		// 一个番号对应多部作品是真实存在的（不同片商同名、不同版本等）。
-		// 本服务不替用户猜，因此保留全部候选 —— 由上层如实呈现。
-		ids := make([]string, 0, len(matches))
-		for _, m := range matches {
-			ids = append(ids, m.ID)
-		}
-		return strings.Join(ids, ","), nil
+	if len(matches) == 0 {
+		// 找不到就**报错**，绝不退回近似结果。
+		// 发错片是本服务最不该犯的一类错误；而这是个**可见的**失败，
+		// 比静默发一个用户没订阅的番号安全得多。
+		return nil, fmt.Errorf("番号 %q 没有精确匹配的作品（搜索返回 %d 条，均为近似结果）",
+			code, len(env.Movies))
 	}
+	return matches, nil
 }
 
 // normalizeCode 做番号比较前的归一化。
@@ -109,21 +102,13 @@ func normalizeCode(s string) string {
 
 // Code 实现 catalog.Source：把番号解析成作品，并补齐各自的磁链。
 func (c *Client) Code(ctx context.Context, code string) ([]catalog.Work, error) {
-	idField, err := c.resolveExact(ctx, code)
+	matches, err := c.resolveExact(ctx, code)
 	if err != nil {
 		return nil, err
 	}
-
-	ids := strings.Split(idField, ",")
-	works := make([]catalog.Work, 0, len(ids))
-	for _, id := range ids {
-		w, err := c.workByID(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		works = append(works, w)
-	}
-	return works, nil
+	// 一个番号对应多部作品是真实存在的（不同片商同名、不同版本等）。
+	// 本服务不替用户猜，全部如实呈现。
+	return c.hydrate(ctx, matches)
 }
 
 // Actress 实现 catalog.Source。
@@ -144,7 +129,13 @@ func (c *Client) Actress(ctx context.Context, id string, params url.Values) ([]c
 	for k, vs := range params {
 		// 自有参数一律不透传。清单定义在 catalog.OwnParams 里（唯一来源）——
 		// 包括 pages：它已经在上面被 pageCount 读走了。
-		if catalog.OwnParams[k] {
+		if catalog.IsOwnParam(k) {
+			continue
+		}
+		// ⚠️ filter_by 必须排除。buildEntityFilter 已经校验并 trim 过它，
+		// 而这里再写一次会把**原始、未校验的值**盖回去 ——
+		// 校验就白做了（例如 " 0:a:EvkJ " 的空白会重新出现）。
+		if k == "filter_by" {
 			continue
 		}
 		base[k] = vs
@@ -232,87 +223,96 @@ func pageCount(params url.Values) int {
 //
 // 用户透传的参数里可以带 `filter_by` 覆盖默认值 —— 这正是「按照 App 里的参数来」
 // 的落点：我们提供一个能用的默认（该女优的全部作品），
-// 用户想加筛选（只看有字幕、只看单体作品）就自己传。
-func buildEntityFilter(actorID string, params url.Values) (string, error) {
-	if strings.TrimSpace(actorID) == "" {
+// 用户想加条件（只看中文字幕、只看单体作品）就自己传。
+func buildEntityFilter(actressID string, params url.Values) (string, error) {
+	if strings.TrimSpace(actressID) == "" {
 		return "", fmt.Errorf("女优 id 为空")
 	}
 	raw := strings.TrimSpace(params.Get("filter_by"))
 	if raw == "" {
-		return "0:a:" + actorID, nil
+		return "0:a:" + actressID, nil
 	}
-	if err := validateMask(raw); err != nil {
+	if err := validateMask(raw, actressID); err != nil {
 		return "", err
 	}
 	return raw, nil
 }
 
-// validateMask 只拦一类**可证明是笔误**的输入：主属性拼接。
+// validateMask 拦住那些会让上游**静默返回错误内容**的 `filter_by`。
 //
-// 实测（2026-09-30）发现上游对非法 `filter_by` 是**静默忽略**的：
+// 上游对非法 `filter_by` 不报错、只忽略（实测 2026-09-30），因此本地不拦的后果是：
+// 用户以为加了条件，实际拿到的是**别的东西**，而且看不出来。两种真实形态：
 //
-//	0:a:EvkJ:c,m::   主属性逗号分隔 -> ✅ 只返回带中文字幕的作品
-//	0:a:EvkJ:cm::    拼在一起     -> ❌ 静默忽略，返回该女优全部作品
+//	缺骨架（如 "apmc"、"a"）  -> 上游当它无效，返回【全站最新作品】
+//	id 与 URL 不符           -> 返回【别人的作品】，而 feed 标题写着这个女优
 //
-// 这比报错危险得多：用户以为加了筛选，实际拿到全集，而且看不出来。
+// 两类共五项校验，每一项都对应上面两种灾难的一种具体入口：
 //
-// 校验规则刻意保守 —— 只拒「长度 > 1 且不含逗号」的单段，因为：
+//  1. **三段骨架必须存在**（`zone:letter:id`）。
+//     这是第一版漏掉的一维：当时只看主属性段（第 4 段），于是 "apmc" 被切成一段、
+//     主属性为空，直接放行 —— 而 "apmc" 正是票里记录的那个陷阱。
+//  2. zone 必须是数字（区域号）。
+//  3. 实体字母必须是单个字符，且必须是 `a` —— 路由是女优页，
+//     写成 `0:s:EvkJ` 是在要一个叫 EvkJ 的系列，几平总是笔误。
+//  4. id 必须与 URL 里的女优一致 —— 否则会静默展示别人的作品。
+//  5. 主属性必须是逗号分隔的单字母（如 `c,m`），不能拼在一起（如 `cm`）。
 //
-//   - 单个主属性就是一个字母，多个用逗号连，因此拼接**不可能**是合法值；
-//   - 因此这个检查不会误伤任何合法配置。
-//
-// 刻意**不**校验字母本身是否在已知集合里：那会在这张私有契约新增
-// 一个筛选字母时把一个本来能用的配置判死，而那种新增是我们无法预知的。
-func validateMask(mask string) error {
-	parts := splitMask(mask)
-	// 无主属性段（如 "0:a:EvkJ"）就没得可校验。
-	if parts.mainSeg == "" {
-		return nil
+// 刻意**不**校验主属性字母本身是否在已知集合里：那会在这张私有契约新增
+// 一个字母时把一个本来能用的配置判死，而那种新增是我们无法预知的。
+// 上游对未知字母是忽略 —— 那个后果比误判死一个合法配置轻。
+func validateMask(mask, actressID string) error {
+	parts := strings.Split(mask, ":")
+
+	// 1. 骨架
+	if len(parts) < 3 {
+		return badMask(mask, "它不是复合掩码。`filter_by` 的格式是 "+
+			"{区域}:{实体字母}:{实体id}[:主属性::]，例如 0:a:EvkJ")
 	}
-	for _, seg := range strings.Split(parts.mainSeg, ",") {
-		if len(seg) > 1 {
-			return fmt.Errorf(
-				"%w：filter_by 的主属性应当是**单个字母**，多个用逗号分隔（如 0:a:%s:c,m::），"+
-					"而不是拼在一起（%q）。注意上游对拼错的掩码是静默忽略的 —— "+
-					"拼在一起不会报错，只会静默返回全部作品",
-				catalog.ErrBadRequest, parts.id, seg)
+	// 2. zone
+	if parts[0] == "" || strings.IndexFunc(parts[0], func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return badMask(mask, "第一段应当是区域号数字（0=有码 1=无码 2=欧美 3=FC2）")
+	}
+	// 3. 实体字母
+	if utf8.RuneCountInString(parts[1]) != 1 {
+		return badMask(mask, "第二段应当是单个实体字母（a=女优 s=系列 m=片商 d=导演 c=番号 l=列表）")
+	}
+	if !strings.EqualFold(parts[1], "a") {
+		return badMask(mask, fmt.Sprintf(
+			"第二段的实体字母是 %q，但这个路由是**女优页**，应当用 `a`。"+
+				"想订阅别的实体的作品，请用它自己的路由", parts[1]))
+	}
+	// 4. id
+	id := strings.TrimSpace(parts[2])
+	if id == "" {
+		return badMask(mask, "第三段的实体 id 为空")
+	}
+	if !strings.EqualFold(id, actressID) {
+		return badMask(mask, fmt.Sprintf(
+			"第三段的实体 id 是 %q，但 URL 里的女优是 %q。"+
+				"不相同会让 feed 标题写着 %s 却展示 %s 的作品", id, actressID, actressID, id))
+	}
+	// 5. 主属性（可缺省）
+	if len(parts) > 3 {
+		for _, seg := range strings.Split(parts[3], ",") {
+			if strings.TrimSpace(seg) == "" {
+				continue
+			}
+			if utf8.RuneCountInString(seg) > 1 {
+				return badMask(mask, fmt.Sprintf(
+					"主属性 %q 应当是**单个字母**，多个用逗号分隔（如 0:a:%s:c,m::），"+
+						"而不是拼在一起", seg, actressID))
+			}
 		}
 	}
 	return nil
 }
 
-// maskParts 是 `filter_by` 拆开后的各段。
-//
-// 用一个具名类型而不是裸下标，是因为 `parts[3]` 这种写法读不出含义，
-// 而且一旦掩码格式变了，所有魔数下标都会静默指错位置。
-type maskParts struct {
-	zone    string // 区域号
-	entity  string // 实体类型字母
-	id      string // 实体 id（如女优 id），用于错误文案给示例
-	mainSeg string // 主属性逗号列表，空表示未指定
-}
-
-// splitMask 拆 `filter_by`。格式：{zone}:{letter}:{id}[:{main}:]:
-func splitMask(mask string) maskParts {
-	parts := strings.Split(mask, ":")
-	var mp maskParts
-	if len(parts) > 0 {
-		mp.zone = parts[0]
-	}
-	if len(parts) > 1 {
-		mp.entity = parts[1]
-	}
-	if len(parts) > 2 {
-		mp.id = parts[2]
-	}
-	if len(parts) > 3 {
-		mp.mainSeg = parts[3]
-	}
-	if mp.id == "" {
-		// 错误文案要给一个能照抄的示例，没有 id 时用占位符。
-		mp.id = "<女优id>"
-	}
-	return mp
+// badMask 统一包装成可判定的 ErrBadRequest，并附上可照拄的正确形式。
+func badMask(mask, why string) error {
+	return fmt.Errorf("%w：filter_by=%q 不合法 —— %s。\n"+
+		"写成不合法的掩码不会报错，服务端只会**静默忽略**它，"+
+		"结果是返回【全站最新作品】或【别人的作品】",
+		catalog.ErrBadRequest, mask, why)
 }
 
 // hydrate 把精简作品逐个补齐磁链。
@@ -339,9 +339,9 @@ func splitMask(mask string) maskParts {
 //
 // # 省请求的短路
 //
-// `magnets_count == 0` 的作品直接跳过 —— 还没人发种，拉也是空。
+// `magnets_count == 0` 的作品直接跳过 —— 尚无磁链候选，拉也是空。
 // 没有磁链的作品**仍保留在结果里**（由 feed.Build 跳过），
-// 因为「这片存在但没种」是有信息量的状态，不该在这一层抹掉。
+// 因为「该作品存在但尚无磁链候选」是有信息量的状态，不该在这一层抹掉。
 func (c *Client) hydrate(ctx context.Context, movies []movieSlim) ([]catalog.Work, error) {
 	works := make([]catalog.Work, len(movies))
 	// 记下哪些下标真的要去拉磁链。
@@ -376,15 +376,35 @@ func (c *Client) hydrate(ctx context.Context, movies []movieSlim) ([]catalog.Wor
 	sem := make(chan struct{}, conc)
 	results := make(chan result, len(pending))
 
+	// 派生一个可取消的 ctx：第一个失败就让其余尽早放弃。
+	//
+	// 没有它的话，一个 401 已经注定整次调用要失败，剩下几十个请求
+	// 还是会全部打完 —— 白耗上游配额与连接。
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var wg sync.WaitGroup
+	var aborted atomic.Bool
 	for _, idx := range pending {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			sem <- struct{}{}
+
+			// 拿信号量要**响应 ctx**。
+			// 直接 `sem <- struct{}{}` 会让排队中的 goroutine 在客户端断开
+			// 或已决定放弃时仍然死等，直到前面的请求跑完。
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				aborted.Store(true)
+				return
+			}
 			defer func() { <-sem }()
 
 			magnets, err := c.magnets(ctx, movies[idx].ID)
+			if err != nil {
+				cancel() // 首个失败即让其余尽早放弃
+			}
 			results <- result{idx: idx, magnets: magnets, err: err}
 		}(idx)
 	}
@@ -409,6 +429,16 @@ func (c *Client) hydrate(ctx context.Context, movies []movieSlim) ([]catalog.Wor
 	}
 	if firstErr != nil {
 		return nil, firstErr
+	}
+	// 若一个错都没记到、却有人因为 ctx 被取消而放弃，那只能是**调用方**取消了。
+	//
+	// 这条不能省：不报的话就会返回一批「缺了磁链」的作品，
+	// 而上层只会看到一次成功调用 —— 静默少给数据，是这个项目里最不愿出现的一类。
+	if ctx.Err() != nil || aborted.Load() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("拉取磁链被中断")
 	}
 	return works, nil
 }
@@ -440,35 +470,6 @@ func (c *Client) magnets(ctx context.Context, movieID string) ([]catalog.Magnet,
 		})
 	}
 	return out, nil
-}
-
-// workByID 取单部作品及其磁链。
-func (c *Client) workByID(ctx context.Context, movieID string) (catalog.Work, error) {
-	// 用 /api/v4/movies/{id} 而不是搜索结果里的精简形态：
-	// 详情端点给的是权威字段，且不依赖搜索是否把它排在前面。
-	var det struct {
-		Movie struct {
-			ID          string `json:"id"`
-			Number      string `json:"number"`
-			Title       string `json:"title"`
-			ReleaseDate string `json:"release_date"`
-		} `json:"movie"`
-	}
-	if err := c.GetJSON(ctx, "/api/v4/movies/"+url.PathEscape(movieID), nil, &det); err != nil {
-		return catalog.Work{}, err
-	}
-
-	magnets, err := c.magnets(ctx, movieID)
-	if err != nil {
-		return catalog.Work{}, err
-	}
-
-	return catalog.Work{
-		Number:      det.Movie.Number,
-		Title:       det.Movie.Title,
-		ReleaseDate: det.Movie.ReleaseDate,
-		Magnets:     magnets,
-	}, nil
 }
 
 // 编译期确认客户端满足领域端口。

@@ -13,7 +13,7 @@ import (
 
 // Item 是 feed 里的一条条目：一部作品 + 它被选中的那一条磁链。
 //
-// 一部作品对应恰好一条 Item —— 这是 ticket 08 定下的「字幕优先、每部作品恒发 1 条」。
+// 一部作品对应恰好一条 Item —— 这是 ticket 08 定下的「中文字幕优先、每部作品恒发 1 条」。
 type Item struct {
 	Work   catalog.Work
 	Magnet catalog.Magnet
@@ -38,7 +38,7 @@ func (i Item) MagnetURI() string {
 //   - guid 完全由内容决定，**不含时间戳、不含番号、不含槽位**，
 //     因此进程重启、配置调整都不会改变它。
 //
-// 反过来说：任何把番号或「普通/字幕」槽位掺进 guid 的做法都会破坏第一条性质，
+// 反过来说：任何把番号或「普通/中文字幕」槽位掺进 guid 的做法都会破坏第一条性质，
 // 并可能在磁链重合时产生两条 guid 指向同一个 infohash，让客户端重复下载。
 func (i Item) GUID() string { return i.Magnet.Infohash }
 
@@ -73,7 +73,7 @@ func baseName(i Item) string {
 // Build 把作品列表转成 feed 条目。
 //
 // 每一步都运用 catalog.Select 的槽位规则；没有磁链候选的作品被**跳过**
-// （还没人发种是常见状态，不该让整条 feed 失败，也不该产出没有 enclosure 的条目）。
+// （尚无磁链候选是常见状态，不该让整条 feed 失败，也不该产出没有 enclosure 的条目）。
 // 输入顺序被保留 —— 呈现顺序属于上游。
 func Build(works []catalog.Work) []Item {
 	items := make([]Item, 0, len(works))

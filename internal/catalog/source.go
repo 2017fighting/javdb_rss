@@ -54,12 +54,19 @@ var ErrBadRequest = errors.New("订阅参数不合法")
 //
 // 把它们统一剔除还有一个实际好处：这两条被丢弃的参数不再影响
 // dedupe 装饰器的合并 key —— 否则 ?page=9 与不带它会被当成两个不同的请求。
-var OwnParams = map[string]bool{
+var ownParams = map[string]bool{
 	"since": true,
 	"pages": true,
 	"page":  true,
 	"limit": true,
 }
+
+// IsOwnParam 报告某个 query 参数是否由本服务自有（**不透传**给上游）。
+//
+// 用访问器而不是把 map 导出：导出的可变 map 任何包都能改，
+// 而它是一份跨层共享的事实 —— 被意外改写会让某个自有参数静默变成透传，
+// 而那意味着用户设的 `pages` 之类会原样发给上游。
+func IsOwnParam(name string) bool { return ownParams[name] }
 
 // Source 产出 feed 与发现端点所需的数据。
 //

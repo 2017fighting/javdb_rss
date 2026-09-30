@@ -293,7 +293,7 @@ func (b *barrierSource) ActressName(ctx context.Context, _ string) (string, erro
 // 这条对应的真实失败模式：用户把主属性拼成 0:a:EvkJ:apmc::（而不是逗号分隔的
 // 0:a:EvkJ:a,p,m,c::）。上游对拼错的掩码是**静默忽略**的 —— 不报错，
 // 只是返回该女优的全部作品。因此如果不在这里拦，用户会拿到一个看起来正常、
-// 但实际没有应用任何筛选的 feed。
+// 但实际没有应用任何条件的 feed。
 // 注意这一条验的是**映射**，不是校验本身 —— 掩码格式是上游契约，
 // 因此校验归 appapi 所有（见 appapi 的 TestBuildEntityFilterRejectsConcatenatedFlags）。
 // httpapi 的责任只是把 ErrBadRequest 翻译成 400 而不是 502。

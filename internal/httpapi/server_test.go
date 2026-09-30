@@ -152,7 +152,7 @@ func TestCodeFeedEndToEnd(t *testing.T) {
 		if strings.Contains(it.Title, "中文字幕") {
 			sawSub = true
 			if !strings.HasPrefix(it.GUID, "cc33dd44") {
-				t.Errorf("字幕条选的不是第一条字幕磁链: %q", it.GUID)
+				t.Errorf("中文字幕条选的不是第一条中文字幕磁链: %q", it.GUID)
 			}
 		}
 	}
@@ -439,28 +439,28 @@ func TestTransientFailureIsNotSignatureBroken(t *testing.T) {
 	}
 }
 
-// TestDegradedFeedCarriesWarning 确认上游坏掉时 feed 描述里有可见告警 ——
-// 用户在 qBittorrent 界面里就能看到，而不是盯着一条安静的空 feed 自己猜。
-func TestDegradedFeedCarriesWarning(t *testing.T) {
-	h, tr := newTestServerWithHealth(t, "provider: stub\n", &stub.Source{})
-	tr.Record(health.Status{OK: false, CheckedAt: time.Now(),
-		Action: "InvalidSignature", Err: "無效的簽名"})
+// TestUpstreamFailureIsVisibleNotDegraded 钉住上游坏掉时的**真实**可见性。
+//
+// 这里曾经有个 TestDegradedFeedCarriesWarning，断言 channel 描述里有
+// 「上游已停更」告警。它**假通过**了 —— 因为它用的是永远成功的 stub 数据源，
+// 于是走到了那段渲染逻辑。而真实路径下上游一坏，src.Code(...) 就先返回错误、
+// 直接 502，那段描述永远渲染不出来（是不可达的死代码，已删）。
+//
+// 真实行为是：上游坏了就 502。客户端看到的是明确的失败，而不是一条
+// 「安静的空 feed」—— 后者会被误认为「没有新片」，那才是最难排查的。
+func TestUpstreamFailureIsVisibleNotDegraded(t *testing.T) {
+	src := &recordingSource{err: errors.New("上游炸了")}
+	h := newTestServer(t, "provider: stub\n", src)
 
-	var f parsedFeed
 	rec := do(t, h, "/rss/code/KV-328.xml")
-	if err := xml.Unmarshal(rec.Body.Bytes(), &f); err != nil {
-		t.Fatalf("不是合法 RSS: %v", err)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("上游失败应当 502（可见的失败），得到 %d", rec.Code)
 	}
-	if !strings.Contains(f.Channel.Title, "KV-328") {
-		t.Errorf("channel title 被改坏了: %q", f.Channel.Title)
+	if ct := rec.Header().Get("content-type"); strings.HasPrefix(ct, "application/rss+xml") {
+		t.Error("失败时不该返回 RSS —— 那会让客户端以为这是一条正常但为空的 feed")
 	}
-	// 描述里要有告警，但**不能**插入占位 item —— 那会被自动下载规则误伤。
-	body := rec.Body.String()
-	if !strings.Contains(body, "停更") {
-		t.Error("降级 feed 的描述里没有可见告警")
-	}
-	if len(f.Channel.Items) != 2 {
-		t.Errorf("降级时不该改变 item 数量: 得到 %d, want 2", len(f.Channel.Items))
+	if !strings.Contains(rec.Body.String(), "上游炸了") {
+		t.Errorf("原因应当透出: %s", rec.Body.String())
 	}
 }
 

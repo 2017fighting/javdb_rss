@@ -190,3 +190,24 @@ signature_broken: false        ← 告警在最该响的时候是哑的
 - **TLS 指纹未复验**：javdb-cli 用 utls 伪装，我们用朴素 `net/http` 也通了。
   长跑批量请求时是否需要，仍未验证。
 
+### 补跑的 code-review（2026-09-30）
+
+Spec 轴找出两条**真缺陷**，另有一条基础设施失败（Standards 车道超时，未完成）。
+
+1. ⭐ **CronJob 告警被自己的 readiness 探针挡住。** 签名一失效 `/readyz` 返 503 →
+   Pod 被摘出 Service Endpoint → CronJob 通过 Service 域名连不上 →
+   `set -e` 当场退出 → **根本走不到 `signature_broken` 判断**。
+   也就是说最能说明「该去修代码」的那条告警，在它唯一该响的时候是哑的。
+   已修：拆出第二个 Service（`javdb-rss-health`，`publishNotReadyAddresses: true`）
+   专给健康检查用，CronJob 改走它。（ticket 04 的 Spec 轴独立发现了同一件事。）
+2. **feed 描述的降级告警是不可达死代码。** 上游真坏时 `src.Code` 先返回错误、
+   直接 502，`renderFeed` 根本不被调用。它当初「测试通过」只因为
+   httpapi 测试用的是**永远成功的 stub 数据源**。已删除该逻辑，
+   并把那条假通过的测试换成钉住真实行为的（502 而非降级 feed）。
+   上游坏时的可见性由 502 + `/readyz` 503 + CronJob 告警三者共同保证。
+3. **冷启动时会打「上游检查恢复正常」** —— 首次检查并未「恢复」任何东西，
+   且违反了「正常签名保持静默」。已改为首次成功静默、首次失败才报。
+4. **`provider=stub` 时仍启动外网探针** —— 而 stub 模式的启动日志明说
+   「不会访问任何网络」。已改为 stub 不启动探针。
+5. **`upstreamChecker` 带了无关的 `MagnetConcurrency`** —— 探针只打 `/startup`。
+   已删（它会让读的人以为探针会拉磁链）。

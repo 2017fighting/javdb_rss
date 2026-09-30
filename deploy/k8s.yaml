@@ -3,8 +3,12 @@
 # 这个文件把 ticket 02 做的健康检查三端点用对了 —— 那是它存在的主要理由。
 #
 # 应用：
-#   kubectl create configmap javdb-rss-config --from-file=config.yaml=deploy/config.k8s.yaml
 #   kubectl apply -f deploy/k8s.yaml
+#
+# 配置直接写在本文件内嵌的 ConfigMap 里（没有单独的配置文件）。
+# 改配置：编辑下面 ConfigMap 的 config.yaml，然后 kubectl apply 一次。
+# 本服务支持 SIGHUP 热重载，但改 ConfigMap 不会重载 Pod —— 需要 rollout restart
+# 或用 kubectl exec 发 SIGHUP。
 #
 # ⚠️ 读之前先理解一件事：本服务**不做鉴权**。
 # Service 的类型决定了谁能访问它 —— 本示例用 ClusterIP（只有集群内可达）。
@@ -29,6 +33,10 @@ data:
       host: "https://jdforrepam.com"
       token_file: "/token/token.json"
       lang: "zh-CN"
+      # 别漏了它 —— 上一次这份 ConfigMap 就漏了，与 config.example.yaml 漂移了。
+      # 这是「配置结构在三个文件里各写一份」的代价，见 ticket 04 的审查记录。
+      device_uuid: ""
+      magnet_concurrency: 8
       magnet_concurrency: 8
       probe_interval: "15m"
 ---
@@ -149,6 +157,36 @@ spec:
       port: 8080
       targetPort: http
 ---
+# ⭐ 第二个 Service，**专给健康检查用**，与上面那个有一处关键差异：
+# `publishNotReadyAddresses: true`。
+#
+# 为什么必须有它：
+#
+#   签名一失效，/readyz 就返回 503，K8s 会把 Pod 从**上面那个** Service 的
+#   Endpoint 里摘掉 —— 那是对的（别把流量发给一个服务不了内容的实例）。
+#   但告警 CronJob 原先也是通过 Service 域名访问的，于是它跟着一起被挡住：
+#   连接被拒 → `set -e` 让脚本当场退出 → **根本走不到 signature_broken 判断**。
+#   也就是说：最能说明「该去改代码了」的那条告警，在它唯一该响的时候是哑的。
+#
+# 把「给编排器的 Service」与「给人看的健康端点」分成两个 Service 就分开了这两件事。
+apiVersion: v1
+kind: Service
+metadata:
+  name: javdb-rss-health
+  labels:
+    app: javdb-rss
+    purpose: health
+spec:
+  type: ClusterIP
+  # 关键一行：即使 Pod 未就绪也把它放进 Endpoint。
+  publishNotReadyAddresses: true
+  selector:
+    app: javdb-rss
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
 # ⭐ 签名失效告警。
 #
 # 这是 ticket 02 那套探针设计的兑现点：
@@ -184,7 +222,11 @@ spec:
               image: curlimages/curl:8.11.1
               env:
                 - name: URL
-                  value: "http://javdb-rss.default.svc.cluster.local:8080/healthz/upstream"
+                  # 走**健康检查专用的那个 Service**（publishNotReadyAddresses），
+                  # 而不是主 Service —— 后者在 Pod 未就绪时会把我们挡在外面，
+                  # 而那正是我们最需要它说话的时候。
+                  # 不写死命名空间：用短名，跟 Pod 同命名空间。
+                  value: "http://javdb-rss-health:8080/healthz/upstream"
               command: ["/bin/sh", "-c"]
               args:
                 - |

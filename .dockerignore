@@ -19,6 +19,10 @@ snapshot/
 libapp.so
 libsecurity.so
 
+# 本地配置 —— README 让用户 cp config.example.yaml config.yaml，
+# 而它带着你的订阅列表（哪些番号、哪些女优），不该进镜像。
+config.yaml
+
 # 凭据 —— 绝不能进镜像
 token.json
 token.txt
@@ -43,13 +47,11 @@ docs/
 *.md
 !README.md
 
-# 开发环境
+# Python 产物（只在写逆向脚本时会出现，服务本身是纯 Go）
 .venv/
 venv/
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.ruff_cache/
 
 # 编辑器 / 系统
 .DS_Store

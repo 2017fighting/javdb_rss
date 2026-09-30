@@ -273,7 +273,7 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 	// `pages` 是刻意留下的例外：它是本服务自有，但由**appapi 消费**
 	// （决定翻几页），因此必须流到那一层。
 	params := make(map[string]string, len(sub.Params)+len(query))
-	keep := func(k string) bool { return !catalog.OwnParams[k] || k == "pages" }
+	keep := func(k string) bool { return !catalog.IsOwnParam(k) || k == "pages" }
 	for k, v := range sub.Params {
 		if keep(k) {
 			params[k] = v
@@ -365,14 +365,16 @@ func (s *Server) actressTitle(ctx context.Context, id string) string {
 func (s *Server) renderFeed(w http.ResponseWriter, r *http.Request, meta feed.Meta, works []catalog.Work) {
 	items := feed.Build(works)
 
-	// 上游已知损坏时把警告写进 channel 描述 —— 用户在 qBittorrent 的界面里
-	// 就能看到，而不是盯着一条安静的空 feed 自己猜。
+	// 曾经这里有一段「上游已知损坏时把警告写进 channel 描述」，已删除：
 	//
-	// 刻意**不**插入一条占位 item：那会被 RSS 客户端的自动下载规则误伤，
-	// 而且会污染去重状态。
-	if st, known := s.upstreamStatus(); s.upstream != nil && known && !st.OK {
-		meta.Description = "⚠️ 上游不可用，本 feed 已停更。原因：" + st.Err + " —— " + meta.Description
-	}
+	// 它是**不可达的死代码**。上游真坏掉时，上面的 s.src.Code(...) 会先返回
+	// 错误并让本函数根本不被调用（直接 502）—— 所以那段描述永远渲染不出来。
+	// 而它当初「测试通过」只是因为 httpapi 的测试用的是 stub 数据源，
+	// stub 永远返回成功，于是走到了这里。
+	//
+	// 删掉而不是留着：它只在「探针失败但请求成功」这种短暂网络抖动下会出现，
+	// 那时给用户一条「上游已停更」的假警告，比不警告更糟。
+	// 上游真坏时的可见性是靠 502 + /readyz 503 + CronJob 告警三者共同保证的。
 
 	w.Header().Set("content-type", "application/rss+xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

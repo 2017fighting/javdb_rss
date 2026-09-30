@@ -81,10 +81,18 @@ func run() error {
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
 
-	// 上游健康探针。只检查「签名常量与服务端是否还兼容」，
-	// 因此不需要 token，也与 provider 是否已实现无关。
-	go health.Run(ctx, upstreamChecker{holder: holder}, tracker,
-		func() time.Duration { return holder.Current().AppAPI.ProbeInterval }, log)
+	// 上游健康探针。只检查「签名常量与服务端是否还兼容」，因此不需要 token。
+	//
+	// 但 provider=stub 时**不启动**：那个模式的启动日志明说
+	// 「不会访问任何网络」，而探针会定期打真实上游 —— 两者矛盾。
+	// stub 是离线调试通道，让它静默地发外网请求既不符预期，
+	// 也会在 CI 环境里莫名其妙地依赖网络。
+	if cfg.Provider != config.ProviderStub {
+		go health.Run(ctx, upstreamChecker{holder: holder}, tracker,
+			func() time.Duration { return holder.Current().AppAPI.ProbeInterval }, log)
+	} else {
+		log.Debug("provider=stub，不启动上游探针")
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -138,7 +146,14 @@ func buildSource(cfg *config.Config, holder *config.Holder) (catalog.Source, err
 	case config.ProviderAppAPI:
 		// 包一层 dedupe：合并并发的相同请求，只打一次上游。
 		// 它不存任何东西（不是缓存），因此不返回陈旧数据、重启无影响。
-		return dedupe.New(&appapiSource{holder: holder}), nil
+		//
+		// 必须传 log —— tryRelogin 会用它打 WARN。漏传过一次：
+		// s.log 为 nil，自动续期一触发就 panic。而当时所有测试都显式传了 log，
+		// **从没覆盖真实的装配路径**。
+		return dedupe.New(&appapiSource{
+			holder: holder,
+			log:    slog.Default(),
+		}), nil
 	default:
 		return nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
 	}

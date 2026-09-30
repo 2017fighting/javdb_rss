@@ -203,7 +203,11 @@ internal/stub/        固定数据的假数据源
 - **静态逆向 libapp.so** —— 先例已存在，本 effort 不做。
   备灾清单留在 [`notes/dart-toolchain-probe.md`](notes/dart-toolchain-probe.md)，
   等 Prefix 真失效时作为**新 effort** 启动，不在这里毕业。
-- **逆向登录接口 / 自动登录 / 验证码处理** —— 用户选择手工导出 token。
+- ~~**逆向登录接口 / 自动登录 / 验证码处理**~~ —— **已改**：核实发现
+  `POST /api/v1/sessions` 是无验证码的普通表单登录（见 ticket 05），
+  用户据此改为「CLI 登录 + 可选自动续期」。此条不再是界外，
+  已由 ticket 05 实现（默认关闭，理由见 `notes/auth.md`：token 无 exp，
+  开自动续期会与手机打拉锯战）。
 - **写回 App**：收藏、取消收藏、`/collect_actions`、`/following_tags/batch_push` 等一切写操作。
 - **下载与播放链路**：`/movies/%s/play`、`/resume_play`、`magnet_apps`、PikPak 桥接、
   qBittorrent 上传/分类/洗版。RSS 只负责把磁链交出去。

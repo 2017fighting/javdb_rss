@@ -116,7 +116,7 @@ func TestBuildAppliesSlotRule(t *testing.T) {
 	}}
 	items := Build(works)
 	if len(items) != 1 {
-		t.Fatalf("得到 %d 条 item，want 1（字幕优先只发一条）", len(items))
+		t.Fatalf("得到 %d 条 item，want 1（中文字幕优先只发一条）", len(items))
 	}
 	if items[0].Magnet.Infohash != "zh" {
 		t.Errorf("选中的是 %q，want zh", items[0].Magnet.Infohash)

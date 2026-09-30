@@ -114,7 +114,15 @@ func Run(ctx context.Context, c Checker, t *Tracker, interval func() time.Durati
 		prev, known := t.Snapshot()
 		t.Record(st)
 
-		if !known || prev.OK != st.OK {
+		switch {
+		case !known:
+			// 首次检查：**成功保持静默**。
+			// 冷启动时打一句「恢复正常」是错的 —— 它没有「恢复」过任何东西，
+			// 而且会让「正常签名日志保持静默」这条约定失效。
+			if !st.OK {
+				log.Error("上游检查失败（首次）", "action", st.Action, "err", st.Err, "latency", st.Latency)
+			}
+		case prev.OK != st.OK:
 			if st.OK {
 				log.Info("上游检查恢复正常", "latency", st.Latency)
 			} else {

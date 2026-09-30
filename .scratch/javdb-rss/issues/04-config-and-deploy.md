@@ -132,3 +132,29 @@ Dockerfile 的 base image 选择、日志字段的具体命名。
 （`dial unix /var/run/docker.sock: no such file or directory`）。
 Dockerfile 的**语法与逻辑**经过审阅，但 `docker build` 未执行。
 第一次 `make docker-build` 时请留意构建输出。
+
+### 补跑的 code-review（2026-09-30）
+
+两轴共找出 6 条，其中 4 条已修：
+
+1. ⭐ **`.dockerignore` 漏了 `config.yaml`。** README 让用户
+   `cp config.example.yaml config.yaml`，而 Dockerfile 是 `COPY . .` ——
+   于是**你的订阅列表会被打进镜像**（哪些番号、哪些女优）。
+   已在 `.dockerignore` 里排除。
+2. ⭐ **`DynamicUser=yes` 与 0600 的 token 文件直接冲突。** 动态分配的瞬态 UID
+   对 root 拥有的 0600 文件属于 other，打开必得 EACCES；
+   `ReadOnlyPaths` 不能绕过 DAC 权限，管理员也没法预先 chown 给一个还不存在的 UID。
+   结果是「配了 token 就起不来」。已改为普通系统用户，并把
+   `useradd` + `chown` + **以服务用户身份跑 login** 写进安装步骤。
+3. ⭐ **CronJob 与 readiness 的死锁**（与 ticket 02 独立发现同一件事）。已修，
+   见 ticket 02 的记录。
+4. **部署指引引用了不存在的 `deploy/config.k8s.yaml`**，且清单里已内嵌同名
+   ConfigMap —— 照做必报错。已改为「配置写在内嵌 ConfigMap 里」。
+5. **k8s 的 ConfigMap 与 `config.example.yaml` 漂移**（漏了 `device_uuid`）。
+   已补齐，并在注释里记下这是「配置结构在三个文件里各写一份」的代价。
+6. **compose 逐字段重复了 Dockerfile 的 healthcheck。** 已删——
+   两处各写一份只会漂移。
+
+**未修（记为已知问题）**：配置结构在 `config.example.yaml` / `deploy/config.docker.yaml` /
+`deploy/k8s.yaml` 三处重复。抽成一份共享配置需要引入模板或生成步骤，
+那是另一个 effort 的量级，不在这张票里。

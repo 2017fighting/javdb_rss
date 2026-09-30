@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/2017fighting/javdb_rss/internal/appapi"
 )
 
 // Config 是整个配置文件。
@@ -122,6 +124,10 @@ func Default() *Config {
 			Host: "https://jdforrepam.com",
 			// zh-CN 而不是 en：它决定女优名字的语言（见 Lang 字段的说明）。
 			Lang: "zh-CN",
+			// 显式写出来而不是依赖 appapi 内部的兜底：
+			// 字段注释写了「默认 8」，那这里就该真的是 8，
+			// 否则「配置里的默认值」与「实际生效的默认值」是两回事。
+			MagnetConcurrency: appapi.DefaultMagnetConcurrency,
 			// 默认打开探针。k8s 下这是 /readyz 的数据来源；
 			// 单纯跑 go run 时它只是一次每 15 分钟的轻请求，代价可忽略。
 			ProbeInterval: 15 * time.Minute,

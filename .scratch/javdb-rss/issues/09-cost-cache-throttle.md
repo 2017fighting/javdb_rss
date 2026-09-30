@@ -138,3 +138,20 @@ Server-Timing: cfOrigin;dur=198  ← 含 Cloudflare 边缘 218ms
 
 6 并发请求的真实合并效果**没有实测完**（时间预算用尽）。逻辑已由单元测试覆盖，
 但端到端未复验。
+
+### 补跑的 code-review（2026-09-30）
+
+1. ⭐ **`buildSource` 漏传 `log`** → `tryRelogin` 里 `s.log.Warn` 会 **nil panic**。
+   而当时所有测试都自己构造 `appapiSource` 并显式传 log，
+   **从没碰过 main 里那段真正被执行的装配代码**。
+   已修装配 + 新增 `TestBuildSourceWiringIsUsable`（刻意走 `buildSource`）。
+2. **`config.Default()` 没设 `MagnetConcurrency`** —— 字段注释写着「默认 8」，
+   实际靠 appapi 内部兜底。已显式设为 `appapi.DefaultMagnetConcurrency`，
+   并给 `config.example.yaml` 补上该项示例。
+3. **same 单会话续期判据错误**（`cur == s.lastRelogin` 在第一次续期后恒真，
+   导致进程生命周期内只能续期一次）。已修为
+   `lastReloginToken != usedToken`，并重命名 `lastRelogin` → `lastReloginToken`。
+   详见 `cmd/javdb-rss/main.go` 的注释与 `TestReloginWorksMoreThanOnce`。
+4. **`dedupe` 的三个方法逐行重复同一套 `group.Do` + 统计 + 断言模板。**
+   未修 —— 抽成泛型 helper 需要 Go 泛型 + any 断言，收益不如现在的直白。
+   记为已知取舍。

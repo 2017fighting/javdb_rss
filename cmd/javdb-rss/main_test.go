@@ -435,3 +435,50 @@ func TestLoginWritesTokenFile(t *testing.T) {
 		t.Errorf("权限 = %o, want 600", perm)
 	}
 }
+
+// TestBuildSourceWiringIsUsable 覆盖**真实的装配路径**。
+//
+// 这条测试的存在理由：之前 buildSource 里漏传了 log，
+// 于是 tryRelogin 一触发就 s.log.Warn(...) 造成 nil panic。
+// 而当时所有测试都自己构造 appapiSource 并显式传 log ——
+// **从没碰过 main 里那段真正被执行的装配代码**。
+//
+// 所以这条测试刻意走 buildSource，而不是手搓结构体。
+func TestBuildSourceWiringIsUsable(t *testing.T) {
+	fake := newFakeAPI()
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token.json")
+	if err := config.SaveToken(tokenPath, oldToken); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf("provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  probe_interval: \"0\"\n",
+		srv.URL, tokenPath)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvToken, "")
+	t.Setenv(config.EnvUsername, "alice")
+	t.Setenv(config.EnvPassword, "s3cret")
+
+	holder, err := config.NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := buildSource(holder.Current(), holder)
+	if err != nil {
+		t.Fatalf("buildSource: %v", err)
+	}
+
+	// 这一步会走到自动续期 —— 也就会走 s.log.Info/Warn。
+	// 若装配漏了 log，这里会 panic（而不是返回错误）。
+	if _, err := src.Code(context.Background(), "KV-328"); err != nil {
+		t.Fatalf("装配出的 source 应当能用: %v", err)
+	}
+	if fake.logins.Load() == 0 {
+		t.Fatal("应当触发过一次自动续期（否则这条测试没覆盖到装配缺陷）")
+	}
+}

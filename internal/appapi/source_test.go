@@ -3,10 +3,14 @@ package appapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 )
@@ -37,8 +41,8 @@ func TestResolveExactRejectsPrefixMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("应当解析成功: %v", err)
 	}
-	if got != "82J0Md" {
-		t.Errorf("解析到 %q，应当是精确匹配的 82J0Md", got)
+	if len(got) != 1 || got[0].ID != "82J0Md" {
+		t.Errorf("解析到 %+v，应当是精确匹配的 82J0Md", got)
 	}
 }
 
@@ -62,8 +66,8 @@ func TestResolveExactRejectsFuzzyTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("应当解析成功: %v", err)
 	}
-	if got != "right" {
-		t.Errorf("解析到 %q —— 实现可能退回了「取第一条」而不是精确匹配", got)
+	if len(got) != 1 || got[0].ID != "right" {
+		t.Errorf("解析到 %+v —— 实现可能退回了「取第一条」而不是精确匹配", got)
 	}
 }
 
@@ -113,8 +117,8 @@ func TestResolveExactIsCaseAndSpaceInsensitive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("应当解析成功: %v", err)
 			}
-			if got != "x" {
-				t.Errorf("解析到 %q", got)
+			if len(got) != 1 || got[0].ID != "x" {
+				t.Errorf("解析到 %+v", got)
 			}
 		})
 	}
@@ -159,8 +163,14 @@ func TestResolveExactMultipleExactMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("应当解析成功: %v", err)
 	}
-	if got != "id1,id2" {
-		t.Errorf("解析到 %q，应当保留全部精确匹配候选", got)
+	// 应当保留全部精确匹配候选（完整对象，不是光秃秃的 id）。
+	if len(got) != 2 || got[0].ID != "id1" || got[1].ID != "id2" {
+		t.Errorf("应当保留全部精确匹配候选，得到 %+v", got)
+	}
+	// 顺带确认元数据没被丢掉 —— 这正是这个签名存在的原因：
+	// 带上它能省掉一次 /api/v4/movies/{id} 详情请求。
+	if got[0].Number != "ABC-123" {
+		t.Errorf("应当带上 number 等元数据，得到 %+v", got[0])
 	}
 }
 
@@ -179,7 +189,7 @@ func TestBuildEntityFilter(t *testing.T) {
 	}{
 		{"默认构造", "EvkJ", url.Values{}, "0:a:EvkJ", false},
 		// 主属性多个时**逗号分隔**。曾经这里写的是拼接的 "0:a:EvkJ:pm::"，
-		// 那是错的：实测上游对拼接掩码静默忽略，会返回全部作品而非筛选后的。
+		// 那是错的：实测上游对拼接掩码静默忽略，会返回全部作品而非加了条件之后的。
 		{"用户可覆盖", "EvkJ", url.Values{"filter_by": {"0:a:EvkJ:p,m::"}}, "0:a:EvkJ:p,m::", false},
 		{"空 id 报错", "", url.Values{}, "", true},
 		{"只有空白的 id 报错", "   ", url.Values{}, "", true},
@@ -316,7 +326,7 @@ func TestSearchResultShapeIsFuzzy(t *testing.T) {
 //	0:a:EvkJ:c,m::   ✅ 中文字幕过滤生效
 //	0:a:EvkJ:cm::    ❌ 静默忽略，返回全部作品
 //
-// 而「静默忽略」是最坏的一种失败：用户写了 apmc 以为加了四个筛选，
+// 而「静默忽略」是最坏的一种失败：用户写了 apmc 以为加了四个条件，
 // 实际拿到的是全集，而且看不出来。
 //
 // 拼接形式（长度>1 且不含逗号）**永远**是笔误 —— 单个主属性就是一个字母，
@@ -366,5 +376,181 @@ func TestBuildEntityFilterAcceptsValidMasks(t *testing.T) {
 				t.Errorf("应当原样透传，得到 %q", got)
 			}
 		})
+	}
+}
+
+// TestValidateMaskCatchesMissingSkeleton 钉住一个**我上一轮漏掉**的形态。
+//
+// 票 06 明确记录的灾难形态是「写成 a 或 apmc」—— 缺实体 id 的简写。
+// 而我写的校验只看了主属性段（第 4 段），于是：
+//
+//	splitMask("apmc") -> parts[0]="apmc"，mainSeg="" -> 立即 return nil 放行
+//
+// 也就是说**我声称修好的那个陷阱，恰恰没被修**。
+// 根因：我只校验了「形状细节」（主属性拼接），从没校验「骨架是否存在」——
+// 这是正交的两维，我只想了一维。
+func TestValidateMaskCatchesMissingSkeleton(t *testing.T) {
+	bad := []string{
+		"a",              // 只有一个字母
+		"apmc",           // 四个字母拼一起，缺 zone:letter:id
+		"abc",            // 同上
+		"0:a",            // 只有两段，缺 id
+		"0",              // 只有一段
+		"x:a:EvkJ",       // zone 不是数字
+		"0:ab:EvkJ",      // 实体字母不是单个
+		"0:a:",           // id 为空
+		"0:a:OtherActor", // ⭐ id 与 URL 里的女优不一致 —— 会静默展示别人的作品
+		"0:s:EvkJ",       // ⭐ 实体字母不是 actor（路由是女优页）
+	}
+	for _, fb := range bad {
+		t.Run(fb, func(t *testing.T) {
+			_, err := buildEntityFilter("EvkJ", url.Values{"filter_by": {fb}})
+			if err == nil {
+				t.Fatalf("%q 应当被拒 —— 它会静默返回错误内容（缺骨架 → 全站作品；"+
+					"id 不符 → 别人的作品）", fb)
+			}
+			if !errors.Is(err, catalog.ErrBadRequest) {
+				t.Errorf("应当可判定为 ErrBadRequest: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateMaskAcceptsLegitimateVariations 确认新校验不误伤合法写法。
+func TestValidateMaskAcceptsLegitimateVariations(t *testing.T) {
+	good := []string{
+		"0:a:EvkJ",     // 基本
+		"1:a:EvkJ",     // 无码区（zone 可变）
+		"0:a:EvkJ:c::", // 带主属性
+		"0:a:EvkJ:p,m,c,s::",
+		"0:a:EvkJ:a::", // 主属性给个无效字母 —— 上游忽略，但不该本地报错
+	}
+	for _, fb := range good {
+		t.Run(fb, func(t *testing.T) {
+			got, err := buildEntityFilter("EvkJ", url.Values{"filter_by": {fb}})
+			if err != nil {
+				t.Fatalf("合法掩码不该被拒: %v", err)
+			}
+			if got != fb {
+				t.Errorf("应当原样透传，得到 %q", got)
+			}
+		})
+	}
+}
+
+// TestResolveExactPassesLimit 钉住一个曾经漏掉的参数。
+//
+// `/api/v2/search` 是**模糊/前缀搜索**，默认只返回 **10** 条。
+// 不传 limit 时，当近似结果多于 10 条，真目标会被挤出第一页，
+// 表现成一个莫名其妙的「没有精确匹配」。
+//
+// 实测（2026-09-30）：limit 生效且上限 50（与 /movies/tags 一致）。
+func TestResolveExactPassesLimit(t *testing.T) {
+	var got url.Values
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"movies":[{"id":"x","number":"KV-328"}]}}`))
+	})
+
+	if _, err := c.resolveExact(context.Background(), "KV-328"); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("limit") != strconv.Itoa(limitPerPage) {
+		t.Errorf("limit = %q，应当显式要满上限 %d —— 否则精确匹配可能被挤出前 10 条",
+			got.Get("limit"), limitPerPage)
+	}
+}
+
+// TestResolveExactReturnsFullMetadata 确认不再只返回 id。
+//
+// 之前它返回逗号拼接的 id 字符串，调用方 split 之后再打一次
+// `/api/v4/movies/{id}` 拿元数据 —— 一次多余的请求，而且把
+// 「线格式 → 领域模型」的映射散到了两处。
+func TestResolveExactReturnsFullMetadata(t *testing.T) {
+	c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"movies":[
+			{"id":"m1","number":"KV-328","title":"标题","release_date":"2026-08-28","magnets_count":3}]}}`))
+	})
+
+	got, err := c.resolveExact(context.Background(), "KV-328")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("得到 %d 条", len(got))
+	}
+	m := got[0]
+	if m.Title != "标题" || m.ReleaseDate != "2026-08-28" || m.MagnetsCount != 3 {
+		t.Errorf("元数据不完整: %+v", m)
+	}
+}
+
+// TestHydrateDoesNotReturnPartialDataOnCancel 钉住一条**行为契约**：
+// ctx 被取消时 hydrate 必须报错，不能返回一批缺了磁链的作品。
+//
+// 「静默少给数据」是本项目最不愿出现的一类失败 —— 上层只会看到一次成功调用。
+//
+// ⚠️ 说明这条测试**实际覆盖的是哪条路径**（我一开始的注释说错了）：
+//
+// 取消时，**在飞的那几个请求本身就会失败**，于是 firstErr 被设上、函数返回错误 ——
+// 走的是「任一失败即整次失败」那条路。把 hydrate 里那段
+// 「ctx.Err() != nil || aborted」的兜底删掉，这条测试**依然通过**。
+//
+// 那段兜底覆盖的是另一个更窄的窗口：在飞的请求**全部成功**、
+// 而排队中的 worker 被取消 —— 那时一条错误都没记到，却会返回残缺结果。
+// 那个窗口没法用真实 HTTP 稳定复现（时序取决于调度），因此它只有代码兜底，
+// 没有测试覆盖。这里如实记下，不假装测到了。
+func TestHydrateDoesNotReturnPartialDataOnCancel(t *testing.T) {
+	const n = 8
+	// 所有磁链请求都阻塞，直到我们取消 ctx。
+	release := make(chan struct{})
+	var started atomic.Int64
+
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/magnets") {
+			started.Add(1)
+			<-release
+		}
+		_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"magnets":[{"hash":"h","size":1,"name":"n","created_at":"09/01/2026"}]}}`))
+	})
+
+	movies := make([]movieSlim, n)
+	for i := range movies {
+		movies[i] = movieSlim{ID: fmt.Sprintf("m%d", i), Number: fmt.Sprintf("N-%d", i), MagnetsCount: 1}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		works []catalog.Work
+		err   error
+	}, 1)
+	go func() {
+		w, err := c.hydrate(ctx, movies)
+		done <- struct {
+			works []catalog.Work
+			err   error
+		}{w, err}
+	}()
+
+	// 等确实有请求在飞，再取消。
+	deadline := time.After(3 * time.Second)
+	for started.Load() == 0 {
+		select {
+		case <-deadline:
+			close(release)
+			t.Fatal("没有磁链请求发出")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	close(release)
+
+	select {
+	case got := <-done:
+		if got.err == nil {
+			t.Fatalf("ctx 取消时应当报错，而不是返回 %d 条（可能缺磁链的）作品", len(got.works))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("hydrate 没有返回 —— 可能有 goroutine 卡住")
 	}
 }

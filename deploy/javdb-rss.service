@@ -2,9 +2,15 @@
 #
 # 安装：
 #   sudo install -m 0755 javdb-rss /usr/local/bin/javdb-rss
-#   sudo mkdir -p /etc/javdb-rss
-#   sudo cp config.example.yaml /etc/javdb-rss/config.yaml
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin javdb-rss
+#   sudo install -d -o javdb-rss -g javdb-rss -m 0750 /etc/javdb-rss
+#   sudo install -o javdb-rss -g javdb-rss -m 0640 config.example.yaml /etc/javdb-rss/config.yaml
 #   sudo $EDITOR /etc/javdb-rss/config.yaml
+#
+#   # 若要读 App 里的收藏女优，需要 token。**以服务用户身份**登录，
+#   # 这样写出的 token.json（0600）属主就是它：
+#   sudo -u javdb-rss /usr/local/bin/javdb-rss login -config /etc/javdb-rss/config.yaml
+#
 #   sudo cp deploy/javdb-rss.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now javdb-rss
@@ -31,8 +37,14 @@ ExecReload=/bin/kill -HUP $MAINPID
 # 本服务只需要读自己的配置与 token，然后往外发 HTTPS 请求。
 # 它可以被削到很窄的权限面。
 
-# 专用低权限用户（不创建家目录，不给登录 shell）
-DynamicUser=yes
+# ⚠️ 这里刻意**不用** DynamicUser=yes。
+#
+# 曾经用过，但那与 token 文件直接冲突：动态分配的瞬态 UID 对 root 拥有的
+# 0600 文件属于 other，打开必得 EACCES；而 ReadOnlyPaths 不能绕过 Linux DAC 权限，
+# 管理员也没法预先 chown 给一个还不存在的 UID。结果是「配了 token 就起不来」。
+#
+# 改用普通系统用户（由安装步骤创建），安装时把配置目录的属主给它。
+# 代价是多一步 useradd；换来的是权限模型可推理、可审计。
 User=javdb-rss
 Group=javdb-rss
 

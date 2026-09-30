@@ -48,14 +48,8 @@ services:
         limits:
           memory: 128M
 
-    healthcheck:
-      # 与镜像里的 HEALTHCHECK 一致：只判断进程存活，不掺上游状态。
-      # 上游是否可用要看 /readyz，那是**就绪**而不是**存活**。
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
+    # healthcheck 刻意不在这里重复声明 —— 镜像的 HEALTHCHECK 已经定义了同一个探针
+    # （只判断进程存活，不掺上游状态）。两处各写一份只会漂移。
 
     logging:
       # 结构化 stdout 已经够用；限制一下大小防止长期运行撑满磁盘。
