@@ -146,7 +146,7 @@ func TestCodeFeedEndToEnd(t *testing.T) {
 			t.Errorf("guid 与 enclosure 的 infohash 不一致: %q vs %q", it.GUID, it.Enclosure.URL)
 		}
 	}
-	// 带字幕的那部作品应当选中字幕磁链。
+	// 带中文字幕的那部作品应当选中中文字幕磁链。
 	var sawSub bool
 	for _, it := range f.Channel.Items {
 		if strings.Contains(it.Title, "中文字幕") {
@@ -194,7 +194,7 @@ func extractGUIDs(t *testing.T, body string) []string {
 	return out
 }
 
-// TestActressPassthrough 钉住 ticket 07 的做法：App 演员页的参数原样搬运。
+// TestActressPassthrough 钉住 ticket 07 的做法：App 女优页的参数原样搬运。
 func TestActressPassthrough(t *testing.T) {
 	src := &recordingSource{works: []catalog.Work{{
 		Number: "A-1", Title: "T", Magnets: []catalog.Magnet{{Infohash: "h"}},
@@ -461,5 +461,46 @@ func TestDegradedFeedCarriesWarning(t *testing.T) {
 	}
 	if len(f.Channel.Items) != 2 {
 		t.Errorf("降级时不该改变 item 数量: 得到 %d, want 2", len(f.Channel.Items))
+	}
+}
+
+// TestOwnParamsSplitIsCorrect 钉住自有参数的流转规则 —— 一处很容易写错的地方。
+//
+// 四个自有参数的去向**并不相同**：
+//
+//	since  本层消费，不该往下流
+//	page   无人消费，不该往下流（分页由 pages 控制）
+//	limit  无人消费，不该往下流（固定为上游上限 50）
+//	pages  由 **appapi** 消费，**必须**往下流
+//
+// 我在实现这条时第一版把四个全剔了，包括 pages —— 那样翻页会静默失效。
+// 所以这条测试的重点是那个例外：pages 必须在。
+func TestOwnParamsSplitIsCorrect(t *testing.T) {
+	src := &recordingSource{works: []catalog.Work{{
+		Number: "A-1", Title: "T", Magnets: []catalog.Magnet{{Infohash: "h"}},
+	}}}
+	h := newTestServer(t, "provider: stub\n", src)
+
+	rec := do(t, h, "/rss/actress/EvkJ.xml?since=2026-01-01&page=9&limit=5&pages=3&sort_by=score")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d", rec.Code)
+	}
+
+	got := src.gotActressCur
+	if got == nil {
+		t.Fatal("下游没收到任何参数")
+	}
+	// 必须流下去的
+	if got.Get("pages") != "3" {
+		t.Errorf("pages = %q —— 它由 appapi 消费，被误剔就会静默失去翻页能力", got.Get("pages"))
+	}
+	if got.Get("sort_by") != "score" {
+		t.Errorf("透传参数 sort_by = %q，不该被动", got.Get("sort_by"))
+	}
+	// 不该流下去的
+	for _, k := range []string{"since", "page", "limit"} {
+		if v := got.Get(k); v != "" {
+			t.Errorf("%s = %q，不该流到下游（它会污染 dedupe 的合并 key）", k, v)
+		}
 	}
 }

@@ -128,7 +128,7 @@ func (c *Client) Code(ctx context.Context, code string) ([]catalog.Work, error) 
 
 // Actress 实现 catalog.Source。
 //
-// params 是原样透传的 App 演员页查询参数。**三个键例外** ——
+// params 是原样透传的 App 女优页查询参数。**三个键例外** ——
 // `page`、`limit`、`pages` 由本服务自己控制（页数、每页条数、总页数），
 // 不会透传给上游。这一点必须在文档里说清楚，
 // 否则用户设了 limit 却不生效会变成难以解释的行为。
@@ -142,9 +142,9 @@ func (c *Client) Actress(ctx context.Context, id string, params url.Values) ([]c
 
 	base := url.Values{"filter_by": {filterBy}}
 	for k, vs := range params {
-		// page/limit/pages 由本服务控制，不接受透传。
-		switch k {
-		case "page", "limit", "pages":
+		// 自有参数一律不透传。清单定义在 catalog.OwnParams 里（唯一来源）——
+		// 包括 pages：它已经在上面被 pageCount 读走了。
+		if catalog.OwnParams[k] {
 			continue
 		}
 		base[k] = vs
@@ -264,30 +264,55 @@ func buildEntityFilter(actorID string, params url.Values) (string, error) {
 // 刻意**不**校验字母本身是否在已知集合里：那会在这张私有契约新增
 // 一个筛选字母时把一个本来能用的配置判死，而那种新增是我们无法预知的。
 func validateMask(mask string) error {
-	parts := strings.Split(mask, ":")
+	parts := splitMask(mask)
 	// 无主属性段（如 "0:a:EvkJ"）就没得可校验。
-	if len(parts) < 4 {
+	if parts.mainSeg == "" {
 		return nil
 	}
-	for _, seg := range strings.Split(parts[3], ",") {
+	for _, seg := range strings.Split(parts.mainSeg, ",") {
 		if len(seg) > 1 {
 			return fmt.Errorf(
 				"%w：filter_by 的主属性应当是**单个字母**，多个用逗号分隔（如 0:a:%s:c,m::），"+
 					"而不是拼在一起（%q）。注意上游对拼错的掩码是静默忽略的 —— "+
 					"拼在一起不会报错，只会静默返回全部作品",
-				catalog.ErrBadRequest, maskID(mask), seg)
+				catalog.ErrBadRequest, parts.id, seg)
 		}
 	}
 	return nil
 }
 
-// maskID 从掩码里取出实体 id，让错误文案能给出可直接照抄的示例。
-func maskID(mask string) string {
+// maskParts 是 `filter_by` 拆开后的各段。
+//
+// 用一个具名类型而不是裸下标，是因为 `parts[3]` 这种写法读不出含义，
+// 而且一旦掩码格式变了，所有魔数下标都会静默指错位置。
+type maskParts struct {
+	zone    string // 区域号
+	entity  string // 实体类型字母
+	id      string // 实体 id（如女优 id），用于错误文案给示例
+	mainSeg string // 主属性逗号列表，空表示未指定
+}
+
+// splitMask 拆 `filter_by`。格式：{zone}:{letter}:{id}[:{main}:]:
+func splitMask(mask string) maskParts {
 	parts := strings.Split(mask, ":")
-	if len(parts) >= 3 {
-		return parts[2]
+	var mp maskParts
+	if len(parts) > 0 {
+		mp.zone = parts[0]
 	}
-	return "EvkJ"
+	if len(parts) > 1 {
+		mp.entity = parts[1]
+	}
+	if len(parts) > 2 {
+		mp.id = parts[2]
+	}
+	if len(parts) > 3 {
+		mp.mainSeg = parts[3]
+	}
+	if mp.id == "" {
+		// 错误文案要给一个能照抄的示例，没有 id 时用占位符。
+		mp.id = "<女优id>"
+	}
+	return mp
 }
 
 // hydrate 把精简作品逐个补齐磁链。

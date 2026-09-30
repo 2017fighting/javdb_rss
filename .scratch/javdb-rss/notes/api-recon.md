@@ -154,7 +154,7 @@ T _Z15byteToHexStringPhiPc
 
 ## 8. 参考项目边界
 
-- `/root/clone/JAVDB_AutoSpider` — **走 javdb.com 网页**。已有：磁链提取、按优先级分类（`字幕 / hacked(UC无码破解>UC>U无码破解>U) / no_subtitle`）、演员订阅 + 新作 diff（ADR-054，`javdb/pipeline/subscription_monitor.py`）、FastAPI、qBittorrent 上传。**没有 RSS 输出**，订阅列表存在它自己的库里而不是读 JavDB 账号。它的磁链/字幕分类逻辑可作语义参考，但代码不能直接复用（我们走 App API + Go）。
+- `/root/clone/JAVDB_AutoSpider` — **走 javdb.com 网页**。已有：磁链提取、按优先级分类（`字幕 / hacked(UC无码破解>UC>U无码破解>U) / no_subtitle`）、女优订阅 + 新作 diff（ADR-054，`javdb/pipeline/subscription_monitor.py`）、FastAPI、qBittorrent 上传。**没有 RSS 输出**，订阅列表存在它自己的库里而不是读 JavDB 账号。它的磁链/字幕分类逻辑可作语义参考，但代码不能直接复用（我们走 App API + Go）。
 - `/root/clone/javdb_crawler` — scrapy 骨架，只有 movie_pages / movie_detail 两个 spider，无可复用资产。
 
 ## 9. 结论

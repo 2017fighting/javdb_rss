@@ -96,7 +96,7 @@ type FeedsConfig struct {
 // ActressSub 是一条女优订阅。
 type ActressSub struct {
 	ID string `yaml:"id"`
-	// Params 是**原样透传**给 App 演员页的查询参数。
+	// Params 是**原样透传**给 App 女优页的查询参数。
 	// 本服务不解释这些键值，只负责搬运（用户已选定这个做法）。
 	Params map[string]string `yaml:"params"`
 	// Since 是「只追新」的起始日期。

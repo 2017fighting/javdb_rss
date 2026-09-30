@@ -266,21 +266,28 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	// 透气参数：以白名单里配的为底，URL 上的覆盖它。
+	//
+	// 剥掉自有参数里**本层与无人消费**的那些（since / page / limit）——
+	// 它们不该往下流，否则会污染 dedupe 的合并 key。
+	//
+	// `pages` 是刻意留下的例外：它是本服务自有，但由**appapi 消费**
+	// （决定翻几页），因此必须流到那一层。
 	params := make(map[string]string, len(sub.Params)+len(query))
+	keep := func(k string) bool { return !catalog.OwnParams[k] || k == "pages" }
 	for k, v := range sub.Params {
-		params[k] = v
+		if keep(k) {
+			params[k] = v
+		}
 	}
-	// since 是本服务自有参数，不进透传集合；其余原样搬运。
-	const ownParam = "since"
 	for k, vs := range query {
-		if k == ownParam || len(vs) == 0 {
+		if len(vs) == 0 || !keep(k) {
 			continue
 		}
 		params[k] = vs[0]
 	}
 
 	since := sub.Since
-	if v := strings.TrimSpace(query.Get(ownParam)); v != "" {
+	if v := strings.TrimSpace(query.Get("since")); v != "" {
 		since = v
 	}
 

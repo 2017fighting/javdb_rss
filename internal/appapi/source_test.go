@@ -313,7 +313,7 @@ func TestSearchResultShapeIsFuzzy(t *testing.T) {
 //
 // 实测（2026-09-30）：主属性必须**逗号分隔**：
 //
-//	0:a:EvkJ:c,m::   ✅ 字幕过滤生效
+//	0:a:EvkJ:c,m::   ✅ 中文字幕过滤生效
 //	0:a:EvkJ:cm::    ❌ 静默忽略，返回全部作品
 //
 // 而「静默忽略」是最坏的一种失败：用户写了 apmc 以为加了四个筛选，
@@ -321,12 +321,17 @@ func TestSearchResultShapeIsFuzzy(t *testing.T) {
 //
 // 拼接形式（长度>1 且不含逗号）**永远**是笔误 —— 单个主属性就是一个字母，
 // 多个用逗号连。因此这个校验不可能误伤合法配置。
+//
+// ⚠️ 顺带记一个坑：本测试的第一版把 "1:a:EvkJ:pm::" 留在了合法切片里，
+// 靠 `good[:5]` 截断跳过，并留了一句自相矛盾的注释。那是错的 ——
+// 应该被拒的用例属于 bad。现已移入。
 func TestBuildEntityFilterRejectsConcatenatedFlags(t *testing.T) {
 	bad := []string{
 		"0:a:EvkJ:apmc::",
 		"0:a:EvkJ:cm::",
 		"0:a:EvkJ:pm::",
 		"0:a:EvkJ:c,m,ps::", // 整体含逗号，但最后一段是拼接
+		"1:a:EvkJ:pm::",     // 非 censored 区也一样要拦
 	}
 	for _, fb := range bad {
 		t.Run(fb, func(t *testing.T) {
@@ -347,11 +352,11 @@ func TestBuildEntityFilterAcceptsValidMasks(t *testing.T) {
 		"0:a:EvkJ",           // 无主属性
 		"0:a:EvkJ:c::",       // 单个
 		"0:a:EvkJ:c,m::",     // 逗号多个
-		"0:a:EvkJ:a,p,m,c::", // 全部
+		"0:a:EvkJ:p,m,c,s::", // 全部四个主属性
 		"0:a:EvkJ:m,c::",     // 顺序无关
-		"1:a:EvkJ:pm::",      // 无码区 + 拼接……等等，这个应当被拒
+		"1:a:EvkJ",           // 非 censored 区
 	}
-	for _, fb := range good[:5] {
+	for _, fb := range good {
 		t.Run(fb, func(t *testing.T) {
 			got, err := buildEntityFilter("EvkJ", url.Values{"filter_by": {fb}})
 			if err != nil {

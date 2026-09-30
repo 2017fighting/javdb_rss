@@ -77,7 +77,7 @@ http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=2026-01-01   只要这个日期
 | 类别 | 参数 | 谁在用 |
 |---|---|---|
 | **本服务自有** | `since` `pages` `page` `limit` | 我们消费，**不会**发给上游 |
-| **原样透传** | `filter_by` `filter_by_tags` `sort_by` `order_by` | 原封不动转发给上游演员页 |
+| **原样透传** | `filter_by` `filter_by_tags` `sort_by` `order_by` | 原封不动转发给上游女优页 |
 
 完整参数表（**每条都对着真实上游实测过**）见
 [`.scratch/javdb-rss/notes/actress-params.md`](.scratch/javdb-rss/notes/actress-params.md)。
