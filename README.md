@@ -134,19 +134,25 @@ export JAVDB_TOKEN=eyJhbGciOi...
 环境变量**优先于**文件。k8s 用 Secret、compose 用 `env_file: .env` 都行。
 容器里不方便挂可写文件，这条通道就是为它准备的。
 
-### 自动续期（可选，代价明确）
+### token 不会过期 —— 所以**不建议**开自动续期
 
-设了 `JAVDB_USERNAME` + `JAVDB_PASSWORD` 之后，token 失效时会自动重登。
+实测解出的 JWT：payload 只有 `{id, username}`，**没有 `exp`**。
+也就是说 token 不按时间失效，它只在**别处登录**时被挤掉 ——
+而那个「别处」通常就是你自己的手机。
 
-**代价：每次自动续期都会踢掉你手机上的 App。** 所以：
+开了自动续期（设 `JAVDB_USERNAME` + `JAVDB_PASSWORD`）会变成拉锯战：
 
 ```
-不设 JAVDB_PASSWORD  -> 永不自动登录，手机安全；token 失效时人工重登
-设了 JAVDB_PASSWORD  -> 自动续期，但每次续期都会踢掉手机
+你打开 App           → 服务的 token 失效
+服务自动重登          → 把你手机踢下线
+你再次打开 App       → 服务的 token 又失效
+…无限循环
 ```
 
-每次触发都会打一条 WARN 明说这件事 —— 因为「手机怎么突然要重新登录」
-没有别的途径能查出来。
+**推荐：不要设 `JAVDB_PASSWORD`。** token 不过期，一次登录就够用；
+真被挤掉了重跑 `javdb-rss login` 即可。
+
+只有当你打算**手机上不再登录这个账号**时，自动续期才有意义。
 
 ### 有了 token 之后
 
