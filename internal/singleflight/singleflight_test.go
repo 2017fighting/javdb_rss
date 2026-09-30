@@ -163,26 +163,55 @@ func TestDoRecoversFromPanic(t *testing.T) {
 }
 
 // TestDoReportsShared 确认第三个返回值能区分「执行者」与「共享者」。
+//
+// ⚠️ 这个测试写错过一次，错误值得记下来：
+//
+// 最初的写法是在主 goroutine 里直接调第二个 Do（想用它拿到 shared），
+// 然后在它**之后** close(release)。但第二个 Do 会阻塞在 c.wg.Wait() 上
+// 等第一个调用完成，而第一个调用正阻塞在 <-release ——
+// 于是 release 永远关不上，整个包死锁。
+//
+// 教训：**任何会等待另一个调用的调用，都不能和那个调用的放行语句
+// 待在同一个 goroutine 里。** 所以这里第二个调用也必须另起 goroutine。
 func TestDoReportsShared(t *testing.T) {
 	var g Group
 	release := make(chan struct{})
-	first := make(chan struct{})
+	started := make(chan struct{})
 
+	// 第一个调用：登记进表后卡在 fn 里，成为一个「飞行中」的调用。
+	firstShared := make(chan bool, 1)
 	go func() {
 		_, _, shared := g.Do("k", func() (any, error) {
-			close(first)
+			close(started)
 			<-release
 			return "v", nil
 		})
-		if shared {
-			t.Error("执行者不该被标记为 shared")
-		}
+		firstShared <- shared
 	}()
 
-	<-first // 确保第一个调用已经在飞行中
-	_, _, shared := g.Do("k", func() (any, error) { return "should not run", nil })
-	if !shared {
+	<-started // 确认第一个调用已在飞行中
+
+	// 第二个调用：应当加入第一个而不是执行自己的 fn。
+	secondShared := make(chan bool, 1)
+	go func() {
+		_, _, shared := g.Do("k", func() (any, error) {
+			t.Error("第二个调用不该执行 fn —— 它应当共享第一个的结果")
+			return "", nil
+		})
+		secondShared <- shared
+	}()
+
+	// 给第二个调用一点时间真正进入等待，再放行第一个。
+	// 用 sleep 而不是更好的同步：Go 没有提供「观察者已阻塞在 Wait 上」的钩子，
+	// 而这里的目标只是让第二个调用**有机会**加入；即使它晚了一步，
+	// 上面的 t.Error 也会把它暴露出来。
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	if shared := <-firstShared; shared {
+		t.Error("执行者不该被标记为 shared")
+	}
+	if shared := <-secondShared; !shared {
 		t.Error("第二个调用应当被标记为 shared")
 	}
-	close(release)
 }
