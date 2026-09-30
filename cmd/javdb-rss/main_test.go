@@ -20,45 +20,82 @@ import (
 	"github.com/2017fighting/javdb_rss/internal/config"
 )
 
-// fakeAPI 模拟上游：旧 token 会被拒，登录后发新 token。
+// oldToken 是初始配置文件里的 token。
 //
-// 它刻意把「登录次数」暴露出来 —— 自动续期最容易犯的错就是
-// 并发下登了 N 次，而每次登录都会把上一次的 token 作废（单会话账号）。
+// 它从未被假上游签发过，因此一开始就是失效的 —— 这正是每条测试要的起点。
+const oldToken = "old-token"
+
+// fakeAPI 模拟上游。
+//
+// 两个刻意的地方：
+//
+//  1. **每次登录发一个不同的 token**。真实上游就是这样。第一版夹具每次发同一个，
+//     于是 TestReloginWorksMoreThanOnce 分不清「第二次登录没生效」与
+//     「第二次登录拿到了一个刚好也被作废的 token」—— 夹具反而成了障碍。
+//  2. **登录次数被暴露出来**。自动续期最容易犯的错是并发下登 N 次，
+//     而每次登录都会把上一次的 token 作废（单会话账号）。
 type fakeAPI struct {
-	logins      atomic.Int64
-	oldTokenHit atomic.Int64
-	newTokenHit atomic.Int64
-	*slog.Logger
+	logins    atomic.Int64
+	staleHits atomic.Int64
+	freshHits atomic.Int64
+	seq       atomic.Int64
+	slog      *slog.Logger
+
+	mu      sync.Mutex
+	issued  map[string]bool
+	revoked map[string]bool
 }
 
-const (
-	oldToken = "old-token"
-	newToken = "new-token"
-)
+func newFakeAPI() *fakeAPI {
+	return &fakeAPI{slog: slog.New(slog.NewTextHandler(io.Discard, nil))}
+}
+
+// issue 签发一个新 token 并记为有效。
+func (f *fakeAPI) issue() string {
+	tok := fmt.Sprintf("tok-%d", f.seq.Add(1))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.issued == nil {
+		f.issued = map[string]bool{}
+	}
+	f.issued[tok] = true
+	return tok
+}
+
+// invalidate 作废一个 token，模拟「用户在手机 App 上登录把服务挤下线」。
+func (f *fakeAPI) invalidate(token string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revoked == nil {
+		f.revoked = map[string]bool{}
+	}
+	f.revoked[token] = true
+}
+
+// valid 报告一个 token 是否被承认。
+func (f *fakeAPI) valid(token string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.issued[token] && !f.revoked[token]
+}
 
 func (f *fakeAPI) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/sessions" {
 			f.logins.Add(1)
-			// 模拟真实延迟，让并发窗口真实存在。
-			time.Sleep(30 * time.Millisecond)
-			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"token":"` + newToken + `"}}`))
-			return
-		}
-		auth := r.Header.Get("authorization")
-		switch auth {
-		case "Bearer " + newToken:
-			f.newTokenHit.Add(1)
-		case "Bearer " + oldToken:
-			f.oldTokenHit.Add(1)
-			_, _ = w.Write([]byte(`{"success":0,"action":"TokenExpired","message":"token 已過期","data":null}`))
-			return
-		default:
-			_, _ = w.Write([]byte(`{"success":0,"action":"LoginRequired","message":"需要登入","data":null}`))
+			time.Sleep(30 * time.Millisecond) // 让并发窗口真实存在
+			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"token":"` + f.issue() + `"}}`))
 			return
 		}
 
-		// 各端点给一个最小可用的成功响应。
+		tok := strings.TrimPrefix(r.Header.Get("authorization"), "Bearer ")
+		if !f.valid(tok) {
+			f.staleHits.Add(1)
+			_, _ = w.Write([]byte(`{"success":0,"action":"TokenExpired","message":"token 已過期","data":null}`))
+			return
+		}
+		f.freshHits.Add(1)
+
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/magnets"):
 			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"magnets":[{"name":"X","hash":"abc","size":1,"cnsub":false,"hd":true,"files_count":1,"created_at":"09/01/2026"}]}}`))
@@ -76,7 +113,7 @@ func (f *fakeAPI) handler() http.Handler {
 func newTestSource(t *testing.T, initialToken string, withCreds bool) (*appapiSource, *fakeAPI) {
 	t.Helper()
 
-	fake := &fakeAPI{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	fake := newFakeAPI()
 	srv := httptest.NewServer(fake.handler())
 	t.Cleanup(srv.Close)
 
@@ -88,7 +125,8 @@ func newTestSource(t *testing.T, initialToken string, withCreds bool) (*appapiSo
 		}
 	}
 	cfgPath := filepath.Join(dir, "config.yaml")
-	cfg := fmt.Sprintf("provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  lang: zh-CN\n  probe_interval: \"0\"\n",
+	cfg := fmt.Sprintf(
+		"provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  lang: zh-CN\n  probe_interval: \"0\"\n",
 		srv.URL, tokenPath)
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -107,7 +145,7 @@ func newTestSource(t *testing.T, initialToken string, withCreds bool) (*appapiSo
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &appapiSource{holder: holder, log: fake.Logger}, fake
+	return &appapiSource{holder: holder, log: fake.slog}, fake
 }
 
 // TestAutoReloginOnExpiredToken 是主路径：token 失效 → 自动续期 → 重试成功。
@@ -120,20 +158,59 @@ func TestAutoReloginOnExpiredToken(t *testing.T) {
 	if got := fake.logins.Load(); got != 1 {
 		t.Errorf("登录次数 = %d, want 1", got)
 	}
-	if got := fake.oldTokenHit.Load(); got == 0 {
-		t.Error("应当先用旧 token 试过一次（否则测试没测到续期路径）")
+	if fake.staleHits.Load() == 0 {
+		t.Error("应当先用旧 token 试过一次（否则测试没走到续期路径）")
 	}
-	if got := fake.newTokenHit.Load(); got == 0 {
+	if fake.freshHits.Load() == 0 {
 		t.Error("重试没有用上新 token")
 	}
 
-	// 新 token 应当落盘，让重启后还能用。
-	tok, err := config.LoadToken(src.holder.Current().AppAPI.TokenFile)
+	// 新 token 应当落盘（重启后还能用），且不等于原来那个。
+	tok, err := config.LoadToken(src.holder.TokenPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tok != newToken {
-		t.Errorf("落盘的 token = %q, want %q", tok, newToken)
+	if tok == "" || tok == oldToken {
+		t.Errorf("落盘的 token = %q，应当是续期后的新 token", tok)
+	}
+}
+
+// TestReloginWorksMoreThanOnce 是**第二次**续期。
+//
+// 前一条只验证了「第一次失效能续期」，于是漏掉了一个真 bug：
+//
+//	tryRelogin 的双重检查原本是
+//	    if cur, _ := LoadToken(...); cur == s.lastRelogin { 复用并返回 true }
+//	第一次续期成功后，文件里就是新 token，而 s.lastRelogin 也是它 ——
+//	**两者从此永远相等**。于是第二次失效时它误判成「别人已经登过了」，
+//	把刚失效的 token 塞回去并报成功，重试必然再失败。
+//	结果是：进程生命周期内**只能续期一次**。
+//
+// 「第二次失效」恰恰是最常见的场景 —— 用户打开手机 App（单会话账号）
+// 把服务端的 token 挤掉。所以这个 bug 会让自动续期在最需要它的时候失效。
+func TestReloginWorksMoreThanOnce(t *testing.T) {
+	src, fake := newTestSource(t, oldToken, true)
+
+	// 第一次失效 → 续期 → 成功
+	if _, err := src.Code(context.Background(), "KV-328"); err != nil {
+		t.Fatalf("第一次续期应当成功: %v", err)
+	}
+	if got := fake.logins.Load(); got != 1 {
+		t.Fatalf("第一次续期应当只登一次，实际 %d", got)
+	}
+
+	// 把刚拿到的 token 也作废 —— 等价于「用户打开了手机 App」。
+	cur, err := config.LoadToken(src.holder.TokenPath())
+	if err != nil || cur == "" {
+		t.Fatalf("续期后应当有 token 落盘: %q %v", cur, err)
+	}
+	fake.invalidate(cur)
+
+	if _, err := src.Code(context.Background(), "KV-328"); err != nil {
+		t.Fatalf("第二次续期应当也成功（旧实现只能续期一次）: %v", err)
+	}
+	if got := fake.logins.Load(); got != 2 {
+		t.Errorf("登录次数 = %d，第二次失效后应当再登一次（共 2 次）", got)
 	}
 }
 
@@ -160,10 +237,8 @@ func TestConcurrentAuthFailuresReloginOnlyOnce(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// 关键断言：只登了一次。
 	if got := fake.logins.Load(); got != 1 {
-		t.Errorf("登录次数 = %d，%d 个并发请求应当只登一次"+
-			"（登多次会互相挤掉 token）", got, n)
+		t.Errorf("登录次数 = %d，%d 个并发请求应当只登一次（登多次会互相挤掉 token）", got, n)
 	}
 	for i, err := range errs {
 		if err != nil {
@@ -178,12 +253,8 @@ func TestConcurrentAuthFailuresReloginOnlyOnce(t *testing.T) {
 func TestNoReloginWithoutCredentials(t *testing.T) {
 	src, fake := newTestSource(t, oldToken, false)
 
-	_, err := src.Code(context.Background(), "KV-328")
-	if err == nil {
+	if _, err := src.Code(context.Background(), "KV-328"); err == nil {
 		t.Fatal("token 失效且没凭据时应当失败")
-	}
-	if !errors.Is(err, catalog.ErrNoToken) && err.Error() == "" {
-		t.Errorf("错误应当可读: %v", err)
 	}
 	if got := fake.logins.Load(); got != 0 {
 		t.Errorf("没有凭据时不该登录，实际登了 %d 次 —— 那会踢掉用户手机", got)
@@ -227,5 +298,140 @@ func TestNoReloginOnNonAuthError(t *testing.T) {
 	}
 	if got := logins.Load(); got != 0 {
 		t.Errorf("非凭据类错误不该触发登录，实际 %d 次", got)
+	}
+}
+
+// TestAuthErrorStillReturnedWhenReloginUnavailable 确认「配了凭据但续期失败」时
+// 返回的是**原始错误**而不是一个误导性的成功。
+func TestAuthErrorStillReturnedWhenReloginUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/sessions" {
+			// 续期也失败（例如密码改了）
+			_, _ = w.Write([]byte(`{"success":0,"action":"IncorrentUsernameOrPassword","message":"錯誤的用戶名或密碼","data":null}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":0,"action":"TokenExpired","message":"token 已過期","data":null}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "c.yaml")
+	_ = os.WriteFile(cfgPath, []byte(fmt.Sprintf(
+		"provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  probe_interval: \"0\"\n",
+		srv.URL, filepath.Join(dir, "t.json"))), 0o600)
+	t.Setenv(config.EnvUsername, "alice")
+	t.Setenv(config.EnvPassword, "wrong")
+	t.Setenv(config.EnvToken, "")
+
+	holder, err := config.NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &appapiSource{holder: holder, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	_, err = src.Code(context.Background(), "X")
+	if err == nil {
+		t.Fatal("续期也失败时应当报错")
+	}
+	if !errors.Is(err, catalog.ErrNoToken) && !strings.Contains(err.Error(), "token") {
+		t.Errorf("错误应当能看出是 token 问题: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// login 子命令
+// ---------------------------------------------------------------------------
+
+// TestLoginSkipsSaveWhenEnvTokenSet 钉住一个**曾经是假分支**的行为。
+//
+// 原实现是：
+//
+//	if envToken != "" && !force { 打印「本次不会写 token 文件」 }
+//	...然后无条件 SaveToken(...)
+//
+// 也就是说提示在撒谎，输出自相矛盾：
+//
+//	提示：JAVDB_TOKEN 已经设置了…所以本次不会写 token 文件。
+//	✓ 已写入 /tmp/v5/token.json（权限 0600）
+//
+// 而我当时的「验证」也没抓到它 —— 我用 `login ... | head -9` 看输出，
+// head 打满就关管道、进程在跑到 SaveToken 之前被 SIGPIPE 杀了，
+// 于是「文件没创建」这个观察来自错误的因果。
+//
+// 这条测试**不看提示文字**，直接检查文件是否存在 —— 提示可以撒谎，文件不会。
+func TestLoginSkipsSaveWhenEnvTokenSet(t *testing.T) {
+	fake := newFakeAPI()
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	newCfg := func(t *testing.T) (cfgPath, tokenPath string) {
+		dir := t.TempDir()
+		tokenPath = filepath.Join(dir, "token.json")
+		cfgPath = filepath.Join(dir, "config.yaml")
+		body := fmt.Sprintf(
+			"provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  probe_interval: \"0\"\n",
+			srv.URL, tokenPath)
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return cfgPath, tokenPath
+	}
+
+	t.Setenv(config.EnvToken, "already-set-from-env")
+	t.Setenv(config.EnvUsername, "alice")
+	t.Setenv(config.EnvPassword, "s3cret")
+
+	t.Run("无 -force 时不写文件", func(t *testing.T) {
+		cfgPath, tokenPath := newCfg(t)
+		if err := runLogin([]string{"-config", cfgPath}); err != nil {
+			t.Fatalf("runLogin: %v", err)
+		}
+		if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+			t.Error("JAVDB_TOKEN 已设置且没给 -force 时**不该**创建文件 —— 提示与行为必须一致")
+		}
+	})
+
+	t.Run("给了 -force 时照常写", func(t *testing.T) {
+		cfgPath, tokenPath := newCfg(t)
+		if err := runLogin([]string{"-config", cfgPath, "-force"}); err != nil {
+			t.Fatalf("runLogin: %v", err)
+		}
+		if _, err := os.Stat(tokenPath); err != nil {
+			t.Errorf("-force 应当照常写文件: %v", err)
+		}
+	})
+}
+
+// TestLoginWritesTokenFile 确认正常路径真的落了盘（对照上面那条）。
+func TestLoginWritesTokenFile(t *testing.T) {
+	fake := newFakeAPI()
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token.json")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf("provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  probe_interval: \"0\"\n",
+		srv.URL, tokenPath)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvToken, "")
+	t.Setenv(config.EnvUsername, "alice")
+	t.Setenv(config.EnvPassword, "s3cret")
+
+	if err := runLogin([]string{"-config", cfgPath}); err != nil {
+		t.Fatalf("runLogin: %v", err)
+	}
+	tok, err := config.LoadToken(tokenPath)
+	if err != nil || tok == "" {
+		t.Fatalf("应当写入 token: %q %v", tok, err)
+	}
+	fi, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("权限 = %o, want 600", perm)
 	}
 }

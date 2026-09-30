@@ -44,10 +44,19 @@ func runLogin(args []string) error {
 	fmt.Println()
 
 	// 环境变量优先于文件。若它已设，写文件是白费力气 —— 下次启动读到的还是 env。
-	if v := strings.TrimSpace(os.Getenv(config.EnvToken)); v != "" && !*force {
+	//
+	// ⚠️ 这里必须**真的**跳过写文件，而不只是打印一句提示。
+	// 这个分支曾经是个假分支：提示说「不会写 token 文件」，代码却照样写 ——
+	// 输出自相矛盾。而我当时的「验证」也没抓到它，因为我用
+	// `login ... | head -9` 看输出，head 打满就关管道、进程在跑到 SaveToken
+	// 之前就被 SIGPIPE 杀了，于是「文件没创建」这个观察来自错误的因果。
+	skipSave := false
+	envToken := strings.TrimSpace(os.Getenv(config.EnvToken))
+	if envToken != "" && !*force {
 		fmt.Printf("提示：%s 已经设置了（优先于文件），所以本次不会写 token 文件。\n", config.EnvToken)
 		fmt.Println("      想改用文件管理 token，请先 unset 它，或加 -force 强制写。")
 		fmt.Println()
+		skipSave = true
 	}
 
 	username, password, fromEnv := credentials()
@@ -77,19 +86,25 @@ func runLogin(args []string) error {
 	fmt.Println("✓ 登录成功")
 
 	tokenPath := holder.TokenPath()
-	if err := config.SaveToken(tokenPath, token); err != nil {
-		// 落盘失败也**绝不能把 token 丢掉** —— 它已经换来了，而且为了它
-		// 用户的手机已经被挤下线。上一次失败就是在这里丢的，用户得重登一次。
-		//
-		// 因此把 token 直接打出来，让用户能手工保存或填进 JAVDB_TOKEN。
-		fmt.Fprintf(os.Stderr, "\n⚠️  保存 token 到 %s 失败：%v\n\n", tokenPath, err)
-		fmt.Fprintln(os.Stderr, "登录本身是成功的（你手机上的 App 已经被挤下线），")
-		fmt.Fprintln(os.Stderr, "但这个 token 还没保存。请手工保存它，或设成环境变量：")
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintf(os.Stderr, "    export %s='%s'\n\n", config.EnvToken, token)
-		return fmt.Errorf("保存 token 失败（token 已打印在上面，请勿丢失）")
+	if !skipSave {
+		if err := config.SaveToken(tokenPath, token); err != nil {
+			// 落盘失败也**绝不能把 token 丢掉** —— 它已经换来了，而且为了它
+			// 用户的手机已经被挤下线。上一次失败就是在这里丢的，用户得重登一次。
+			//
+			// 因此把 token 直接打出来，让用户能手工保存或填进 JAVDB_TOKEN。
+			// 代价是它会留在终端回滚缓冲里 —— 比丢掉一个刚到手的 token 好。
+			fmt.Fprintf(os.Stderr, "\n⚠️  保存 token 到 %s 失败：%v\n\n", tokenPath, err)
+			fmt.Fprintln(os.Stderr, "登录本身是成功的（你手机上的 App 已经被挤下线），")
+			fmt.Fprintln(os.Stderr, "但这个 token 还没保存。请手工保存它，或设成环境变量：")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintf(os.Stderr, "    export %s='%s'\n", config.EnvToken, token)
+			fmt.Fprintln(os.Stderr, "（注意：它现在留在你的终端回滚缓冲里）")
+			return fmt.Errorf("保存 token 失败（token 已打印在上面，请勿丢失）")
+		}
+		fmt.Printf("✓ 已写入 %s（权限 0600）\n", tokenPath)
+	} else {
+		fmt.Printf("（按上面的提示，未写文件；环境变量 %s 优先，服务会用它）\n", config.EnvToken)
 	}
-	fmt.Printf("✓ 已写入 %s（权限 0600）\n", tokenPath)
 
 	// 验证：拿新 token 去打一个**真的需要凭据**的端点。
 	//

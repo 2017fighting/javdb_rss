@@ -162,8 +162,10 @@ type appapiSource struct {
 	// 若各登各的，会**互相把对方刚拿到的 token 挤掉**（单会话账号），
 	// 结果是永远在登录、永远有一个请求拿到刚被作废的 token。
 	// 加锁之后再看一眼当前 token 是否已经变了，就能只登一次。
-	reloginMu   sync.Mutex
-	lastRelogin string
+	reloginMu sync.Mutex
+	// lastReloginToken 是最近一次自动续期拿到的 token。
+	// 名字带 Token 后缀是因为它存的是**凭据本身**。
+	lastReloginToken string
 }
 
 func (s *appapiSource) client() (*appapi.Client, error) {
@@ -243,11 +245,15 @@ func (s *appapiSource) withRelogin(ctx context.Context, fn func(*appapi.Client) 
 	if err != nil {
 		return err
 	}
+	// 记下本次请求**实际用的** token。tryRelogin 需要它来判断
+	// 「等锁期间是否已有人续过期」—— 用磁盘上的值判断会出错（见那里的注释）。
+	usedToken := c.Token
+
 	err = fn(c)
 	if err == nil || !appapi.IsAuthError(err) {
 		return err
 	}
-	if ok := s.tryRelogin(ctx, c); !ok {
+	if ok := s.tryRelogin(ctx, c, usedToken); !ok {
 		return err
 	}
 	// 只重试一次。再失败就如实返回 —— 反复登录只会反复踢手机。
@@ -259,7 +265,7 @@ func (s *appapiSource) withRelogin(ctx context.Context, fn func(*appapi.Client) 
 // ⚠️ 它会让用户手机上的 App 被挤下线。这是用户选定的取舍（他要在部署里
 // 自动续期），但每次触发都会打 WARN —— 否则「手机怎么突然要重新登录」
 // 是没别的途径能查出来的。
-func (s *appapiSource) tryRelogin(ctx context.Context, c *appapi.Client) bool {
+func (s *appapiSource) tryRelogin(ctx context.Context, c *appapi.Client, usedToken string) bool {
 	user, pass, ok := config.LoadCredentials()
 	if !ok {
 		return false
@@ -270,8 +276,18 @@ func (s *appapiSource) tryRelogin(ctx context.Context, c *appapi.Client) bool {
 
 	// 拿到锁之后再看一眼：可能另一个请求已经登过了。
 	// 没有这一步的话，N 个并发请求会登 N 次，每次都挤掉上一次的 token。
-	if cur, _ := config.LoadToken(s.holder.TokenPath()); cur != "" && cur == s.lastRelogin {
-		c.Token = cur
+	//
+	// ⚠️ 判据必须是「lastReloginToken ≠ **本次请求用的那个 token**」，
+	// 而**不能**是「它等于磁盘上的 token」。后者看起来等价，实际错得很重：
+	// 第一次续期成功后磁盘上写的就是新 token，而 lastReloginToken 也是它 ——
+	// 两个条件从此**永远相等**。于是第二次失效时会被误判成「别人已经登过了」，
+	// 把刚失效的 token 塞回去并报成功，重试必然再失败 ——
+	// 进程生命周期内**只能续期一次**。
+	//
+	// 而「第二次失效」恰恰是最常见的场景：用户打开手机 App（单会话）
+	// 把服务端的 token 挤掉。已由 TestReloginWorksMoreThanOnce 钉住。
+	if s.lastReloginToken != "" && s.lastReloginToken != usedToken {
+		c.Token = s.lastReloginToken
 		return true
 	}
 
@@ -290,7 +306,7 @@ func (s *appapiSource) tryRelogin(ctx context.Context, c *appapi.Client) bool {
 	if err := config.SaveToken(s.holder.TokenPath(), token); err != nil {
 		s.log.Warn("自动续期成功但写入 token 文件失败 —— 重启后会退回旧 token", "err", err)
 	}
-	s.lastRelogin = token
+	s.lastReloginToken = token
 	c.Token = token
 	s.log.Info("自动续期成功")
 	return true
