@@ -45,10 +45,10 @@ type Source struct {
 // st 为 nil 时退化为「按纯函数选但不钉住」—— 装配层（main）不会这样用，
 // 但一个库不该在那种情况下 panic。
 //
-// policy 为 nil 时用 TemporaryPolicy（ticket 08 的占位；09 会换成真实策略）。
+// policy 为 nil 时用 DefaultPolicy（ticket 09 的切换语义）。
 func New(inner catalog.Source, st *Store, policy Policy) *Source {
 	if policy == nil {
-		policy = TemporaryPolicy{}
+		policy = DefaultPolicy{}
 	}
 	log := slog.Default()
 	if st != nil && st.log != nil {
@@ -119,15 +119,23 @@ func (s *Source) pinAll(works []catalog.Work) ([]catalog.Work, error) {
 //
 // 返回 (是否新增, 是否切换)。
 func (s *Source) pinOne(w *catalog.Work) (added, switched bool) {
-	if len(w.Magnets) == 0 {
-		// 「有作品但尚无磁链」是常见状态，不该被钉住，也不该让调用失败。
-		return false, false
-	}
-	if w.ID == "" || s.store == nil {
+	if s.store == nil || w.ID == "" {
 		// 没有 movie id 就没有可靠的键。退回纯函数 —— 绝不拿番号当键，
 		// 番号不唯一，那会让两部不同作品互相钉死。
 		if m, ok := s.policy.Desired(w.Magnets); ok {
 			w.Magnets = []catalog.Magnet{m}
+		}
+		return false, false
+	}
+
+	if len(w.Magnets) == 0 {
+		// 「有作品但尚无磁链」对没钉住的作品是常见状态，原样跳过。
+		// 但对**已钉住**的作品，上游把磁链全删了同样是「pin 消失」——
+		// ticket 09 要的是继续返回快照（可能死链）并记 WARN，
+		// 否则这个作品会静默地从 feed 里消失。
+		if pinned, ok := s.store.Get(w.ID); ok {
+			s.warnPinGone(w.ID, pinned.Infohash, 0)
+			w.Magnets = []catalog.Magnet{magnetOf(pinned)}
 		}
 		return false, false
 	}
@@ -138,7 +146,7 @@ func (s *Source) pinOne(w *catalog.Work) (added, switched bool) {
 	}
 
 	pinned, hasPin := s.store.Get(w.ID)
-	chosen, changed := s.policy.KeepOrSwitch(pinned, hasPin, w.Magnets, desired)
+	chosen, changed := s.policy.KeepOrSwitch(pinned, hasPin, desired)
 
 	// 只有当选择本身变化（或首次）时才写。
 	if !hasPin || changed {
@@ -146,6 +154,37 @@ func (s *Source) pinOne(w *catalog.Work) (added, switched bool) {
 		added = !hasPin
 		switched = hasPin && changed
 	}
+
+	// 让「切换」本身可观察（ticket 09）：逐条 INFO，而不是只看落盘的聚合计数。
+	// 这里读的 w.Magnets 还是**上游**给的候选，改写放在日志之后。
+	switch {
+	case switched:
+		s.log.Info("pin 切换",
+			"作品", w.ID,
+			"旧磁链", pinned.Infohash, "新磁链", chosen.Infohash,
+			"旧日期", pinned.CreatedAt, "新日期", chosen.CreatedAt)
+	case hasPin && !containsInfohash(w.Magnets, pinned.Infohash):
+		// pin 指向上游消失：按 ticket 09 继续沿用快照（guid 稳定优先），
+		// 但必须留下痕迹，否则「发了一条死链」又一次不可见。
+		s.warnPinGone(w.ID, pinned.Infohash, len(w.Magnets))
+	}
+
 	w.Magnets = []catalog.Magnet{chosen}
 	return added, switched
+}
+
+// warnPinGone 记录一条「pin 指向上游消失、仍沿用快照」的警告。
+func (s *Source) warnPinGone(id, infohash string, candidateCount int) {
+	s.log.Warn("pin 不在当前上游候选里，继续沿用快照（可能是死链）",
+		"作品", id, "磁链", infohash, "候选数", candidateCount)
+}
+
+// containsInfohash 判断候选里是否还有某条 infohash。
+func containsInfohash(cands []catalog.Magnet, hash string) bool {
+	for _, m := range cands {
+		if m.Infohash == hash {
+			return true
+		}
+	}
+	return false
 }

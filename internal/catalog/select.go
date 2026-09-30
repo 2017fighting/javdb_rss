@@ -2,30 +2,44 @@ package catalog
 
 // Select 从一部作品的磁链候选里选出唯一一条，即 feed 里该作品最终呈现的那条。
 //
-// 规则由 ticket 08 定下 —— **中文字幕优先，每部作品恒发 1 条**：
+// 规则由 ticket 04 定下、ticket 09 精确到可测：
 //
-//   - 候选里存在中文字幕的 → 取**第一条**中文字幕的
-//   - 否则                 → 取**第一条**
-//   - 候选为空             → 第二返回值 false
+//   - 候选里有中文字幕（cnsub=true）的 → 取 created_at **最新**的那条中文字幕
+//   - 否则                              → 取 created_at **最新**的那条候选
+//   - created_at 相同（同日或都为空）    → infohash 字典序（升序）定序
+//   - 候选为空                          → 第二返回值 false
 //
-// 两条边界由上面的措辞直接决定，但值得写明：
+// **不读取切片顺序。** 上游的 `magnets[]` 既不是时间序、也不可用任何字段重放
+// （ticket 04 实测：211 部作品，见 notes/api-recon.md §10.4.1），因此
+// 「顺序无关的确定性规则」是钉住（pin）能给出稳定 guid 的前提。
 //
-//  1. 「第一条」是切片顺序，不做任何重排 —— 排序规则属于上游。
-//  2. 若 magnets[0] 本身就是中文字幕版，两个分支指向同一条，因此仍然只选出一条。
-//     这是选择「中文字幕优先单条」而非「普通 + 中文字幕两条」所消掉的边界情况
-//     （见 ticket 08：两条方案在这个场景下会产生两条 guid 指向同一个 infohash，
-//     导致 qBittorrent 重复下载同一份内容）。
-//
-// 注意这不是「挑最优」：本函数不在体积、做种数、分辨率之间做任何权衡。
-// 那些判断属于上游的排序，本服务只负责按既定规则取一条。
+// 注意这不是「挑最优」：本函数不在体积、分辨率、做种数之间做任何权衡。
 func Select(magnets []Magnet) (Magnet, bool) {
 	if len(magnets) == 0 {
 		return Magnet{}, false
 	}
-	for _, m := range magnets {
-		if m.CNSub {
-			return m, true
+	best := magnets[0]
+	for _, cand := range magnets[1:] {
+		if betterMagnet(cand, best) {
+			best = cand
 		}
 	}
-	return magnets[0], true
+	return best, true
+}
+
+// betterMagnet 判断 a 是否应当取代当前的 best。
+//
+// 排序键依次是：
+//
+//  1. cnsub 优先 —— 有中文字幕的永远胜过没有，与 created_at 无关
+//  2. created_at 较新
+//  3. created_at 相同 → infohash 字典序较小
+func betterMagnet(a, b Magnet) bool {
+	if a.CNSub != b.CNSub {
+		return a.CNSub
+	}
+	if c := CompareCreatedAt(a.CreatedAt, b.CreatedAt); c != 0 {
+		return c > 0
+	}
+	return a.Infohash < b.Infohash
 }

@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/2017fighting/javdb_rss/internal/catalog"
 )
 
 // urlEncode 把字符串编成可以塞进 query 参数的形式。
@@ -123,25 +125,11 @@ func Render(w io.Writer, meta Meta, items []Item, now time.Time) error {
 // 记不住「第一次见到它是什么时候」，而 RSS 里省略 pubDate 虽然合法，
 // 却会让部分阅读器把条目当成刚发布。改变 pubDate 不影响去重 ——
 // 去重只看 guid（见 Item.GUID）。
+//
+// 解析逻辑集中在 catalog（选择/切换规则也要用它），与去重同源。
 func itemPubDate(it Item, now time.Time) string {
-	if t, ok := parseCreatedAt(it.Magnet.CreatedAt); ok {
+	if t, ok := catalog.ParseCreatedAt(it.Magnet.CreatedAt); ok {
 		return t.UTC().Format(time.RFC1123Z)
 	}
 	return now.UTC().Format(time.RFC1123Z)
-}
-
-// parseCreatedAt 解析 App API 的磁链创建时间。
-//
-// 已知格式是 "09/27/2026"（月/日/年）。再接受一个 ISO 形式作为容错，
-// 因为线格式未在文档中固定（ticket 06 待核实）。
-func parseCreatedAt(s string) (time.Time, bool) {
-	if s == "" {
-		return time.Time{}, false
-	}
-	for _, layout := range []string{"01/02/2006", "2006-01-02"} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, true
-		}
-	}
-	return time.Time{}, false
 }

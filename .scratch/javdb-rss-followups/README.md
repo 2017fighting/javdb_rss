@@ -64,13 +64,18 @@ qBittorrent 多下一份文件，而没有任何告警。
   丢 pin 就是丢 guid（上游无法重建同一选择），因此 pin 故意不可关闭。位置由新键
   `app_api.pin_file` 决定，留空默认配置文件同目录；四处部署都补了可写状态目录。
   08 交存储 + 装饰器骨架（`Policy` 接缝 + 临时实现），09 只换策略。
+- [pin 的切换语义](issues/09-pin-switch-semantics.md)
+  — **只有出现 cnsub 才换 pin：非 cnsub pin 遇到任一 cnsub 就切；cnsub pin 只在出现
+  `created_at` 严格更新的 cnsub 时切（同日/更旧不切）。pin 指向上游消失时继续返回快照
+  （可能死链）并记 WARN；同日定序用 infohash 字典序；首次选定是纯函数
+  `catalog.Select`；不缓存候选列表；每次切换一条 INFO + 落盘的「切换 N」计数。**
+  ticket 08 的 `TemporaryPolicy`（钉住即不切）被 `DefaultPolicy` 取代。
 
 ## Not yet specified
 
 <!-- 看得出方向、但还捏不成 ticket 的东西 -->
 
-- **pin 是否顺便充当 feed 缓存**：一旦有状态，候选列表是否也存下来 —— 若存，会改写
-  初次交付 ticket 09「不引入缓存」的成本结论。
 - **领域与部署文档的一致性**：CONTEXT.md 里「订阅／无状态」的定义已跟着 08 修（pin 是
   唯一的有意例外，已写明）；deploy 清单与 k8s 已补可写状态卷。剩下可能还要收拾的是
-  地图 `.scratch/javdb-rss/map.md` 里那句旧「状态模型 = 无状态」。
+  地图 `.scratch/javdb-rss/map.md` 里那句旧「状态模型 = 无状态」。（09 已定：pin 只存
+  被选中那条磁链的快照，**不**顺便缓存候选列表。）

@@ -2,9 +2,11 @@ package pin
 
 import (
 	"context"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -21,7 +23,7 @@ type fakeSource struct {
 	// code / actress 可单独覆盖某一路的返回。
 	//
 	// 跨 feed 共享的测试**必须**让两条路由看到不同的候选 —— 否则它是空转的：
-	// 临时策略是纯函数，同样的输入必然得到同样的 infohash，
+	// 纯函数对同样的输入必然得到同样的 infohash，
 	// 就算 pin 表根本没被共享（甚至没被用上）也会「通过」。
 	code    []catalog.Work
 	actress []catalog.Work
@@ -75,10 +77,6 @@ func (f *fakeSource) CollectedActresses(context.Context) (catalog.Collection, er
 	return catalog.Collection{}, nil
 }
 
-func magnet(hash string, cnsub bool) catalog.Magnet {
-	return catalog.Magnet{Infohash: hash, Name: "N-" + hash, SizeMB: 100, CNSub: cnsub, CreatedAt: "09/01/2026"}
-}
-
 // newStore 打开一个落在临时目录里的 Store。
 func newStore(t *testing.T) *Store {
 	t.Helper()
@@ -88,6 +86,56 @@ func newStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+// --- 日志捕获：让「切换 / pin 消失」这类事件可被断言 -------------------------
+
+type captureHandler struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.recs = append(h.recs, r.Clone())
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureHandler) find(msgSubstr string) (slog.Record, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.recs {
+		if strings.Contains(r.Message, msgSubstr) {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+// withCapturedLogs 把默认 logger 换成捕获器。必须在 Open store **之前**调用 ——
+// Source 会从 store 拿到当时的 slog.Default()。
+func withCapturedLogs(t *testing.T) *captureHandler {
+	t.Helper()
+	h := &captureHandler{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return h
+}
+
+func attrsOf(r slog.Record) map[string]string {
+	out := map[string]string{}
+	r.Attrs(func(a slog.Attr) bool {
+		out[a.Key] = a.Value.String()
+		return true
+	})
+	return out
 }
 
 // --- 装饰器行为 -------------------------------------------------------------
@@ -106,7 +154,7 @@ func TestFirstSelectionIsPinned(t *testing.T) {
 			magnet("sub", true),
 		},
 	}}}
-	src := New(inner, st, TemporaryPolicy{})
+	src := New(inner, st, DefaultPolicy{})
 
 	works, err := src.Code(context.Background(), "A-1")
 	if err != nil {
@@ -128,34 +176,33 @@ func TestFirstSelectionIsPinned(t *testing.T) {
 	}
 }
 
-// TestPinnedChoiceSurvivesCandidateChanges 钉住本票的全部意义：
-// 一旦选过，上游后来多出什么候选都不改变我们下发的那条。
+// TestPinnedChoiceSurvivesPlainCandidateChanges 钉住本票的意义：
+// 上游多出/重排**普通**候选时，我们下发的那条不变。
 //
-// 这里第二次调用故意给出一条「按纯函数会赢」的新候选 ——
+// 这里第二次调用故意给出一条「按纯函数会赢」的更新的普通候选 ——
 // 若装饰器每次重新选，guid 就会变、qBittorrent 会重下。
 //
-// 注：「有了更新的 cnsub 要不要切」是 ticket 09 的规则；
-// 08 的临时策略是一律不切（见 TemporaryPolicy）。
-func TestPinnedChoiceSurvivesCandidateChanges(t *testing.T) {
+// 「出现更新的 cnsub 要不要切」由 ticket 09 定：**会切**，见 TestSwitchesToNewerCNSub。
+func TestPinnedChoiceSurvivesPlainCandidateChanges(t *testing.T) {
 	st := newStore(t)
 	first := []catalog.Work{{
 		ID: "m1", Number: "A-1",
-		Magnets: []catalog.Magnet{magnet("old", false)},
+		Magnets: []catalog.Magnet{magnetAt("old", false, "2026-01-01")},
 	}}
 	inner := &fakeSource{works: first}
-	src := New(inner, st, TemporaryPolicy{})
+	src := New(inner, st, DefaultPolicy{})
 
 	if _, err := src.Code(context.Background(), "A-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	// 上游后来了新候选，且按纯函数它会赢。
+	// 上游后来了更新的普通候选，且按纯函数它会赢。
 	inner.mu.Lock()
 	inner.works = []catalog.Work{{
 		ID: "m1", Number: "A-1",
 		Magnets: []catalog.Magnet{
-			magnet("old", false),
-			magnet("brand-new-cnsub", true),
+			magnetAt("old", false, "2026-01-01"),
+			magnetAt("brand-new-plain", false, "2026-09-01"),
 		},
 	}}
 	inner.mu.Unlock()
@@ -165,7 +212,44 @@ func TestPinnedChoiceSurvivesCandidateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := works[0].Magnets[0].Infohash; got != "old" {
-		t.Errorf("已钉住的作品不该换磁链，得到 %q —— guid 会抖", got)
+		t.Errorf("普通候选变化不该换磁链，得到 %q —— guid 会抖", got)
+	}
+}
+
+// TestSwitchesToNewerCNSub 是 ticket 09 的切换规则在装饰器层的行为：
+// 已经钉了一条普通候选，上游出现 cnsub → 切过去并更新 pin。
+func TestSwitchesToNewerCNSub(t *testing.T) {
+	st := newStore(t)
+	inner := &fakeSource{works: []catalog.Work{{
+		ID: "m1", Number: "A-1",
+		Magnets: []catalog.Magnet{magnetAt("plain", false, "2026-01-01")},
+	}}}
+	src := New(inner, st, DefaultPolicy{})
+
+	if _, err := src.Code(context.Background(), "A-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	inner.mu.Lock()
+	inner.works = []catalog.Work{{
+		ID: "m1", Number: "A-1",
+		Magnets: []catalog.Magnet{
+			magnetAt("plain", false, "2026-01-01"),
+			magnetAt("sub", true, "2026-06-01"),
+		},
+	}}
+	inner.mu.Unlock()
+
+	works, err := src.Code(context.Background(), "A-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := works[0].Magnets[0].Infohash; got != "sub" {
+		t.Errorf("出现 cnsub 后应当切换，得到 %q", got)
+	}
+	rec, _ := st.Get("m1")
+	if rec.Infohash != "sub" || !rec.CNSub {
+		t.Errorf("切换后 pin 应当更新成 cnsub 快照，得到 %+v", rec)
 	}
 }
 
@@ -174,13 +258,13 @@ func TestPinnedChoiceSurvivesCandidateChanges(t *testing.T) {
 // 必须共享同一个 pin，否则同一内容两个 guid、跨 feed 去重被破坏。
 //
 // ⚠️ 这条测试要真的能失败，两条路由就必须看到**不同的候选**。
-// 若两条路由返回同一份候选，临时策略（纯函数）必然给出同一个 infohash，
+// 两条路由返回同一份候选时，纯函数必然给出同一个 infohash，
 // 哪怕 pin 表完全没被共享也会「通过」—— 那是假通过。
 //
-// 场景：
+// 场景（两条路由都只有普通候选，因此 ticket 09 的 cnsub 切换不会介入）：
 //
-//	code    只看得到 [x（普通）]            → 首次选定钉住 x
-//	actress 看得到 [y（中文字幕）, x]       → 不共享 pin 的话纯函数会选 y（新 guid）
+//	code    看得到 [x（旧）]              → 首次选定钉住 x
+//	actress 看得到 [z（新）, x（旧）]     → 不共享 pin 的话纯函数会选 z（新 guid）
 //
 // 共享同一个 pin 时，actress 仍应下发 x。
 func TestCrossFeedSharesOnePin(t *testing.T) {
@@ -188,14 +272,17 @@ func TestCrossFeedSharesOnePin(t *testing.T) {
 	inner := &fakeSource{
 		code: []catalog.Work{{
 			ID: "m1", Number: "A-1",
-			Magnets: []catalog.Magnet{magnet("x", false)},
+			Magnets: []catalog.Magnet{magnetAt("x", false, "2026-01-01")},
 		}},
 		actress: []catalog.Work{{
 			ID: "m1", Number: "A-1",
-			Magnets: []catalog.Magnet{magnet("y", true), magnet("x", false)},
+			Magnets: []catalog.Magnet{
+				magnetAt("z", false, "2026-06-01"),
+				magnetAt("x", false, "2026-01-01"),
+			},
 		}},
 	}
-	src := New(inner, st, TemporaryPolicy{})
+	src := New(inner, st, DefaultPolicy{})
 
 	byCode, err := src.Code(context.Background(), "A-1")
 	if err != nil {
@@ -229,7 +316,7 @@ func TestWorksWithoutIDAreNotPinned(t *testing.T) {
 		Number:  "A-1",
 		Magnets: []catalog.Magnet{magnet("x", false), magnet("y", true)},
 	}}}
-	src := New(inner, st, TemporaryPolicy{})
+	src := New(inner, st, DefaultPolicy{})
 
 	works, err := src.Code(context.Background(), "A-1")
 	if err != nil {
@@ -248,7 +335,7 @@ func TestWorksWithoutIDAreNotPinned(t *testing.T) {
 func TestWorksWithoutMagnetsPassThrough(t *testing.T) {
 	st := newStore(t)
 	inner := &fakeSource{works: []catalog.Work{{ID: "m1", Number: "A-1"}}}
-	src := New(inner, st, TemporaryPolicy{})
+	src := New(inner, st, DefaultPolicy{})
 
 	works, err := src.Code(context.Background(), "A-1")
 	if err != nil {
@@ -277,7 +364,7 @@ func TestFatalOnFlushError(t *testing.T) {
 	var fatalErr error
 	src := New(&fakeSource{works: []catalog.Work{{
 		ID: "m1", Number: "A-1", Magnets: []catalog.Magnet{magnet("x", false)},
-	}}}, st, TemporaryPolicy{})
+	}}}, st, DefaultPolicy{})
 	src.OnFatal = func(err error) {
 		mu.Lock()
 		fatalErr = err
@@ -294,14 +381,14 @@ func TestFatalOnFlushError(t *testing.T) {
 	}
 }
 
-// TestPolicySeamAllowsSwitching 证明 Policy 这个接缝**真的**能承载 ticket 09，
+// TestPolicySeamAllowsSwitching 证明 Policy 这个接缝**真的**能承载不同策略，
 // 而不是一个摆设：换一个会切换的策略，装饰器就切换。
 func TestPolicySeamAllowsSwitching(t *testing.T) {
 	st := newStore(t)
 	inner := &fakeSource{works: []catalog.Work{{
 		ID: "m1", Number: "A-1", Magnets: []catalog.Magnet{magnet("old", false)},
 	}}}
-	// alwaysSwitch 模拟「找到更好的就切」的策略。
+	// alwaysSwitch 模拟「找到不同的就切」的策略。
 	src := New(inner, st, alwaysSwitchPolicy{})
 
 	if _, err := src.Code(context.Background(), "A-1"); err != nil {
@@ -328,14 +415,14 @@ func TestPolicySeamAllowsSwitching(t *testing.T) {
 	}
 }
 
-// TestDefaultPolicyIsSelect 确认临时策略的纯函数部分就是 catalog.Select
-// （04 的 created_at 规则是 ticket 09 的事，这里只钉住「08 没有偷偷改规则」）。
+// TestDefaultPolicyIsSelect 确认默认策略的纯函数部分就是 catalog.Select
+// （重排、新增普通候选都不该改变它）。
 func TestDefaultPolicyIsSelect(t *testing.T) {
 	in := []catalog.Magnet{magnet("a", false), magnet("b", true)}
 	want, _ := catalog.Select(in)
-	got, ok := TemporaryPolicy{}.Desired(in)
+	got, ok := DefaultPolicy{}.Desired(in)
 	if !ok || got.Infohash != want.Infohash {
-		t.Errorf("TemporaryPolicy.Desired = %v/%v, want %v", got.Infohash, ok, want.Infohash)
+		t.Errorf("DefaultPolicy.Desired = %v/%v, want %v", got.Infohash, ok, want.Infohash)
 	}
 }
 
@@ -346,23 +433,25 @@ func (alwaysSwitchPolicy) Desired(cands []catalog.Magnet) (catalog.Magnet, bool)
 	return catalog.Select(cands)
 }
 
-func (alwaysSwitchPolicy) KeepOrSwitch(pinned Record, pinnedOK bool, _ []catalog.Magnet, desired catalog.Magnet) (catalog.Magnet, bool) {
+func (alwaysSwitchPolicy) KeepOrSwitch(pinned Record, pinnedOK bool, desired catalog.Magnet) (catalog.Magnet, bool) {
 	return desired, pinnedOK && pinned.Infohash != desired.Infohash
 }
 
 // TestGUIDStableAcrossUpstreamChange 是本票的验收语言：
-// 客户端看到的 guid 不因上游候选变化而移动。
+// 客户端看到的 guid 不因上游候选的**普通候选**变化而移动。
 //
 // 前几条测的是「pin 里的 infohash 不变」；这条把它接到真正的产物上 ——
 // feed.Item.GUID() 就是 infohash，qBittorrent 按它去重。
-// 上游重排/新增候选而 guid 不变 == 不会重复下载。
+// 上游重排/新增普通候选而 guid 不变 == 不会重复下载。
+//
+// 「新增 cnsub 会主动切 guid」是 ticket 09 的刻意行为，见 TestSwitchesToNewerCNSub。
 func TestGUIDStableAcrossUpstreamChange(t *testing.T) {
 	st := newStore(t)
 	inner := &fakeSource{works: []catalog.Work{{
 		ID: "m1", Number: "A-1",
-		Magnets: []catalog.Magnet{magnet("first", false)},
+		Magnets: []catalog.Magnet{magnetAt("first", false, "2026-01-01")},
 	}}}
-	src := New(inner, st, TemporaryPolicy{})
+	src := New(inner, st, DefaultPolicy{})
 
 	guidOf := func() string {
 		t.Helper()
@@ -379,20 +468,142 @@ func TestGUIDStableAcrossUpstreamChange(t *testing.T) {
 
 	before := guidOf()
 
-	// 上游把顺序整个换掉，并加了一条会赢的 cnsub —— 无状态实现会给新 guid。
+	// 上游把顺序整个换掉，并加了一条更新的**普通**候选 —— 无状态实现会给新 guid。
 	inner.mu.Lock()
 	inner.works = []catalog.Work{{
 		ID: "m1", Number: "A-1",
 		Magnets: []catalog.Magnet{
-			magnet("newer-cnsub", true),
-			magnet("first", false),
-			magnet("newest", false),
+			magnetAt("newest-plain", false, "2026-09-01"),
+			magnetAt("first", false, "2026-01-01"),
+			magnetAt("middle-plain", false, "2026-05-01"),
 		},
 	}}
 	inner.mu.Unlock()
 
 	if after := guidOf(); after != before {
 		t.Errorf("guid 变了：%q -> %q —— qBittorrent 会重复下载", before, after)
+	}
+}
+
+// TestSwitchIsVisible 钉住 ticket 09 的可见性要求：
+// pin 从旧值换成新值时，必须留下一条能定位到作品与新旧值的 INFO。
+func TestSwitchIsVisible(t *testing.T) {
+	h := withCapturedLogs(t)
+	st := newStore(t)
+	inner := &fakeSource{works: []catalog.Work{{
+		ID: "m1", Number: "A-1",
+		Magnets: []catalog.Magnet{magnetAt("old", false, "2026-01-01")},
+	}}}
+	src := New(inner, st, DefaultPolicy{})
+	if _, err := src.Code(context.Background(), "A-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	inner.mu.Lock()
+	inner.works = []catalog.Work{{
+		ID: "m1", Number: "A-1",
+		Magnets: []catalog.Magnet{
+			magnetAt("old", false, "2026-01-01"),
+			magnetAt("new-sub", true, "2026-06-01"),
+		},
+	}}
+	inner.mu.Unlock()
+
+	if _, err := src.Code(context.Background(), "A-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	r, ok := h.find("pin 切换")
+	if !ok {
+		t.Fatal("切换必须留下一条日志，否则「换了哪条磁链」不可见")
+	}
+	attrs := attrsOf(r)
+	if attrs["旧磁链"] != "old" || attrs["新磁链"] != "new-sub" {
+		t.Errorf("切换日志没有指出新旧值: %v", attrs)
+	}
+	if attrs["作品"] != "m1" {
+		t.Errorf("切换日志没有指出作品: %v", attrs)
+	}
+}
+
+// TestPinAbsentFromUpstreamKeepsSnapshot 钉住 ticket 09 对「pin 消失」的决定：
+// 继续沿用快照（guid 稳定优先），但要 WARN 出来，不能静默发死链。
+func TestPinAbsentFromUpstreamKeepsSnapshot(t *testing.T) {
+	h := withCapturedLogs(t)
+	st := newStore(t)
+	inner := &fakeSource{works: []catalog.Work{{
+		ID: "m1", Number: "A-1",
+		Magnets: []catalog.Magnet{magnetAt("gone", false, "2026-01-01")},
+	}}}
+	src := New(inner, st, DefaultPolicy{})
+	if _, err := src.Code(context.Background(), "A-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 上游只剩一条更新的普通候选：pin 指向的那条消失了，但没有新 cnsub。
+	inner.mu.Lock()
+	inner.works = []catalog.Work{{
+		ID: "m1", Number: "A-1",
+		Magnets: []catalog.Magnet{magnetAt("other", false, "2026-06-01")},
+	}}
+	inner.mu.Unlock()
+
+	works, err := src.Code(context.Background(), "A-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := works[0].Magnets[0].Infohash; got != "gone" {
+		t.Errorf("pin 消失时应当继续沿用快照，得到 %q", got)
+	}
+	if rec, _ := st.Get("m1"); rec.Infohash != "gone" {
+		t.Errorf("pin 不该被改掉，得到 %q", rec.Infohash)
+	}
+
+	r, ok := h.find("不在当前上游候选")
+	if !ok {
+		t.Fatal("pin 消失必须留下一条日志，否则「发了死链」不可见")
+	}
+	if r.Level != slog.LevelWarn {
+		t.Errorf("pin 消失的日志级别 = %v, want WARN", r.Level)
+	}
+}
+
+// TestPinAbsentWhenUpstreamReturnsNoMagnets 是一条容易漏的边界：上游把某部已钉住
+// 作品的磁链**全部删掉**时，装饰器仍应返回快照并 WARN —— 否则该作品会静默地
+// 从 feed 里消失（而 ticket 09 要的是稳定的死链 + 可见的告警）。
+func TestPinAbsentWhenUpstreamReturnsNoMagnets(t *testing.T) {
+	h := withCapturedLogs(t)
+	st := newStore(t)
+	inner := &fakeSource{works: []catalog.Work{{
+		ID: "m1", Number: "A-1",
+		Magnets: []catalog.Magnet{magnetAt("gone", false, "2026-01-01")},
+	}}}
+	src := New(inner, st, DefaultPolicy{})
+	if _, err := src.Code(context.Background(), "A-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 上游这次对这部作品一条候选都不给。
+	inner.mu.Lock()
+	inner.works = []catalog.Work{{ID: "m1", Number: "A-1"}}
+	inner.mu.Unlock()
+
+	works, err := src.Code(context.Background(), "A-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(works[0].Magnets) != 1 || works[0].Magnets[0].Infohash != "gone" {
+		t.Errorf("已钉住的作品即使上游无候选也应返回快照，得到 %+v", works[0].Magnets)
+	}
+	if rec, _ := st.Get("m1"); rec.Infohash != "gone" {
+		t.Errorf("pin 不该被改掉，得到 %q", rec.Infohash)
+	}
+	r, ok := h.find("不在当前上游候选")
+	if !ok {
+		t.Fatal("上游删光磁链时必须留下一条日志，否则作品会静默消失")
+	}
+	if attrs := attrsOf(r); attrs["候选数"] != "0" {
+		t.Errorf("日志应说明候选数为 0: %v", attrs)
 	}
 }
 
@@ -404,7 +615,7 @@ func TestNilStoreDegradesInsteadOfPanicking(t *testing.T) {
 	src := New(&fakeSource{works: []catalog.Work{{
 		ID: "m1", Number: "A-1",
 		Magnets: []catalog.Magnet{magnet("x", false), magnet("y", true)},
-	}}}, nil, TemporaryPolicy{})
+	}}}, nil, DefaultPolicy{})
 
 	works, err := src.Code(context.Background(), "A-1")
 	if err != nil {
