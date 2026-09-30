@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -284,4 +285,68 @@ func (b *barrierSource) ActressName(ctx context.Context, _ string) (string, erro
 	<-b.actressStarted
 	close(b.nameCalled)
 	return "并发名字", nil
+}
+
+// TestActressFeedReturns400ForMalformedMask 确认「你写错了 URL」与「上游出错了」
+// 被分开：前者 400（重试无用），后者 502（重试有用）。
+//
+// 这条对应的真实失败模式：用户把主属性拼成 0:a:EvkJ:apmc::（而不是逗号分隔的
+// 0:a:EvkJ:a,p,m,c::）。上游对拼错的掩码是**静默忽略**的 —— 不报错，
+// 只是返回该女优的全部作品。因此如果不在这里拦，用户会拿到一个看起来正常、
+// 但实际没有应用任何筛选的 feed。
+// 注意这一条验的是**映射**，不是校验本身 —— 掩码格式是上游契约，
+// 因此校验归 appapi 所有（见 appapi 的 TestBuildEntityFilterRejectsConcatenatedFlags）。
+// httpapi 的责任只是把 ErrBadRequest 翻译成 400 而不是 502。
+func TestActressFeedMapsBadRequestTo400(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", badRequestSource{&stub.Source{}})
+
+	rec := do(t, h, "/rss/actress/EvkJ.xml")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，want 400（不能是 502 —— 重试无用）", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "参数") {
+		t.Errorf("文案没透出: %s", rec.Body.String())
+	}
+}
+
+// badRequestSource 让 Actress 返回一个「用户参数写错」的错误。
+type badRequestSource struct{ *stub.Source }
+
+func (badRequestSource) Actress(context.Context, string, url.Values) ([]catalog.Work, error) {
+	return nil, fmt.Errorf("%w：filter_by 的主属性应当用逗号分隔", catalog.ErrBadRequest)
+}
+
+// TestCodeFeedUnaffectedByMaskValidation 确认新校验只作用于女优订阅。
+func TestCodeFeedUnaffectedByMaskValidation(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+	if rec := do(t, h, "/rss/code/KV-328.xml"); rec.Code != http.StatusOK {
+		t.Errorf("番号 feed 不该受影响：%d", rec.Code)
+	}
+}
+
+// TestActressFeedSurvivesPanicInNameLookup 确认取名处的 panic 不会杀掉进程。
+//
+// net/http 只为 handler 所在的 goroutine 恢复 panic，而取名跑在一个新起的
+// goroutine 里 —— 它逃出了那层保护。没有这个 recover 的话，一个 nil 解引用
+// 之类的小 bug 会带走整个服务，而不只是这一个请求。
+func TestActressFeedSurvivesPanicInNameLookup(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", panicNameSource{&stub.Source{}})
+
+	rec := do(t, h, "/rss/actress/EvkJ.xml")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("取名 panic 不该影响 feed：状态码 = %d", rec.Code)
+	}
+	var f parsedFeed
+	if err := xml.Unmarshal(rec.Body.Bytes(), &f); err != nil {
+		t.Fatalf("不是合法 RSS: %v", err)
+	}
+	if f.Channel.Title != "JavDB · EvkJ" {
+		t.Errorf("标题应当退回 id，得到 %q", f.Channel.Title)
+	}
+}
+
+type panicNameSource struct{ *stub.Source }
+
+func (panicNameSource) ActressName(context.Context, string) (string, error) {
+	panic("故意在取名时炸")
 }

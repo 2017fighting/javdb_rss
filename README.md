@@ -72,10 +72,37 @@ http://127.0.0.1:8080/rss/actress/EvkJ.xml                女优订阅
 http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=2026-01-01   只要这个日期之后的
 ```
 
-女优订阅的 query 参数**原样透传**给 App 自己的演员页 —— 本服务不解释也不改写它们。
-可用的键见 `config.example.yaml` 里的注释。
+### 女优订阅的参数：两类，别搞混
 
-`?since=` 是本服务自有的参数，不会被透传上去。
+| 类别 | 参数 | 谁在用 |
+|---|---|---|
+| **本服务自有** | `since` `pages` `page` `limit` | 我们消费，**不会**发给上游 |
+| **原样透传** | `filter_by` `filter_by_tags` `sort_by` `order_by` | 原封不动转发给上游演员页 |
+
+完整参数表（**每条都对着真实上游实测过**）见
+[`.scratch/javdb-rss/notes/actress-params.md`](.scratch/javdb-rss/notes/actress-params.md)。
+
+日常只用这几个：
+
+```bash
+/rss/actress/EvkJ.xml                     全部作品，最新的 50 部
+/rss/actress/EvkJ.xml?since=2026-01-01    只要这个日期之后的（追新）
+/rss/actress/EvkJ.xml?pages=3             翻三页（≤150 部，默认 1、上限 20）
+/rss/actress/EvkJ.xml?filter_by=0%3Aa%3AEvkJ%3Ac%3A%3A   只看带中文字幕的
+```
+
+### ⚠️ 三个会**静默出错**的坑
+
+上游对写错的参数**不报错、只忽略**。因此下面三件事必须记住：
+
+1. **`filter_by` 是复合掩码**，不是字母组合。写 `apmc` 会静默返回
+   **全站最新作品**而不是该女优的作品。正确形式：
+   `0:a:<女优id>`，加筛选时主属性用**逗号**分隔：`0:a:EvkJ:c,m::`。
+   （拼接写法 `0:a:EvkJ:cm::` 会被服务端静默忽略 —— 本服务会拦下这一种并返回 400。）
+2. **`sort_by` 只有 `release` 和 `score` 有区别**，其余拼错的值都静默按发布日期排序。
+3. **`page` / `limit` 会被本服务覆盖**，你传了不生效（分页由 `pages` 控制）。
+
+**推荐 `filter_by` 留空** —— 本服务会自动构造正确的 `0:a:<女优 id>`。
 
 ## 读取 App 里收藏的女优
 

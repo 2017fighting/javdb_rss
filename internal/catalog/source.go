@@ -33,6 +33,12 @@ type Actress struct {
 // 空列表会被理解成「你没收藏任何人」。
 var ErrNoToken = errors.New("此操作需要 token：请从 App 导出后配置 app_api.token_file")
 
+// ErrBadRequest 表示**用户提供的订阅参数不合法**。
+//
+// 它让上层能把「你写错了 URL」与「上游出错了」分开返回 4xx 与 5xx ——
+// 前者重试无用，后者重试有用。
+var ErrBadRequest = errors.New("订阅参数不合法")
+
 // Source 产出 feed 与发现端点所需的数据。
 //
 // 它是本服务的**唯一边界端口**：HTTP 层只认这个接口，不知道背后是真实的

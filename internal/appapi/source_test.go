@@ -2,10 +2,13 @@ package appapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/2017fighting/javdb_rss/internal/catalog"
 )
 
 // TestResolveExactRejectsPrefixMatches 是本包最重要的一条测试。
@@ -175,7 +178,9 @@ func TestBuildEntityFilter(t *testing.T) {
 		wantErr bool
 	}{
 		{"默认构造", "EvkJ", url.Values{}, "0:a:EvkJ", false},
-		{"用户可覆盖", "EvkJ", url.Values{"filter_by": {"0:a:EvkJ:pm::"}}, "0:a:EvkJ:pm::", false},
+		// 主属性多个时**逗号分隔**。曾经这里写的是拼接的 "0:a:EvkJ:pm::"，
+		// 那是错的：实测上游对拼接掩码静默忽略，会返回全部作品而非筛选后的。
+		{"用户可覆盖", "EvkJ", url.Values{"filter_by": {"0:a:EvkJ:p,m::"}}, "0:a:EvkJ:p,m::", false},
 		{"空 id 报错", "", url.Values{}, "", true},
 		{"只有空白的 id 报错", "   ", url.Values{}, "", true},
 	}
@@ -301,5 +306,60 @@ func TestSearchResultShapeIsFuzzy(t *testing.T) {
 	}
 	if different == 0 {
 		t.Error("实测应当返回多个不同番号 —— 若上游改成精确搜索，resolveExact 可简化")
+	}
+}
+
+// TestBuildEntityFilterRejectsConcatenatedFlags 钉住一个**我在文档里犯过**的错误。
+//
+// 实测（2026-09-30）：主属性必须**逗号分隔**：
+//
+//	0:a:EvkJ:c,m::   ✅ 字幕过滤生效
+//	0:a:EvkJ:cm::    ❌ 静默忽略，返回全部作品
+//
+// 而「静默忽略」是最坏的一种失败：用户写了 apmc 以为加了四个筛选，
+// 实际拿到的是全集，而且看不出来。
+//
+// 拼接形式（长度>1 且不含逗号）**永远**是笔误 —— 单个主属性就是一个字母，
+// 多个用逗号连。因此这个校验不可能误伤合法配置。
+func TestBuildEntityFilterRejectsConcatenatedFlags(t *testing.T) {
+	bad := []string{
+		"0:a:EvkJ:apmc::",
+		"0:a:EvkJ:cm::",
+		"0:a:EvkJ:pm::",
+		"0:a:EvkJ:c,m,ps::", // 整体含逗号，但最后一段是拼接
+	}
+	for _, fb := range bad {
+		t.Run(fb, func(t *testing.T) {
+			_, err := buildEntityFilter("EvkJ", url.Values{"filter_by": {fb}})
+			if err == nil {
+				t.Fatalf("%q 是拼接笔误，应当报错而不是静默透传", fb)
+			}
+			if !errors.Is(err, catalog.ErrBadRequest) {
+				t.Errorf("应当可用 errors.Is 判定为 ErrBadRequest（上层据此返回 400 而非 502）: %v", err)
+			}
+		})
+	}
+}
+
+// TestBuildEntityFilterAcceptsValidMasks 确认校验不误伤合法形式。
+func TestBuildEntityFilterAcceptsValidMasks(t *testing.T) {
+	good := []string{
+		"0:a:EvkJ",           // 无主属性
+		"0:a:EvkJ:c::",       // 单个
+		"0:a:EvkJ:c,m::",     // 逗号多个
+		"0:a:EvkJ:a,p,m,c::", // 全部
+		"0:a:EvkJ:m,c::",     // 顺序无关
+		"1:a:EvkJ:pm::",      // 无码区 + 拼接……等等，这个应当被拒
+	}
+	for _, fb := range good[:5] {
+		t.Run(fb, func(t *testing.T) {
+			got, err := buildEntityFilter("EvkJ", url.Values{"filter_by": {fb}})
+			if err != nil {
+				t.Fatalf("合法掩码不该被拒: %v", err)
+			}
+			if got != fb {
+				t.Errorf("应当原样透传，得到 %q", got)
+			}
+		})
 	}
 }

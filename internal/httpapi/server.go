@@ -292,10 +292,32 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 	// 用带缓冲(1) 的 channel：即使下面提前 return（作品取失败），
 	// goroutine 也能写完而不阻塞，不会泄漏。
 	nameCh := make(chan string, 1)
-	go func() { nameCh <- s.actressTitle(r.Context(), id) }()
+	go func() {
+		// ⚠️ 这里的 recover 是必需的，不是防御性冗余。
+		//
+		// net/http 只为**handler 所在的那个 goroutine** 恢复 panic。
+		// 这里新起的 goroutine 逃出了那层保护 —— 它一旦 panic，
+		// 杀掉的是**整个进程**，而不是这一个请求。
+		// 取名是条非关键路径（失败就退回 id），不值得用它赌上整个服务。
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("取女优名字时 panic，标题退回 id",
+					"id", id, "panic", r)
+				nameCh <- "JavDB · " + id
+			}
+		}()
+		nameCh <- s.actressTitle(r.Context(), id)
+	}()
 
 	works, err := s.src.Actress(r.Context(), id, toValues(params))
 	if err != nil {
+		// 用户参数写错（400）与上游出错（502）必须分开：
+		// 前者重试无用，后者重试有用。
+		if errors.Is(err, catalog.ErrBadRequest) {
+			s.log.WarnContext(r.Context(), "女优订阅参数不合法", "id", id, "err", err)
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		s.log.ErrorContext(r.Context(), "取女优作品失败", "id", id, "err", err)
 		writeUpstreamError(w, err)
 		return

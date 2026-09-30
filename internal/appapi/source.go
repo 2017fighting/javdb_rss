@@ -237,10 +237,57 @@ func buildEntityFilter(actorID string, params url.Values) (string, error) {
 	if strings.TrimSpace(actorID) == "" {
 		return "", fmt.Errorf("女优 id 为空")
 	}
-	if raw := strings.TrimSpace(params.Get("filter_by")); raw != "" {
-		return raw, nil
+	raw := strings.TrimSpace(params.Get("filter_by"))
+	if raw == "" {
+		return "0:a:" + actorID, nil
 	}
-	return "0:a:" + actorID, nil
+	if err := validateMask(raw); err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// validateMask 只拦一类**可证明是笔误**的输入：主属性拼接。
+//
+// 实测（2026-09-30）发现上游对非法 `filter_by` 是**静默忽略**的：
+//
+//	0:a:EvkJ:c,m::   主属性逗号分隔 -> ✅ 只返回带中文字幕的作品
+//	0:a:EvkJ:cm::    拼在一起     -> ❌ 静默忽略，返回该女优全部作品
+//
+// 这比报错危险得多：用户以为加了筛选，实际拿到全集，而且看不出来。
+//
+// 校验规则刻意保守 —— 只拒「长度 > 1 且不含逗号」的单段，因为：
+//
+//   - 单个主属性就是一个字母，多个用逗号连，因此拼接**不可能**是合法值；
+//   - 因此这个检查不会误伤任何合法配置。
+//
+// 刻意**不**校验字母本身是否在已知集合里：那会在这张私有契约新增
+// 一个筛选字母时把一个本来能用的配置判死，而那种新增是我们无法预知的。
+func validateMask(mask string) error {
+	parts := strings.Split(mask, ":")
+	// 无主属性段（如 "0:a:EvkJ"）就没得可校验。
+	if len(parts) < 4 {
+		return nil
+	}
+	for _, seg := range strings.Split(parts[3], ",") {
+		if len(seg) > 1 {
+			return fmt.Errorf(
+				"%w：filter_by 的主属性应当是**单个字母**，多个用逗号分隔（如 0:a:%s:c,m::），"+
+					"而不是拼在一起（%q）。注意上游对拼错的掩码是静默忽略的 —— "+
+					"拼在一起不会报错，只会静默返回全部作品",
+				catalog.ErrBadRequest, maskID(mask), seg)
+		}
+	}
+	return nil
+}
+
+// maskID 从掩码里取出实体 id，让错误文案能给出可直接照抄的示例。
+func maskID(mask string) string {
+	parts := strings.Split(mask, ":")
+	if len(parts) >= 3 {
+		return parts[2]
+	}
+	return "EvkJ"
 }
 
 // hydrate 把精简作品逐个补齐磁链。
