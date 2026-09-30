@@ -353,3 +353,56 @@ func TestSaveTokenRejectsEmpty(t *testing.T) {
 		t.Error("报错时不该留下文件")
 	}
 }
+
+// TestTokenPathDefaultsNextToConfig 确认 token_file 留空时的落点。
+//
+// 这个 bug 真实发生过：示例配置里 token_file 是 ""（因为它是可选项），
+// 而 login 直接拿 "" 当路径 —— 登录成功了、用户手机被踢下线了，
+// 结果 `os.Rename(".tmp", "")` 失败，**token 丢了**，用户得再登一次。
+//
+// 默认放在配置文件旁边，是因为「配置在哪儿、它的凭据就在哪儿」最不容易搞错。
+func TestTokenPathDefaultsNextToConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("provider: stub\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "token.json")
+	if got := h.TokenPath(); got != want {
+		t.Errorf("TokenPath() = %q, want %q", got, want)
+	}
+}
+
+// TestTokenPathHonoursExplicitValue 确认显式配了就照用。
+func TestTokenPathHonoursExplicitValue(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("provider: stub\napp_api:\n  token_file: \"/tmp/custom-token.json\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.TokenPath(); got != "/tmp/custom-token.json" {
+		t.Errorf("TokenPath() = %q", got)
+	}
+}
+
+// TestSaveTokenRejectsEmptyPath 确认空路径报错而不是去写一个叫 ".tmp" 的文件。
+//
+// 上一层的默认值应该保证不会有空路径，但这里再挡一道 —— 静默写错位置
+// 比明确报错难查得多。
+func TestSaveTokenRejectsEmptyPath(t *testing.T) {
+	if err := SaveToken("", "tok"); err == nil {
+		t.Fatal("空路径应当报错")
+	}
+	// 不该留下任何垃圾文件。
+	if _, err := os.Stat(".tmp"); err == nil {
+		t.Error("空路径下不该写出 .tmp 文件")
+	}
+}

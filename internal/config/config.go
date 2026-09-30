@@ -216,7 +216,19 @@ type Holder struct {
 }
 
 // NewHolder 加载配置并构造 Holder。path 为空时使用纯默认配置且重载为空操作。
+//
+// 路径会先解析成**绝对路径**。两个理由：
+//
+//  1. TokenPath() 由配置文件位置推导（留空时取同目录的 token.json）。
+//     相对路径会让「登录写到哪儿」取决于你在哪个目录敲的命令 ——
+//     一个很难查的不一致。
+//  2. 出错时能直接打出完整路径，用户一眼看得出它去哪儿找了。
 func NewHolder(path string) (*Holder, error) {
+	if path != "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+	}
 	cfg, err := Load(path)
 	if err != nil {
 		return nil, err
@@ -231,6 +243,26 @@ func (h *Holder) Current() *Config { return h.cur.Load() }
 
 // Path 返回配置文件路径。
 func (h *Holder) Path() string { return h.path }
+
+// TokenPath 返回 token 文件的**实际**路径。
+//
+// app_api.token_file 留空时，默认放在**配置文件旁边**的 token.json ——
+// 「配置在哪儿、它的凭据就在哪儿」最不容易搞错。
+//
+// 这个默认值是必须的，不是锦上添花：它曾经缺失过，后果是
+// login 登录成功、用户手机被踢下线，然后 `os.Rename(".tmp", "")` 失败，
+// **token 丢了**。而且运行中的服务也在读那个空路径，就算写成功也读不到。
+//
+// 因此 login 命令与服务端**必须都走这个方法**，否则两边会指向不同的文件。
+func (h *Holder) TokenPath() string {
+	if p := strings.TrimSpace(h.Current().AppAPI.TokenFile); p != "" {
+		return p
+	}
+	if h.path == "" {
+		return "token.json"
+	}
+	return filepath.Join(filepath.Dir(h.path), "token.json")
+}
 
 // Reload 重新读取配置文件。失败时当前配置保持不变。
 func (h *Holder) Reload() error {
@@ -309,6 +341,11 @@ func LoadToken(path string) (string, error) {
 //  2. **临时文件 + rename**：避免写一半断电留下一个半截的 token 文件，
 //     那会让下次启动读到一个坏 JSON 而报错。
 func SaveToken(path, token string) error {
+	if strings.TrimSpace(path) == "" {
+		// 明确报错，而不是去写一个叫 ".tmp" 的文件再在 rename 时炸。
+		// 调用方应当用 Holder.TokenPath() 拿到一个解析过的路径。
+		return fmt.Errorf("token 文件路径为空（应当用 Holder.TokenPath() 解析默认值）")
+	}
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return fmt.Errorf("拒绝写入空 token —— 那会让下次启动静默变成匿名访问")

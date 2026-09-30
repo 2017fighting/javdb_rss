@@ -76,14 +76,20 @@ func runLogin(args []string) error {
 	}
 	fmt.Println("✓ 登录成功")
 
-	if err := config.SaveToken(ac.TokenFile, token); err != nil {
-		return fmt.Errorf("保存 token 失败：%w", err)
+	tokenPath := holder.TokenPath()
+	if err := config.SaveToken(tokenPath, token); err != nil {
+		// 落盘失败也**绝不能把 token 丢掉** —— 它已经换来了，而且为了它
+		// 用户的手机已经被挤下线。上一次失败就是在这里丢的，用户得重登一次。
+		//
+		// 因此把 token 直接打出来，让用户能手工保存或填进 JAVDB_TOKEN。
+		fmt.Fprintf(os.Stderr, "\n⚠️  保存 token 到 %s 失败：%v\n\n", tokenPath, err)
+		fmt.Fprintln(os.Stderr, "登录本身是成功的（你手机上的 App 已经被挤下线），")
+		fmt.Fprintln(os.Stderr, "但这个 token 还没保存。请手工保存它，或设成环境变量：")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "    export %s='%s'\n\n", config.EnvToken, token)
+		return fmt.Errorf("保存 token 失败（token 已打印在上面，请勿丢失）")
 	}
-	abs := ac.TokenFile
-	if a, err := os.Getwd(); err == nil {
-		abs = strings.TrimPrefix(ac.TokenFile, a+"/")
-	}
-	fmt.Printf("✓ 已写入 %s（权限 0600）\n", abs)
+	fmt.Printf("✓ 已写入 %s（权限 0600）\n", tokenPath)
 
 	// 验证：拿新 token 去打一个**真的需要凭据**的端点。
 	//

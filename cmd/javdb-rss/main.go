@@ -174,7 +174,10 @@ func (s *appapiSource) client() (*appapi.Client, error) {
 		identity.DeviceUUID = ac.DeviceUUID
 	}
 
-	token, err := config.LoadToken(ac.TokenFile)
+	// 用 TokenPath() 而不是 ac.TokenFile —— app_api.token_file 可能留空，
+	// 而那就需要解析出默认路径。login 命令走的是同一个方法，
+	// 两边必须指向同一个文件，否则写进去了也读不到。
+	token, err := config.LoadToken(s.holder.TokenPath())
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +270,7 @@ func (s *appapiSource) tryRelogin(ctx context.Context, c *appapi.Client) bool {
 
 	// 拿到锁之后再看一眼：可能另一个请求已经登过了。
 	// 没有这一步的话，N 个并发请求会登 N 次，每次都挤掉上一次的 token。
-	if cur, _ := config.LoadToken(s.holder.Current().AppAPI.TokenFile); cur != "" && cur == s.lastRelogin {
+	if cur, _ := config.LoadToken(s.holder.TokenPath()); cur != "" && cur == s.lastRelogin {
 		c.Token = cur
 		return true
 	}
@@ -284,7 +287,7 @@ func (s *appapiSource) tryRelogin(ctx context.Context, c *appapi.Client) bool {
 	// 尽量落盘，让重启后还能用新 token。落盘失败不算致命 ——
 	// 本次进程内存里的 token 已经是新的了。但要说出来，否则用户会以为
 	// 「自动续期了」，而重启后又拿到旧的。
-	if err := config.SaveToken(s.holder.Current().AppAPI.TokenFile, token); err != nil {
+	if err := config.SaveToken(s.holder.TokenPath(), token); err != nil {
 		s.log.Warn("自动续期成功但写入 token 文件失败 —— 重启后会退回旧 token", "err", err)
 	}
 	s.lastRelogin = token

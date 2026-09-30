@@ -32,7 +32,14 @@ libflutter.so
 #
 # 手工导出的 App token 存在本地，不要提交。
 # ---------------------------------------------------------------------------
+# token 文件（login 写入；token_file 留空时默认就在配置文件旁边）
 token.json
+token.txt
+# 本地配置文件：README 让用户 cp config.example.yaml config.yaml，
+# 而它可能带上 token 路径或（若启用自动续期）凭据
+config.yaml
+# 本地构建产物
+/javdb-rss
 secrets.yaml
 secrets.yml
 config.local.yaml
