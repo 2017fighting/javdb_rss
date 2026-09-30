@@ -29,7 +29,9 @@ type Source struct {
 	// （模拟上游没有这个名字），调用方据此退回 id。
 	Names map[string]string
 	// Collected 是 CollectedActresses 的返回值；为 nil 时用内置样例。
-	Collected []catalog.Actress
+	// 它是一个完整的 catalog.Collection，因此需要构造截断场景的测试
+	// 可以同时给出 Truncated / PagesFetched / MaxPages，而不是只给一部分。
+	Collected *catalog.Collection
 	// NoToken 为 true 时 CollectedActresses 返回 catalog.ErrNoToken，
 	// 用来验证上层对「没配 token」的处置。
 	NoToken bool
@@ -122,18 +124,18 @@ func (s *Source) ActressName(_ context.Context, id string) (string, error) {
 }
 
 // CollectedActresses 实现 catalog.Source。
-func (s *Source) CollectedActresses(_ context.Context) ([]catalog.Actress, error) {
+func (s *Source) CollectedActresses(_ context.Context) (catalog.Collection, error) {
 	if s.NoToken {
-		return nil, fmt.Errorf("取收藏女优: %w", catalog.ErrNoToken)
+		return catalog.Collection{}, fmt.Errorf("取收藏女优: %w", catalog.ErrNoToken)
 	}
 	if s.Err != nil {
-		return nil, s.Err
+		return catalog.Collection{}, s.Err
 	}
 	if s.Collected != nil {
-		return s.Collected, nil
+		return *s.Collected, nil
 	}
-	return []catalog.Actress{
+	return catalog.Collection{Actresses: []catalog.Actress{
 		{ID: "EvkJ", Name: "河北彩花", VideosCount: 229},
 		{ID: "xyz1", Name: "Another Name", VideosCount: 57},
-	}, nil
+	}}, nil
 }

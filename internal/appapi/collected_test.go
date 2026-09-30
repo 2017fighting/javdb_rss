@@ -55,14 +55,17 @@ func TestCollectedActressesPaginatesUntilEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("不该报错: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("得到 %d 位女优，want 3", len(got))
+	if len(got.Actresses) != 3 {
+		t.Fatalf("得到 %d 位女优，want 3", len(got.Actresses))
 	}
-	if got[0].ID != "aaa" || got[1].ID != "bbb" || got[2].ID != "ccc" {
-		t.Errorf("顺序或内容不对: %+v", got)
+	if got.Truncated {
+		t.Error("读到空页就到底了，不该报告截断")
 	}
-	if got[0].Name != "AAA" || got[0].VideosCount != 10 {
-		t.Errorf("字段映射不对: %+v", got[0])
+	if got.Actresses[0].ID != "aaa" || got.Actresses[1].ID != "bbb" || got.Actresses[2].ID != "ccc" {
+		t.Errorf("顺序或内容不对: %+v", got.Actresses)
+	}
+	if got.Actresses[0].Name != "AAA" || got.Actresses[0].VideosCount != 10 {
+		t.Errorf("字段映射不对: %+v", got.Actresses[0])
 	}
 	// page=1,2,3 —— 第 3 页是空页，用来确认「到底」了。
 	want := []string{"1", "2", "3"}
@@ -116,13 +119,40 @@ func TestCollectedActressesDedupesAcrossPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("去重后应当 3 位，得到 %d: %+v", len(got), got)
+	if len(got.Actresses) != 3 {
+		t.Fatalf("去重后应当 3 位，得到 %d: %+v", len(got.Actresses), got.Actresses)
+	}
+}
+
+// TestCollectedActressesReportsTruncationAtPageCap 是本票的核心：
+//
+// 一个永远返回满页的上游会让翻页在上限处停下，此时返回的清单是**已知不完整的**。
+// 交付要求是「可机读的明确信号」—— 因此 Truncated 必须为 true，
+// 而不是照常返回一份看起来完整的列表。
+func TestCollectedActressesReportsTruncationAtPageCap(t *testing.T) {
+	srv := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(collectedPage("AAA", "BBB")))
+	})
+	srv.Token = "tok"
+
+	got, err := srv.CollectedActresses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Truncated {
+		t.Fatal("翻页在上限处停下时必须报告截断 —— 否则这是一份静默残缺的列表")
+	}
+	if got.PagesFetched != maxCollectedPages || got.MaxPages != maxCollectedPages {
+		t.Errorf("PagesFetched=%d MaxPages=%d，应当都等于上限 %d",
+			got.PagesFetched, got.MaxPages, maxCollectedPages)
 	}
 }
 
 // TestCollectedActressesStopsAtMaxPages 确认页数有上限 ——
 // 一个异常的上游不该让我们无限翻页。
+//
+// 上限之后还会多问一页（探针），用来分清「正好读满上限」与「还有更多」。
+// 那一次探针是**异常分支独有的**，正常情况下不会发生。
 func TestCollectedActressesStopsAtMaxPages(t *testing.T) {
 	var calls int
 	srv := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -132,12 +162,129 @@ func TestCollectedActressesStopsAtMaxPages(t *testing.T) {
 	})
 	srv.Token = "tok"
 
-	_, err := srv.CollectedActresses(context.Background())
+	got, err := srv.CollectedActresses(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != maxCollectedPages {
-		t.Errorf("请求了 %d 页，应当在 maxCollectedPages=%d 处停住", calls, maxCollectedPages)
+	if calls != maxCollectedPages+1 {
+		t.Errorf("请求了 %d 页，应当是上限 %d 加一次探针", calls, maxCollectedPages)
+	}
+	if !got.Truncated {
+		t.Error("永远满页时应当报告截断")
+	}
+}
+
+// TestCollectedActressesCompleteWhenCapExactlyFills 是边界测试：
+//
+// 收藏数**正好等于**上限（maxCollectedPages 满页）时，探针会看到空页 ——
+// 这必须被判定为**完整**，而不是「踩到上限就算截断」。
+// 否则一个恰好收藏了整上限的用户会永远看到一条假的截断警告，
+// 而这条警告会让他去调一个本来不需要调的上限。
+func TestCollectedActressesCompleteWhenCapExactlyFills(t *testing.T) {
+	const perPage = 2
+	srv := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page <= maxCollectedPages {
+			_, _ = w.Write([]byte(collectedPage(
+				fmt.Sprintf("P%dA", page), fmt.Sprintf("P%dB", page))))
+			return
+		}
+		_, _ = w.Write([]byte(emptyCollectedPage()))
+	})
+	srv.Token = "tok"
+
+	got, err := srv.CollectedActresses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Truncated {
+		t.Errorf("收藏恰好等于上限（%d 页）时是完整清单，不该报告截断", maxCollectedPages)
+	}
+	if len(got.Actresses) != maxCollectedPages*perPage {
+		t.Errorf("读到 %d 位，want %d", len(got.Actresses), maxCollectedPages*perPage)
+	}
+}
+
+// TestCollectedActressesCompleteWhenLastPageIsPartialAtCap 是另一个边界：
+//
+// 收藏数落在上限所在页的中间（末页不满）时，探针同样会看到空页 ——
+// 也必须是完整。这条正是最初的实现漏掉的：它只看「有没有遇到空页」，
+// 于是把「末页不满但已到上限」误报成截断。
+func TestCollectedActressesCompleteWhenLastPageIsPartialAtCap(t *testing.T) {
+	srv := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		switch {
+		case page < maxCollectedPages:
+			_, _ = w.Write([]byte(collectedPage(
+				fmt.Sprintf("P%dA", page), fmt.Sprintf("P%dB", page))))
+		case page == maxCollectedPages:
+			// 末页只有一条，不满。
+			_, _ = w.Write([]byte(collectedPage("Z9")))
+		default:
+			_, _ = w.Write([]byte(emptyCollectedPage()))
+		}
+	})
+	srv.Token = "tok"
+
+	got, err := srv.CollectedActresses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Truncated {
+		t.Error("末页不满说明已经到底，不该报告截断")
+	}
+}
+
+// TestCollectedActressesTruncatedWhenDataBeyondCap 确认真的还有第 21 页时
+// 才报告截断 —— 信号必须精确到「还有更多」，而不是「踩到了上限」。
+func TestCollectedActressesTruncatedWhenDataBeyondCap(t *testing.T) {
+	srv := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page <= maxCollectedPages+1 {
+			_, _ = w.Write([]byte(collectedPage(
+				fmt.Sprintf("P%dA", page), fmt.Sprintf("P%dB", page))))
+			return
+		}
+		_, _ = w.Write([]byte(emptyCollectedPage()))
+	})
+	srv.Token = "tok"
+
+	got, err := srv.CollectedActresses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Truncated {
+		t.Fatal("上限之外还有数据时必须报告截断")
+	}
+}
+
+// TestCollectedActressesNoTruncationWhenLastPageIsShort 确认「最后一页不满」这种
+// 正常情况**不会**被误报成截断。
+//
+// 它是「信号只在真截断时出现」的另一半 —— 只测「截断时有信号」会放过一个
+// 永远为真的字段。
+func TestCollectedActressesNoTruncationWhenLastPageIsShort(t *testing.T) {
+	srv := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_, _ = w.Write([]byte(collectedPage("AAA", "BBB")))
+		case "2":
+			_, _ = w.Write([]byte(collectedPage("CCC"))) // 不满页，但也不是空页
+		default:
+			_, _ = w.Write([]byte(emptyCollectedPage()))
+		}
+	})
+	srv.Token = "tok"
+
+	got, err := srv.CollectedActresses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Truncated {
+		t.Error("读到空页才停下，不是截断")
+	}
+	if len(got.Actresses) != 3 {
+		t.Errorf("应当读到 3 位，得到 %d", len(got.Actresses))
 	}
 }
 

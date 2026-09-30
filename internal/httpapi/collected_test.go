@@ -25,6 +25,11 @@ type collectedResponse struct {
 		VideosCount int    `json:"videos_count"`
 		Feed        string `json:"feed"`
 	} `json:"actresses"`
+	// 截断信号。用指针以便区分「字段不存在」与「字段为 false」——
+	// 本票要求未达上限时这个信号**完全不存在**。
+	Truncated    *bool `json:"truncated"`
+	PagesFetched *int  `json:"pages_fetched"`
+	MaxPages     *int  `json:"max_pages"`
 }
 
 // TestCollectedReturnsTheList 是发现端点的正常路径。
@@ -103,8 +108,8 @@ func TestCollectedAuthErrorAlsoReturns503(t *testing.T) {
 // 按值嵌入不会提升它们。
 type authErrSource struct{ *stub.Source }
 
-func (authErrSource) CollectedActresses(context.Context) ([]catalog.Actress, error) {
-	return nil, &appapi.AuthError{Action: "TokenExpired", Message: "token 已過期"}
+func (authErrSource) CollectedActresses(context.Context) (catalog.Collection, error) {
+	return catalog.Collection{}, &appapi.AuthError{Action: "TokenExpired", Message: "token 已過期"}
 }
 
 // TestCollectedUpstreamErrorReturns502 确认普通上游故障与凭据问题分开 ——
@@ -207,6 +212,75 @@ func TestCollectedFeedPathsMatchRealRoutes(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Errorf("/collected 给出的路径 %s 实际返回 %d —— 用户会照着它填进 qBittorrent",
 				a.Feed, rr.Code)
+		}
+	}
+}
+
+// TestCollectedMarksTruncation 是本票在 HTTP 层的落点：
+//
+// 数据源报告触顶截断时，响应里必须有**可机读的明确信号**，
+// 而不是照常 200 + 一份看起来完整的列表。
+func TestCollectedMarksTruncation(t *testing.T) {
+	src := &recordingSource{
+		collected: &catalog.Collection{
+			Actresses:    []catalog.Actress{{ID: "EvkJ"}},
+			Truncated:    true,
+			PagesFetched: 20,
+			MaxPages:     20,
+		},
+	}
+	h := newTestServer(t, "provider: stub\n", src)
+
+	rec := do(t, h, "/collected")
+	if rec.Code != http.StatusOK {
+		// 截断仍然返回已读到的部分，因此是 200；判定靠字段而不是状态码。
+		t.Fatalf("状态码 = %d，want 200", rec.Code)
+	}
+	var got collectedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Truncated == nil || !*got.Truncated {
+		t.Fatalf("truncated 字段缺失或为 false —— 用户无法分辨「就这么多」与「只读到这么多」：%s", rec.Body.String())
+	}
+	if got.PagesFetched == nil || *got.PagesFetched != 20 {
+		t.Errorf("pages_fetched 应当说明读了多少页: %v", got.PagesFetched)
+	}
+	if got.MaxPages == nil || *got.MaxPages != 20 {
+		t.Errorf("max_pages 应当说明卡在哪: %v", got.MaxPages)
+	}
+	// 已读到的部分仍要交出去 —— 它比空列表有用。
+	if len(got.Actresses) != 1 {
+		t.Errorf("截断时也应当返回已读到的部分，得到 %d 条", len(got.Actresses))
+	}
+}
+
+// TestCollectedOmitsTruncationSignalWhenComplete 是配套的另一半：
+// 未达上限时，这个信号必须**完全不存在** —— 不能是一个永远为真的字段。
+func TestCollectedOmitsTruncationSignalWhenComplete(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+
+	rec := do(t, h, "/collected")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d", rec.Code)
+	}
+	var got collectedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Truncated != nil {
+		t.Errorf("完整清单里不该出现 truncated 字段，得到 %v", *got.Truncated)
+	}
+	// 也不该出现解释信号的那两个字段。
+	if got.PagesFetched != nil || got.MaxPages != nil {
+		t.Errorf("完整清单里不该出现 pages_fetched/max_pages: %v %v", got.PagesFetched, got.MaxPages)
+	}
+	// 直接查原始 JSON，确保不是「有字段但为 false/0」。
+	var raw map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &raw)
+	for _, k := range []string{"truncated", "pages_fetched", "max_pages"} {
+		if _, ok := raw[k]; ok {
+			t.Errorf("JSON 里不该有 %q 键", k)
 		}
 	}
 }

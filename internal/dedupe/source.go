@@ -78,7 +78,7 @@ func (s *Source) ActressName(ctx context.Context, id string) (string, error) {
 //
 // 它没有参数，因此所有并发调用合并成一次 —— 这是最划算的一处合并：
 // 收藏列表要翻好几页，而它只有在你打开 /collected 时才会被请求。
-func (s *Source) CollectedActresses(ctx context.Context) ([]catalog.Actress, error) {
+func (s *Source) CollectedActresses(ctx context.Context) (catalog.Collection, error) {
 	v, err, sharedCall := s.group.Do("collected", func() (any, error) {
 		return s.inner.CollectedActresses(ctx)
 	})
@@ -86,9 +86,9 @@ func (s *Source) CollectedActresses(ctx context.Context) ([]catalog.Actress, err
 		s.shared.Add(1)
 	}
 	if err != nil {
-		return nil, err
+		return catalog.Collection{}, err
 	}
-	got, _ := v.([]catalog.Actress)
+	got, _ := v.(catalog.Collection)
 	return got, nil
 }
 

@@ -112,11 +112,20 @@ func runLogin(args []string) error {
 	// 不证明这串字符在后续请求里被承认。而这里失败的话，
 	// 用户会在几天后才发现「怎么 /collected 一直 503」。
 	cl.Token = token
-	actresses, err := cl.CollectedActresses(ctx)
+	collection, err := cl.CollectedActresses(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"token 已写入，但**验证失败**：%w\n\n"+
 				"这可能意味着上游改了鉴权方式。请把这条错误报出来，不要以为只是网络问题", err)
+	}
+	actresses := collection.Actresses
+	if collection.Truncated {
+		// 验证的目的只是证明 token 能用，不需要读完；但既然读到了上限，
+		// 就必须说清楚 —— 否则用户会以为这就是他的全部收藏。
+		// 报实际读到的条数而不是拿上限乘每页条数：后者是个估算，
+		// 会与下一行打印的真实值矛盾。
+		fmt.Printf("⚠️  收藏超过翻页上限（已读 %d 页），列表被截断；token 本身有效。\n",
+			collection.PagesFetched)
 	}
 	fmt.Printf("✓ 验证通过：读到 %d 位收藏女优\n", len(actresses))
 	for i, a := range actresses {

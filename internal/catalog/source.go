@@ -25,6 +25,31 @@ type Actress struct {
 	VideosCount int
 }
 
+// Collection 是「用户在 App 里收藏的女优」这份清单的读取结果。
+//
+// 它刻意不是裸的 []Actress：收藏列表按页拉取，而翻页有一个上限。
+// 一旦收藏数超过上限，裸切片无法区分「我就收藏了这么多」与「服务只读到了
+// 这么多」—— 那正是本服务反复要避免的静默少给数据。Truncated 就是为这条
+// 区分而存在的信号。
+//
+// Truncated 为 false 时它是一份**完整的清单**。
+type Collection struct {
+	// Actresses 是读到的收藏女优。
+	Actresses []Actress
+	// Truncated 报告上游**确实还有数据而本次没读完**（超过翻页上限）。
+	// 为 true 时 Actresses 是一份**已知不完整的**清单。
+	//
+	// 注意它不是「达到上限」而是「上限之外还有数据」：一个恰好收藏了上限
+	// 位数量的用户不应看到截断信号，因此实现方必须把两者分清。
+	Truncated bool
+	// PagesFetched 是实际请求的页数，MaxPages 是当时生效的翻页上限。
+	//
+	// 它们用于解释信号（读了多少、卡在哪）。PagesFetched 可能大于 MaxPages
+	// —— 为分清「恰好读完」与「还有更多」，实现方会在到达上限后多探一页。
+	PagesFetched int
+	MaxPages     int
+}
+
 // ErrNoToken 表示这次操作需要用户从 App 导出的 token，但当前没有配置它。
 //
 // 单独成一个可判定的错误，是因为它的处置方式与别的失败都不同：
@@ -99,5 +124,9 @@ type Source interface {
 	//
 	// **需要 token。** 没有配置 token 时，实现方必须返回包装了 ErrNoToken 的错误
 	// （用 errors.Is 可判定），而不是返回空列表。
-	CollectedActresses(ctx context.Context) ([]Actress, error)
+	//
+	// 返回的是 Collection 而不是裸切片：翻页有上限，确属超过上限时
+	// 实现方必须把 Truncated 置为 true，好让上层能给出「这份清单不完整」
+	// 的信号，而不是静默少给数据。
+	CollectedActresses(ctx context.Context) (Collection, error)
 }

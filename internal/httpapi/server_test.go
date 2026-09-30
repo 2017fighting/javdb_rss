@@ -35,7 +35,7 @@ type recordingSource struct {
 	err           error
 
 	// 收藏列表相关的可控制行为
-	collected       []catalog.Actress
+	collected       *catalog.Collection
 	collectedErr    error
 	collectedCalled int
 	// names 控制 ActressName 的返回；不在表里的 id 返回错误。
@@ -59,12 +59,15 @@ func (r *recordingSource) ActressName(_ context.Context, id string) (string, err
 	return "", errors.New("没有名字")
 }
 
-func (r *recordingSource) CollectedActresses(context.Context) ([]catalog.Actress, error) {
+func (r *recordingSource) CollectedActresses(context.Context) (catalog.Collection, error) {
 	r.collectedCalled++
 	if r.collectedErr != nil {
-		return nil, r.collectedErr
+		return catalog.Collection{}, r.collectedErr
 	}
-	return r.collected, nil
+	if r.collected != nil {
+		return *r.collected, nil
+	}
+	return catalog.Collection{}, nil
 }
 
 func (r *recordingSource) Actress(_ context.Context, id string, params url.Values) ([]catalog.Work, error) {

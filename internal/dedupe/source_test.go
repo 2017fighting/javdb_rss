@@ -30,10 +30,10 @@ func (c *countingSource) ActressName(_ context.Context, id string) (string, erro
 	return "名字-" + id, nil
 }
 
-func (c *countingSource) CollectedActresses(context.Context) ([]catalog.Actress, error) {
+func (c *countingSource) CollectedActresses(context.Context) (catalog.Collection, error) {
 	c.actressCalls.Add(1)
 	time.Sleep(c.delay)
-	return []catalog.Actress{{ID: "EvkJ", Name: "河北彩花"}}, nil
+	return catalog.Collection{Actresses: []catalog.Actress{{ID: "EvkJ", Name: "河北彩花"}}}, nil
 }
 
 func (c *countingSource) Actress(_ context.Context, _ string, params url.Values) ([]catalog.Work, error) {
@@ -231,6 +231,36 @@ func (emptySource) Actress(context.Context, string, url.Values) ([]catalog.Work,
 	return nil, nil
 }
 func (emptySource) ActressName(context.Context, string) (string, error) { return "", nil }
-func (emptySource) CollectedActresses(context.Context) ([]catalog.Actress, error) {
-	return nil, nil
+func (emptySource) CollectedActresses(context.Context) (catalog.Collection, error) {
+	return catalog.Collection{}, nil
+}
+
+// truncatedSource 总是报告截断。它复用 emptySource 的空实现，只覆盖需要的一条。
+type truncatedSource struct{ emptySource }
+
+func (truncatedSource) CollectedActresses(context.Context) (catalog.Collection, error) {
+	return catalog.Collection{
+		Actresses:    []catalog.Actress{{ID: "EvkJ"}},
+		Truncated:    true,
+		PagesFetched: 20,
+		MaxPages:     20,
+	}, nil
+}
+
+// TestCollectedTruncationSurvivesDedupe 钉住一个容易被装饰器吞掉的信号：
+//
+// 这一层把并发结果**共享**给多个调用者。若实现只转发 Actresses 而不转发
+// Truncated，截断信号就会在这一层消失 —— 而它恰恰是本服务唯一要避免的静默失败。
+func TestCollectedTruncationSurvivesDedupe(t *testing.T) {
+	s := New(truncatedSource{})
+	got, err := s.CollectedActresses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Truncated {
+		t.Fatal("dedupe 层把截断信号弄丢了")
+	}
+	if got.PagesFetched != 20 || got.MaxPages != 20 {
+		t.Errorf("解释信号的两个字段也应当保留：%+v", got)
+	}
 }

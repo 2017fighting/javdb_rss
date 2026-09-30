@@ -162,30 +162,65 @@ type collectedEntry struct {
 	Feed string `json:"feed"`
 }
 
+// collectedBody 是 /collected 的响应体。
+type collectedBody struct {
+	Actresses []collectedEntry `json:"actresses"`
+	// 截断信号。它们只在**确实触顶**时出现（omitempty），因此不同于
+	// 一个永远为真的字段：消费方靠「键是否存在」判定，不靠值。
+	//
+	// 具体语义见 handleCollected。
+	Truncated    bool `json:"truncated,omitempty"`
+	PagesFetched int  `json:"pages_fetched,omitempty"`
+	MaxPages     int  `json:"max_pages,omitempty"`
+}
+
 // handleCollected 服务 GET /collected：列出 App 里收藏的女优。
 //
 // 这是需求 4 的落点。本服务**不**因为你收藏了谁就自动为它建 feed ——
 // 它只把列表（带现成的 feed 路径）交给你，由你决定订哪些。
 // 这样既满足了「读取订阅的女优」，又不破坏已定的「URL 即订阅」形态，
 // 也不引入「一条 feed 对应 N 个订阅」那个高成本形态。
+//
+// # 截断信号
+//
+// 收藏列表按页拉取，翻页有上限。**这是本服务唯一会静默少给数据的地方**，
+// 因此触顶时不能照常返回一份看起来完整的列表：
+//
+//	truncated: true      翻页是在达到上限时停下的，这份清单已知不完整
+//	pages_fetched         实际读了多少页
+//	max_pages             当时生效的翻页上限
+//
+// 三者仅在触顶时出现。未触顶时它们**完全不存在**，消费方据此判定完整性：
+// 没有 truncated 键 == 这是一份完整清单。
+//
+// 之所以不像「没 token」那样直接返回错误码：截断时我们手里那部分数据是
+// **正确且有用**的（列表里的 feed 路径都能用），丢掉它比多给一条信号更糟。
 func (s *Server) handleCollected(w http.ResponseWriter, r *http.Request) {
-	actresses, err := s.src.CollectedActresses(r.Context())
+	col, err := s.src.CollectedActresses(r.Context())
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "取收藏女优失败", "err", err)
 		writeCollectedError(w, err)
 		return
 	}
 
-	out := struct {
-		Actresses []collectedEntry `json:"actresses"`
-	}{Actresses: make([]collectedEntry, 0, len(actresses))}
-	for _, a := range actresses {
+	out := collectedBody{Actresses: make([]collectedEntry, 0, len(col.Actresses))}
+	for _, a := range col.Actresses {
 		out.Actresses = append(out.Actresses, collectedEntry{
 			ID:          a.ID,
 			Name:        a.Name,
 			VideosCount: a.VideosCount,
 			Feed:        "/rss/actress/" + url.PathEscape(a.ID) + ".xml",
 		})
+	}
+	if col.Truncated {
+		// 同时记一条 warn：即使没人来看这个 JSON，运维也该在日志里看到
+		// 「收藏已经多到读不完了」—— 它意味着要调高上限。
+		s.log.WarnContext(r.Context(), "收藏女优超过翻页上限，/collected 返回的是不完整清单",
+			"已读页数", col.PagesFetched, "上限", col.MaxPages,
+			"已读条数", len(col.Actresses))
+		out.Truncated = true
+		out.PagesFetched = col.PagesFetched
+		out.MaxPages = col.MaxPages
 	}
 	writeJSON(w, http.StatusOK, out)
 }

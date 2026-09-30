@@ -241,8 +241,8 @@ func (s *appapiSource) ActressName(ctx context.Context, id string) (string, erro
 	return out, err
 }
 
-func (s *appapiSource) CollectedActresses(ctx context.Context) ([]catalog.Actress, error) {
-	var out []catalog.Actress
+func (s *appapiSource) CollectedActresses(ctx context.Context) (catalog.Collection, error) {
+	var out catalog.Collection
 	err := s.withRelogin(ctx, func(c *appapi.Client) error {
 		var e error
 		out, e = c.CollectedActresses(ctx)
