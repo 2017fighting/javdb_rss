@@ -12,7 +12,7 @@ import (
 //
 // 用 url.QueryEscape 后再把 '+' 换回 %20：QueryEscape 按 application/x-www-form-urlencoded
 // 编码，把空格编成 '+'，而 '+' 在 query string 里确实等价于空格 —— 但 dn 的值最终会变成
-// 客户端界面上的种子名，水画的加号会直接显示给用户看。
+// 客户端界面上的显示名，水画的加号会直接给用户看到。
 // %20 在所有语境下都是空格的规范编码，没有这个岐义。
 func urlEncode(s string) string {
 	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")

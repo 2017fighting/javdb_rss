@@ -44,6 +44,15 @@ func ActionOf(err error) string {
 	return ""
 }
 
+// IsSignatureAction 报告上游报告的 action 是否属于「签名/请求构造与服务端不兼容」。
+//
+// 单独导出它，是为了让 httpapi 这类**只持有 action 字符串**（不持有 error）的调用方
+// 也能复用同一份枚举 —— 否则那两个字符串会在两个包里各写一遍，
+// 而将来服务端新增一种签名错误时只会改到其中一处。
+func IsSignatureAction(action string) bool {
+	return signatureActions[action]
+}
+
 // IsSignatureError 报告 err 是否由「签名与服务端不再兼容」引起。
 //
 // 这个区分很要紧，因为两种失败的处置方式完全不同：
@@ -51,5 +60,5 @@ func ActionOf(err error) string {
 //	签名失效  → 代码要改（Prefix 变了），重启和重试都没用
 //	网络故障  → 等一会儿重试就好，不该把人叫起来
 func IsSignatureError(err error) bool {
-	return signatureActions[ActionOf(err)]
+	return IsSignatureAction(ActionOf(err))
 }

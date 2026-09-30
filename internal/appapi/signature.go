@@ -54,10 +54,8 @@ func (constSigner) Sign(ts int64) string {
 		ts = time.Now().Unix()
 	}
 	sum := md5.Sum([]byte(fmt.Sprintf("%d%s", ts, signPrefix)))
-	return fmt.Sprintf("%d.%s.%s", ts, suffix(), hex.EncodeToString(sum[:]))
+	return fmt.Sprintf("%d.%s.%s", ts, signSuffix, hex.EncodeToString(sum[:]))
 }
-
-func suffix() string { return signSuffix }
 
 // 编译期确认默认签名器满足接口。
 var _ Signer = constSigner{}

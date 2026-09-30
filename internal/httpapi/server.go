@@ -124,7 +124,7 @@ func (s *Server) handleUpstreamDetail(w http.ResponseWriter, _ *http.Request) {
 	// 好让告警规则能直接对 signature_broken 做路由。
 	code := http.StatusOK
 	if known && !st.OK {
-		body["signature_broken"] = isSignatureFailure(st.Action)
+		body["signature_broken"] = appapi.IsSignatureAction(st.Action)
 		code = http.StatusServiceUnavailable
 	} else {
 		body["signature_broken"] = false
@@ -138,20 +138,6 @@ func (s *Server) upstreamStatus() (health.Status, bool) {
 		return health.Status{}, false
 	}
 	return s.upstream.Snapshot()
-}
-
-// isSignatureFailure 判断上游报的错误名是否属于「签名/请求构造与服务端不兼容」。
-//
-// 按 action 匹配而不是按错误文本：action 是服务端给的枚举值，稳定可靠。
-//
-// 实测的两种形态：
-//
-//	InvalidSignature  (HTTP 400) 签名值无效 —— Prefix 变了
-//	ParameterInvalid  (HTTP 200) 签名缺失，或公共参数缺了 —— 请求构造过时了
-//
-// 两者对运维而言处置方式相同（要改代码，不是重试），因此归为一类。
-func isSignatureFailure(action string) bool {
-	return action == "InvalidSignature" || action == "ParameterInvalid"
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {

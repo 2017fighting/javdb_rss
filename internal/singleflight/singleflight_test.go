@@ -2,6 +2,7 @@ package singleflight
 
 import (
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,7 +26,9 @@ func TestDoMergesConcurrentCalls(t *testing.T) {
 			<-start // 尽量让所有 goroutine 同时冲进去
 			v, err, _ := g.Do("same", func() (any, error) {
 				calls.Add(1)
-				time.Sleep(20 * time.Millisecond) // 保证窗口足够宽
+				// 等其余 n-1 个调用者全部加入，再返回 —— 而不是睡一个固定时长撑窗口。
+				// 后者只是把失败概率降低；前者是同步。
+				waitForWaiters(t, &g, "same", n-1)
 				return "result", nil
 			})
 			if err != nil {
@@ -105,7 +108,10 @@ func TestDoPropagatesError(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_, err, _ := g.Do("k", func() (any, error) {
-				time.Sleep(10 * time.Millisecond)
+				// 等其余 n-1 个调用者加入。这样测的才是「错误被分发给等待者」，
+				// 而不是「各跑各的、各自报错」—— 没有这一步，
+				// 迟到的 goroutine 会自己成为执行者，测试就不再验证共享语义了。
+				waitForWaiters(t, &g, "k", n-1)
 				return nil, wantErr
 			})
 			if !errors.Is(err, wantErr) {
@@ -164,15 +170,19 @@ func TestDoRecoversFromPanic(t *testing.T) {
 
 // TestDoReportsShared 确认第三个返回值能区分「执行者」与「共享者」。
 //
-// ⚠️ 这个测试写错过一次，错误值得记下来：
+// ⚠️ 这个测试写错过两次，错误都值得记下来。
 //
-// 最初的写法是在主 goroutine 里直接调第二个 Do（想用它拿到 shared），
-// 然后在它**之后** close(release)。但第二个 Do 会阻塞在 c.wg.Wait() 上
-// 等第一个调用完成，而第一个调用正阻塞在 <-release ——
-// 于是 release 永远关不上，整个包死锁。
+// 错误一（**死锁**）：最初在主 goroutine 里直接调第二个 Do，然后在它**之后**
+// close(release)。但第二个 Do 会阻塞在 c.wg.Wait() 上等第一个调用完成，
+// 而第一个调用正阻塞在 <-release —— release 永远关不上，整个包死锁。
+// 教训：任何会等待另一个调用的调用，都不能和那个调用的放行语句待在同一个 goroutine。
 //
-// 教训：**任何会等待另一个调用的调用，都不能和那个调用的放行语句
-// 待在同一个 goroutine 里。** 所以这里第二个调用也必须另起 goroutine。
+// 错误二（**时序脆弱**）：修死锁时改用了 time.Sleep(50ms) 等第二个 goroutine 就位。
+// 那不是同步，是猜测 —— CI 调度延迟或高负载下 50ms 可能不够，
+// 于是第二个调用会变成执行者，测试随机失败。
+//
+// 现在的做法：**等条件，不等时间**。`call.dups` 在共享者加入时自增，
+// 因此这里可以轮询一个确定的状态而不是猜一个时长。
 func TestDoReportsShared(t *testing.T) {
 	var g Group
 	release := make(chan struct{})
@@ -201,11 +211,8 @@ func TestDoReportsShared(t *testing.T) {
 		secondShared <- shared
 	}()
 
-	// 给第二个调用一点时间真正进入等待，再放行第一个。
-	// 用 sleep 而不是更好的同步：Go 没有提供「观察者已阻塞在 Wait 上」的钩子，
-	// 而这里的目标只是让第二个调用**有机会**加入；即使它晚了一步，
-	// 上面的 t.Error 也会把它暴露出来。
-	time.Sleep(50 * time.Millisecond)
+	// 等第二个调用**确实已加入**（而不是猜一个时长），再放行第一个。
+	waitForWaiters(t, &g, "k", 1)
 	close(release)
 
 	if shared := <-firstShared; shared {
@@ -213,5 +220,26 @@ func TestDoReportsShared(t *testing.T) {
 	}
 	if shared := <-secondShared; !shared {
 		t.Error("第二个调用应当被标记为 shared")
+	}
+}
+
+// waitForWaiters 等 key 上出现至少 n 个共享者。超时则让测试失败。
+//
+// 它是**轮询一个条件**而不是睡眠 —— 后者只能降低概率，前者能消除不确定性。
+func waitForWaiters(t *testing.T, g *Group, key string, n int64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		g.mu.Lock()
+		c := g.m[key]
+		g.mu.Unlock()
+
+		if c != nil && c.dups.Load() >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等 key=%q 上出现 %d 个共享者超时", key, n)
+		}
+		runtime.Gosched()
 	}
 }

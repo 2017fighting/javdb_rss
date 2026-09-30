@@ -69,14 +69,19 @@ app_api:
 #   actresses:
 #     - id: EvkJ
 #       # 原样透传给 App 演员页的查询参数，本服务不解释这些键值。
-#       # 可用键见 .scratch/javdb-rss/notes/api-contract-survey.md：
-#       #   filter_by       掩码，如 "apmc" = actor + Playable/Downloadable/Subtitles
+#       # 可用键见 .scratch/javdb-rss/issues/06-api-contract-survey.md：
+#       #   filter_by       实体掩码：{zone}:{letter}:{id}[:{main}:]:
+#       #                   不写时本服务会自动构造为 0:a:<女优 id>
 #       #   filter_by_tags  标签 id 的 CSV
 #       #   sort_by         release（默认）
 #       #   order_by        desc / asc（默认 desc）
-#       #   page / limit    分页（默认 1 / 20）
+#       #   pages           翻多少页，默认 1，上限 20
+#       #
+#       # ⚠️ filter_by 不是简单的字母组合。写成 "a" 或 "apmc" 会被原样透传，
+#       #    服务端会返回【全站最新作品】而不是这个女优的作品 —— 而且不报错。
+#       #    正确形式是复合掩码，例如 "0:a:EvkJ" 或带主属性的 "0:a:EvkJ:apmc::"。
+#       #    通常不必写它，留空让本服务自动构造即可。
 #       params:
-#         filter_by: "apmc"
 #         sort_by: "release"
 #         order_by: "desc"
 #       # 只追新：只保留此日期之后的作品。

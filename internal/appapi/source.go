@@ -60,7 +60,7 @@ type magnetsEnvelope struct {
 //
 // 这是一个**模糊/前缀搜索**，不是精确查询。如果按位置取 movies[0]，
 // 番号尾部稍有不同就会静默命中错误的作品 —— 而且不会报错，
-// 只会给用户发一个他根本没订阅的种子。这是本服务最不该犯的一类错误。
+// 只会给用户发一个他根本没订阅的作品。这是本服务最不该犯的一类错误。
 //
 // 所以这里显式按 `number` 字段精确比对（忽略大小写与首尾空白）。
 // 找不到就返回错误，**绝不退回「取第一个」**。
@@ -241,15 +241,6 @@ func buildEntityFilter(actorID string, params url.Values) (string, error) {
 		return raw, nil
 	}
 	return "0:a:" + actorID, nil
-}
-
-// collectWorksByFilter 拉一页作品列表并补齐磁链。
-func (c *Client) collectWorksByFilter(ctx context.Context, query url.Values) ([]catalog.Work, error) {
-	var env movieListEnvelope
-	if err := c.GetJSON(ctx, "/api/v1/movies/tags", query, &env); err != nil {
-		return nil, err
-	}
-	return c.hydrate(ctx, env.Movies)
 }
 
 // hydrate 把精简作品逐个补齐磁链。

@@ -33,7 +33,7 @@ type Magnet struct {
 	// HD 表示这条磁链是高清（线格式 hd）。
 	HD bool
 
-	// FilesCount 是种子内的文件数（线格式 files_count）。
+	// FilesCount 是该磁链候选包含的文件数（线格式 files_count）。
 	FilesCount int
 
 	// CreatedAt 是线上的创建时间，**原样保留**（线格式形如 "09/27/2026"）。

@@ -21,8 +21,8 @@ type Item struct {
 
 // MagnetURI 构造这条 Item 的磁力链接。
 //
-// dn 参数用与标题相同的基名，好处是 qBittorrent 会把种子命名成可读的名字
-// 而不是光秃秃的 infohash。注意 dn 只影响显示 —— 身份仍然是 infohash（见 guid 规则）。
+// dn 参数用与标题相同的基名，好处是 qBittorrent 会拿它给下载任务命名，
+// 而不是显示一个光秃秃的 infohash。注意 dn 只影响显示 —— 身份仍然是 infohash（见 guid 规则）。
 func (i Item) MagnetURI() string {
 	return fmt.Sprintf("magnet:?xt=urn:btih:%s&dn=%s",
 		i.Magnet.Infohash, urlEncode(baseName(i)))

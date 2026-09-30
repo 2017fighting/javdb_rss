@@ -197,7 +197,7 @@ func TestRenderPubDateFallsBackToNow(t *testing.T) {
 // TestMagnetDNEncodesSpaceAsPercent20 钉住一个真发生过的 bug：
 //
 // url.QueryEscape 按 form-urlencoded 把空格编成 '+'。这在 query string 里确实是合法的
-// 空格表示，但 dn 的值会变成客户端界面上的种子名，水画的加号会直接给用户看到。
+// 空格表示，但 dn 的值会变成客户端界面上的显示名，水画的加号会直接给用户看到。
 //
 // 这个断言看起来吹毛求疵，但它捕获的是「看得到但不报错」的一类回归 ——
 // 除了用户自己看到奇怪的文件名，没有任何告警会提醒你。

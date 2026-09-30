@@ -10,6 +10,7 @@ package singleflight
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // Group 合并相同 key 的并发调用。零值即可用。
@@ -24,6 +25,12 @@ type call struct {
 	wg  sync.WaitGroup
 	val any
 	err error
+	// dups 记下有多少个调用者共享了这次执行（即有多少人加入了而不是自己执行）。
+	//
+	// 它不参与 Do 的语义，只供观测：测试用它**确定性地**判断
+	// 「另一個调用者已经加入」，从而不必用 time.Sleep 盲等。
+	// （Go 官方的 x/sync/singleflight 出于同样理由也维护了这样的计数器。）
+	dups atomic.Int64
 }
 
 // Do 执行 fn，并把结果共享给同一 key 上的并发调用者。
@@ -48,6 +55,7 @@ func (g *Group) Do(key string, fn func() (any, error)) (v any, err error, shared
 		g.m = make(map[string]*call)
 	}
 	if c, ok := g.m[key]; ok {
+		c.dups.Add(1)
 		g.mu.Unlock()
 		c.wg.Wait()
 		return c.val, c.err, true
