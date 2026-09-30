@@ -47,6 +47,11 @@ kill -HUP $(pidof javdb-rss)
 | `deploy/docker-compose.yml` + `deploy/config.docker.yaml` | Docker Compose |
 | `deploy/k8s.yaml` | Kubernetes（含签名失效告警的 CronJob） |
 
+三份部署配置共用同一套配置结构，**键集合由
+`internal/config/examples_sync_test.go` 强制一致**（取值可以不同：容器 / k8s
+监听 `0.0.0.0`，token 路径也不一样）。改配置项要三处同步，否则 `make test`
+会失败 —— 这一条曾经靠人记，结果漏过一次（k8s 少了 `device_uuid`）。
+
 ### ⚠️ 容器与 K8s 下的监听地址
 
 裸机默认监听 `127.0.0.1`，但**容器里必须改成 `0.0.0.0`** ——

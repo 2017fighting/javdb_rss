@@ -4,6 +4,10 @@
 #
 # 改完配置后发 SIGHUP 即可生效（配置文件写坏了会保留旧配置继续服务）：
 #   kill -HUP $(pidof javdb-rss)
+#
+# ⚠️ 配置结构还有两份手抄本：deploy/config.docker.yaml 与 deploy/k8s.yaml 内嵌的
+#    ConfigMap。三份的**键集合**由 internal/config/examples_sync_test.go 强制一致
+#    （取值可以不同）。加/删/改配置项时三处都要动，否则 `make test` 会失败。
 
 # HTTP 监听地址。
 #

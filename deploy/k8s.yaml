@@ -21,6 +21,9 @@ metadata:
 data:
   # 注意 listen 必须是 0.0.0.0（默认的 127.0.0.1 在 Pod 外访问不到）。
   # base_url 要填你实际访问它的地址。
+  #
+  # ⚠️ 这段与 config.example.yaml、deploy/config.docker.yaml 是同一套配置结构的
+  #    三份手抄本，键集合由 internal/config/examples_sync_test.go 强制一致。
   config.yaml: |
     listen: "0.0.0.0:8080"
     provider: "appapi"
@@ -34,7 +37,8 @@ data:
       token_file: "/token/token.json"
       lang: "zh-CN"
       # 别漏了它 —— 上一次这份 ConfigMap 就漏了，与 config.example.yaml 漂移了。
-      # 这是「配置结构在三个文件里各写一份」的代价，见 ticket 04 的审查记录。
+      # 现在三份示例的键集合由 internal/config/examples_sync_test.go 强制一致，
+      # 再漏就会在 `make test` / CI 里失败。
       device_uuid: ""
       magnet_concurrency: 8
       probe_interval: "15m"

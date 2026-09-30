@@ -2,6 +2,9 @@
 #
 # 与 config.example.yaml 的**唯一实质差异**：监听 0.0.0.0 而不是 127.0.0.1。
 #
+# ⚠️ 本文件与 config.example.yaml、deploy/k8s.yaml 的 ConfigMap 是同一套配置结构的
+#    三份手抄本，键集合由 internal/config/examples_sync_test.go 强制一致。
+#
 # 为什么必须改：默认的 127.0.0.1 在容器外访问不到 ——
 # 那是容器自己的 loopback，宿主机连不上。
 #
