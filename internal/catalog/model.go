@@ -22,8 +22,18 @@ type Magnet struct {
 	// Name 是磁链的显示名（线格式 name），通常就是番号。
 	Name string
 
-	// SizeMB 是体积，单位 兆字节（线格式 size）。
-	SizeMB int
+	// SizeMiB 是体积，单位 **MiB（2^20 字节）**（线格式 size）。
+	//
+	// 这个单位是 ticket 03 复勘**确认**的，不是推定：
+	// 同一条磁链在 javdb.com 的作品页上带 data-size 属性，其值与线格式的 size
+	// **逐位相同**，而网页显示的文字是 size/1024 保留两位小数 ——
+	//
+	//	8570 -> 8.37GB   8050 -> 7.86GB   5530 -> 5.40GB
+	//	8189 -> 8.00GB   6993 -> 6.83GB   8346 -> 8.15GB
+	//
+	// 除以 1000 对不上（8570 -> 8.57 ≠ 8.37），因此它不是十进制的 MB。
+	// 证据：.scratch/javdb-rss/notes/actress-params.md 的「size 的单位」一节。
+	SizeMiB int
 
 	// CNSub 表示这条磁链带中文字幕（线格式 cnsub）。
 	//

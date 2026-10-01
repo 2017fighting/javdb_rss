@@ -36,10 +36,18 @@ const CurrentVersion = 1
 type Record struct {
 	Infohash  string    `json:"infohash"`
 	Name      string    `json:"name,omitempty"`
-	SizeMB    int       `json:"size_mb,omitempty"`
+	SizeMiB   int       `json:"size_mib,omitempty"`
 	CNSub     bool      `json:"cnsub,omitempty"`
 	CreatedAt string    `json:"created_at,omitempty"`
 	PinnedAt  time.Time `json:"pinned_at"`
+
+	// LegacySizeMB 读旧版本写下的 `size_mb` 键。
+	//
+	// 单位从一开始就是 MiB，只是键名起错了（ticket 03 才把单位确认下来）。
+	// 它**只读不写**：load 时迁移进 SizeMiB 并清空，于是下一次落盘就把旧键
+	// 换成新键。不做这层兼容的后果是「读旧文件 → 写回」这条路会**静默把体积清零** ——
+	// 而 pin 指向上游消失时，这份快照是唯一还能渲染出条目的东西。
+	LegacySizeMB int `json:"size_mb,omitempty"`
 }
 
 // file 是 pin.json 的线格式。
@@ -187,6 +195,29 @@ func (s *Store) load() error {
 	if f.Pins == nil {
 		f.Pins = map[string]Record{}
 	}
+
+	// 把旧的 `size_mb` 键迁进 `size_mib`。
+	//
+	// 什么都不做的话，一次「读旧文件 → 写回」就会把每条 pin 的体积静默清零：
+	// 旧键被忽略、新键又是空的，而体积是 pin 快照的一部分 ——
+	// pin 指向上游消失时，那份快照是唯一还能渲染出条目的东西。
+	// 迁移完清空旧字段，于是写回时自然只剩新键（不需要单独一次迁移写盘）。
+	migrated := 0
+	for id, r := range f.Pins {
+		if r.SizeMiB == 0 && r.LegacySizeMB != 0 {
+			r.SizeMiB = r.LegacySizeMB
+			r.LegacySizeMB = 0
+			f.Pins[id] = r
+			migrated++
+		}
+	}
+	if migrated > 0 {
+		// 只记条数，不记内容：这条日志的用处是让「旧格式被读到过」可见，
+		// 而不是把用户的观看记录打到日志里。下一次 Flush 会把它们写成新键。
+		slog.Info("pin 文件使用了旧的 size_mb 键，已按 MiB 迁入 size_mib",
+			"path", s.path, "条数", migrated)
+	}
+
 	s.pins = f.Pins
 	return nil
 }

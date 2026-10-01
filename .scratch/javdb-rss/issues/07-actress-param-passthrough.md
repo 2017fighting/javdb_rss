@@ -142,6 +142,14 @@ Status: resolved
 - `sort_by` 的完整合法取值集（只确认 `release` 与 `score` 有区别；
   无法区分「非法值」与「合法但恰好同序」）
 
+> **已复勘（2026-10-01，followup ticket 03）—— 三条全部有结论，且前两条的措辞被更正：**
+> `filter_by_tags` **确实生效**（先前「未确认」是样本太小造成的误判）；
+> `i` = 有预览图、`v` = 有预览视频，而先前记的「来自上游 `filter_tags`」**是错的**
+> （上游只给 `p`/`s`/`m`/`c` 起名）；`sort_by` 的生效集比这里记的多三个
+> （`hit` `update` `watched_count` `want_watch_count`），但**完整集合不可枚举**。
+> 结论、方法与证据见 [`../notes/actress-params.md`](../notes/actress-params.md)
+> 的「复勘记录（2026-10-01）」。
+
 
 ### HITL 确认（2026-09-30）
 

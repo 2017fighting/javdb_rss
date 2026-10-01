@@ -463,7 +463,7 @@ func (c *Client) magnets(ctx context.Context, movieID string) ([]catalog.Magnet,
 		out = append(out, catalog.Magnet{
 			Infohash:   m.Hash,
 			Name:       m.Name,
-			SizeMB:     m.Size,
+			SizeMiB:    m.Size,
 			CNSub:      m.CNSub,
 			HD:         m.HD,
 			FilesCount: m.FilesCount,

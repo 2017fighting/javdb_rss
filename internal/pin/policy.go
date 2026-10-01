@@ -91,7 +91,7 @@ func magnetOf(r Record) catalog.Magnet {
 	return catalog.Magnet{
 		Infohash:  r.Infohash,
 		Name:      r.Name,
-		SizeMB:    r.SizeMB,
+		SizeMiB:   r.SizeMiB,
 		CNSub:     r.CNSub,
 		CreatedAt: r.CreatedAt,
 	}
@@ -106,7 +106,7 @@ func recordOf(m catalog.Magnet) Record {
 	return Record{
 		Infohash:  m.Infohash,
 		Name:      m.Name,
-		SizeMB:    m.SizeMB,
+		SizeMiB:   m.SizeMiB,
 		CNSub:     m.CNSub,
 		CreatedAt: m.CreatedAt,
 	}

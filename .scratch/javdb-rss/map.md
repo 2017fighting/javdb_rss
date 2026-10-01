@@ -63,11 +63,14 @@
 
 ```
 cmd/javdb-rss/        组装与启动（SIGHUP 重载、优雅退出）
+cmd/contractprobe/    上游契约复勘探针（ticket 03）—— 要复核「上游到底怎么行为」
+                      时先用它，而不是新写一个脚本；它复用 appapi 的传输层与签名
 internal/catalog/     领域模型 + 槽位规则 + **Source 端口**
 internal/feed/        RSS 渲染（纯函数，可字节级测试）
 internal/appapi/      App API 传输层（`Signer` 与「番号解析」两个接口接缝）
 internal/config/      YAML + SIGHUP 重载
 internal/httpapi/     路由
+internal/pin/         唯一持久状态（钉住的磁链）
 internal/stub/        固定数据的假数据源
 ```
 

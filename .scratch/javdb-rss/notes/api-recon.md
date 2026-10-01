@@ -225,7 +225,10 @@ filter_by=0:a:EvkJ              该女优全部作品
 filter_by=0:a:EvkJ:apmc::       带主属性筛选
 ```
 
-主属性字母表：`p`=Playable `m`=Downloadable `c`=Subtitles `s`=Individual `i` `v`。
+主属性字母表：`p`=可播放 `m`=含磁鏈 `c`=含字幕 `s`=單體作品 `i`=有预览图
+`v`=有预览视频（前四个是上游 `filter_tags` 给的名字，`i`/`v` 由字段反推 ——
+2026-10-01 复勘确认，见 [`actress-params.md`](actress-params.md) 的「复勘记录」）。
+`filter_by_tags` 也**确认生效**（同处有证据）。
 
 端点 `GET /api/v1/movies/tags`，参数 `filter_by`、`filter_by_tags`、`sort_by`（默认 `release`）、
 `order_by`（默认 `desc`）、`page`、`limit`。`data` 含 `movies`、`has_collected`、`current_page`。
@@ -277,6 +280,12 @@ page=3 -> 20 条, OFJE-590 (2025-12-23) .. OFJE-609 (2025-07-29)
 这解释了为什么 `feed.parseCreatedAt` 要接受两种格式。
 
 **一次调用返回全部磁链**（样本 1 条），未见分页。
+
+**`size` 的单位是 MiB（2^20 字节）** —— 2026-10-01 复勘确认：同一条磁链在
+javdb.com 作品页上的 `data-size` 与这里**是同一个整数**，而网页显示的文字是
+`size/1024`（8570 → 8.37GB，8050 → 7.86GB）。所以本服务里它叫 `SizeMiB`，
+`enclosure length` 按 `* 1024 * 1024` 换算。证据表在
+[`actress-params.md`](actress-params.md) 的「复勘记录」第 6 条。
 
 ### 10.4.1 `magnets[]` 的顺序不是时间序（ticket 04 取证，2026-09-30）
 

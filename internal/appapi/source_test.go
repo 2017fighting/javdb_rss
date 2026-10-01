@@ -322,7 +322,7 @@ func TestMagnetsPreservesServerOrder(t *testing.T) {
 		}
 	}
 	// 顺手确认字段映射没串位。
-	if !got[1].CNSub || got[1].SizeMB != 9999 {
+	if !got[1].CNSub || got[1].SizeMiB != 9999 {
 		t.Errorf("字段映射串位: %+v", got[1])
 	}
 }

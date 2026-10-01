@@ -66,7 +66,9 @@ type enclosure struct {
 	// Length 在磁力链接语境下没有真实含义，RSS 规范要求它存在。
 	// 我们填 size 换算出的字节数；qBittorrent 不会用它做判断。
 	//
-	// TODO(ticket-06): App API 的 size 单位未经核实（假定为 兆字节）。
+	// size 的单位是 **MiB**（ticket 03 用网页的 data-size 核对确认），
+	// 因此换算是 * 1024 * 1024。这句话先前只是「假定为兆字节」——
+	// 假定的方向恰好是对的，但当时的代码不该被当成依据。
 	Length int    `xml:"length,attr"`
 	Type   string `xml:"type,attr"`
 }
@@ -105,7 +107,7 @@ func Render(w io.Writer, meta Meta, items []Item, now time.Time) error {
 			GUID:      guid{IsPermaLink: false, Value: it.GUID()},
 			PubDate:   itemPubDate(it, now),
 			Category:  it.Work.Number,
-			Enclosure: enclosure{URL: magnet, Length: it.Magnet.SizeMB * 1024 * 1024, Type: magnetType},
+			Enclosure: enclosure{URL: magnet, Length: it.Magnet.SizeMiB * 1024 * 1024, Type: magnetType},
 		})
 	}
 

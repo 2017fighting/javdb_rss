@@ -12,7 +12,7 @@ func magnet(hash string, cnsub bool) catalog.Magnet {
 
 // magnetAt 构造一条带指定 created_at 的磁链候选。
 func magnetAt(hash string, cnsub bool, createdAt string) catalog.Magnet {
-	return catalog.Magnet{Infohash: hash, Name: "N-" + hash, SizeMB: 100, CNSub: cnsub, CreatedAt: createdAt}
+	return catalog.Magnet{Infohash: hash, Name: "N-" + hash, SizeMiB: 100, CNSub: cnsub, CreatedAt: createdAt}
 }
 
 // record 构造一条 pin 记录。

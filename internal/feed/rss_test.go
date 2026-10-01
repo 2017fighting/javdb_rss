@@ -129,7 +129,7 @@ func TestRenderIsValidXML(t *testing.T) {
 		Work: catalog.Work{Number: "KV-328", Title: "标题 & 需要转义"},
 		Magnet: catalog.Magnet{
 			Infohash: "0e8f4789bdcab713effc3a07d1309a776c867b3e",
-			SizeMB:   3110, CNSub: true, CreatedAt: "09/27/2026",
+			SizeMiB:  3110, CNSub: true, CreatedAt: "09/27/2026",
 		},
 	}}
 	out := render(t, items)

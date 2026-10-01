@@ -154,7 +154,7 @@ func TestSetAndFlushRoundTrips(t *testing.T) {
 	st.Set("aBc123", Record{
 		Infohash:  "0e8f4789",
 		Name:      "KV-328",
-		SizeMB:    3110,
+		SizeMiB:   3110,
 		CNSub:     false,
 		CreatedAt: "09/27/2026",
 	})
@@ -175,7 +175,7 @@ func TestSetAndFlushRoundTrips(t *testing.T) {
 	if !ok {
 		t.Fatal("重新打开后应当能读到那条 pin")
 	}
-	if got.Infohash != "0e8f4789" || got.SizeMB != 3110 || got.Name != "KV-328" {
+	if got.Infohash != "0e8f4789" || got.SizeMiB != 3110 || got.Name != "KV-328" {
 		t.Errorf("快照字段丢了: %+v", got)
 	}
 	if got.PinnedAt.IsZero() {
@@ -436,5 +436,89 @@ func TestOpenRejectsUnwritableDirectoryViaProbe(t *testing.T) {
 	}
 	if err := probeWritable(filepath.Join(file, "pin.json")); err == nil {
 		t.Fatal("不可写的目录应当被 probeWritable 判死")
+	}
+}
+
+// --- 旧键迁移 ---------------------------------------------------------------
+
+// TestLegacySizeMBKeyIsMigrated 钉住 `size_mb` -> `size_mib` 的迁移。
+//
+// 背景：这条快照里的体积单位一直是 MiB，只是键名起错了（ticket 03 才确认单位）。
+// 迁移本身不难，难的是**它必须真的发生**：如果只改结构体标签不做迁移，
+// 读旧文件再写回会把每条 pin 的体积静默清零 —— 而这正是本项目最不愿出现的一类
+// 失败（没有报错、没有告警，只是数据少了一块）。
+//
+// 因此这里断言两件事：旧键的值被读进来，以及写回之后旧键不再出现。
+func TestLegacySizeMBKeyIsMigrated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pin.json")
+
+	// 手工写一份**旧格式**的文件，而不是经 Record 序列化 ——
+	// 走 Record 的话测的就是「新代码写新键」，那恰恰是没被质疑的那一半。
+	legacy := `{
+  "version": 1,
+  "pins": {
+    "aBc123": {
+      "infohash": "0e8f4789",
+      "name": "KV-328",
+      "size_mb": 3110,
+      "created_at": "09/27/2026",
+      "pinned_at": "2026-09-30T12:00:00Z"
+    }
+  }
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("旧格式文件应当能打开（迁移是读的一部分）: %v", err)
+	}
+
+	got, ok := st.Get("aBc123")
+	if !ok {
+		t.Fatal("旧格式的 pin 没读进来")
+	}
+	if got.SizeMiB != 3110 {
+		t.Errorf("体积没有被迁移: SizeMiB=%d，想要 3110", got.SizeMiB)
+	}
+	if got.LegacySizeMB != 0 {
+		t.Errorf("迁移后旧字段应当被清空，否则写回时会同时留下两个键: %d", got.LegacySizeMB)
+	}
+
+	// 触发一次真正落盘：新增一条 pin，然后写回。
+	//
+	// 只靠 Open 不会重写文件（没有任何变更），因此必须制造一次变更 ——
+	// 这也正是真实场景：服务读到旧文件，随后钉了一条新磁链，于是整表重写。
+	st.Set("second", Record{Infohash: "ffff", Name: "X"})
+	if err := st.Flush(FlushStats{Added: 1}); err != nil {
+		t.Fatalf("落盘: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if strings.Contains(body, "size_mb") {
+		t.Errorf("写回之后不应当再出现旧键 size_mb:\n%s", body)
+	}
+	if !strings.Contains(body, "size_mib") {
+		t.Errorf("写回之后应当出现新键 size_mib:\n%s", body)
+	}
+
+	// 再读一次，确认往返之后值仍然在（迁移没有把数据弄丢）。
+	st2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	again, ok := st2.Get("aBc123")
+	if !ok || again.SizeMiB != 3110 {
+		t.Errorf("二次读取丢了体积: %+v (ok=%v)", again, ok)
 	}
 }

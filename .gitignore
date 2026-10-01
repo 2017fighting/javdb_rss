@@ -46,6 +46,10 @@ pin.json.tmp
 config.yaml
 # 本地构建产物
 /javdb-rss
+# 复勘探针（cmd/contractprobe）落盘的原始响应。
+# 它可能含上游返回的账号维度数据（例如 /users/collected_* 的响应），
+# 因此和凭据一样一律不入库 —— 工具的产物是「结论」，不是这些转储。
+contractprobe-out/
 secrets.yaml
 secrets.yml
 config.local.yaml

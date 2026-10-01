@@ -46,9 +46,9 @@ var (
 		ReleaseDate: "2026-08-28",
 		Magnets: []catalog.Magnet{
 			{Infohash: "0e8f4789bdcab713effc3a07d1309a776c867b3e", Name: "KV-328",
-				SizeMB: 3110, CNSub: false, HD: true, FilesCount: 2, CreatedAt: "09/27/2026"},
+				SizeMiB: 3110, CNSub: false, HD: true, FilesCount: 2, CreatedAt: "09/27/2026"},
 			{Infohash: "aa11bb22cc33dd44ee55ff6600112233445566aa", Name: "KV-328",
-				SizeMB: 4800, CNSub: false, HD: true, FilesCount: 3, CreatedAt: "09/28/2026"},
+				SizeMiB: 4800, CNSub: false, HD: true, FilesCount: 3, CreatedAt: "09/28/2026"},
 		},
 	}
 	sampleWithSub = catalog.Work{
@@ -57,9 +57,9 @@ var (
 		ReleaseDate: "2026-08-20",
 		Magnets: []catalog.Magnet{
 			{Infohash: "bb22cc33dd44ee55ff6600112233445566778899", Name: "REBDB-1047",
-				SizeMB: 2200, CNSub: false, HD: true, FilesCount: 1, CreatedAt: "09/20/2026"},
+				SizeMiB: 2200, CNSub: false, HD: true, FilesCount: 1, CreatedAt: "09/20/2026"},
 			{Infohash: "cc33dd44ee55ff6600112233445566778899aabb", Name: "REBDB-1047",
-				SizeMB: 2600, CNSub: true, HD: true, FilesCount: 1, CreatedAt: "09/25/2026"},
+				SizeMiB: 2600, CNSub: true, HD: true, FilesCount: 1, CreatedAt: "09/25/2026"},
 		},
 	}
 	sampleNoMagnet = catalog.Work{
