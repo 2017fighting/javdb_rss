@@ -132,6 +132,35 @@ func (p *probe) raw(path string, kv []string) error {
 	return nil
 }
 
+// post 与 raw 相同，但用 POST —— 这个 API 有**只认 POST** 的端点。
+//
+// 存在的理由是一次真实的误判：`/api/v1/following_tags` 用 GET 打得到 404，
+// 于是被记成「上游没有这个端点」。换成 POST 却是 200（缺签名）。
+// 只探 GET 会把「方法不对」读成「端点不存在」，而这两件事的处置完全不同。
+func (p *probe) post(path string, kv []string) error {
+	form := url.Values{}
+	for _, pair := range kv {
+		k, v, ok := strings.Cut(pair, "=")
+		if !ok {
+			return fmt.Errorf("参数 %q 不是 k=v 形式", pair)
+		}
+		form.Add(k, v)
+	}
+
+	var raw json.RawMessage
+	if err := p.client.PostFormJSON(p.ctx, path, form, &raw); err != nil {
+		return err
+	}
+	p.save("post_"+sanitizeName(path), raw)
+
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, raw, "", "  "); err != nil {
+		return fmt.Errorf("缩进响应: %w", err)
+	}
+	fmt.Printf("=== POST %s %v ===\n%s\n", path, kv, pretty.String())
+	return nil
+}
+
 // sanitizeName 把端点路径变成能当文件名的字符串。
 func sanitizeName(path string) string {
 	r := strings.NewReplacer("/", "_", "?", "_", "&", "_", "=", "-")

@@ -172,6 +172,11 @@ func (p *probe) dispatch(cmd string, cmdArgs []string, f flags) error {
 			return fmt.Errorf("raw 需要一个端点路径，例如 `raw /api/v1/rankings/actors page=1`")
 		}
 		return p.raw(cmdArgs[0], cmdArgs[1:])
+	case "post":
+		if len(cmdArgs) == 0 {
+			return fmt.Errorf("post 需要一个端点路径，例如 `post /api/v1/following_tags type=0`")
+		}
+		return p.post(cmdArgs[0], cmdArgs[1:])
 	case "collected":
 		return p.collected(0)
 	case "session":
@@ -213,7 +218,9 @@ const usage = `contractprobe —— 上游契约复勘探针（ticket 03）
   props <女优id>        推导每个主属性字母的含义：它对应列表响应里的哪个字段
   magnets <作品id...>   转储磁链（size / name / cnsub / created_at）—— 供 size 单位核对
   letters [女优id...]   扫一批女优的 filter_tags，汇总主属性字母表及其含义（i/v）
-  raw <路径> [k=v...]   转储任意端点 —— 下次复勘要看新端点时的逃生口
+  raw <路径> [k=v...]   转储任意端点（GET）—— 下次复勘要看新端点时的逃生口
+  post <路径> [k=v...]  同上，但用 POST —— 这个 API 有**只认 POST** 的端点
+                        （实测 /api/v1/following_tags 用 GET 得到 404、用 POST 得到 200）
   collected            复勘 /users/collected_actors 的分页契约（需要 token）
   session              需要 token：device_uuid 是否影响已发的 token、单会话「挤掉」的时序
 
