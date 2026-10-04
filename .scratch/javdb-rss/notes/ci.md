@@ -66,6 +66,15 @@ docker daemon 甚至没起来（见 [`../issues/04-config-and-deploy.md`](../iss
 **没有就地改**（按票面要求）：改法是在 `.dockerignore` 加一行 `/javdb-rss`
 （带上开头的 `/`，避免误伤同名目录）。留给后续，因为票面明确说「记进笔记而不是就地糊过去」。
 
+**2026-10-05 已修**（票 13 的「顺带」项，用户明确要求一起做）：`.dockerignore` 加了
+`/javdb-rss`，并把 `ci.yml` 里的容器构建**挪到 `make build` 之前** —— 两头都堵上。
+只加忽略行也够，但那样这个浪费就取决于「有人记得那行」；顺序再排一道，它在结构上
+不再可能发生 —— 真 CI 实测：构建上下文 `8.16MB` → `1.03MB`。复核见
+[`../../javdb-rss-followups/notes/release-first-run.md`](../../javdb-rss-followups/notes/release-first-run.md)。
+
+（注：`1.03MB` 不等于本笔记上文那个 `244,270` 字节 —— 那是 webui 落地**之前**的树，
+现在多出来的大头是 `internal/webui/assets`，不是那份二进制。）
+
 ### 2. 两个 action 的 Node 20 弃用警告
 
 每次运行都有一条，来自 `actions/checkout@v4` 与 `actions/setup-go@v5`
@@ -79,6 +88,12 @@ but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-go
 **现状**：只是 warning，任务照样 success。**当前最新**：checkout `v7.0.1`、
 setup-go `v7.0.0`（2026-09-30 查）。升级是**跨大版本**（setup-go 从 v5 → v7 跨了 v6），
 不是机械替换，需要读两版 release notes 再动。**本票不改**。
+
+**2026-10-05 升级为不一致**：票 13 新增的 `release.yml` 直接用当前大版本
+（checkout@v7 / setup-go@v7），而 `ci.yml` 仍停在 v4/v5 —— 这条从「已知遗留」变成了
+**同一仓库里两套 action 版本并存**，因此不再留在此处，收进
+[`issues/14-unify-action-versions.md`](../../javdb-rss-followups/issues/14-unify-action-versions.md)。
+（首次发布 run `37226112866` 里 checkout@v7 与 setup-go@v7 都已正常跑过一遍。）
 
 ### 3. `ubuntu-latest` 将在 2026-11 迁到 Ubuntu 26.04
 

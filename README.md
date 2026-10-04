@@ -228,6 +228,9 @@ git push origin v1.0.0
 docker pull ghcr.io/2017fighting/javdb-rss:1.0.0
 ```
 
+包是 **public** 的（与仓库一致：用仓库自己的 `GITHUB_TOKEN` 推的包会继承仓库的
+可见性），因此**匿名可拉** —— 部署机上不需要 `docker login ghcr.io`。
+
 ⚠️ 镜像里的 `/version` 报告的是 **tag 原文**（`v1.0.0`），而镜像 tag 是去 v 的
 `1.0.0`。两种形状是有意的：前者要与本地 `make build`（走 `git describe`）的说法
 逐字对得上，后者是 docker 的惯例。理由与取舍见

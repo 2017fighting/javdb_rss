@@ -26,14 +26,14 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 10 | `since` 的语义定稿 | ~~无~~ 已 resolved（2026-10-05，grilling with user） |
 | 11 | 按定稿语义落地 `since` | ~~10~~ 已 resolved（2026-10-05） |
 | 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | ~~无~~ 已 resolved（2026-10-05） |
-| 13 | tag 推送即发布镜像到 GHCR | 无 |
+| 13 | tag 推送即发布镜像到 GHCR | ~~无~~ 已 resolved（2026-10-05） |
 | 14 | 统一 action 版本：ci.yml 的 v4/v5 → v7 | 无（13 把它从「观察」升级成「不一致」） |
 | 15 | 三份部署配置改为拉已发布的镜像 | 13 |
 
-（**01–12 全部 resolved，见下 Decisions so far**；
+（**01–13 全部 resolved，见下 Decisions so far**；
 07 为机械验收项，已随 push 关闭。**13–15 是 2026-10-04 新开的**：
-13 是发版链路本身，14/15 是它落地时按「记录层不骗人」拆出来的两件
-（一件本仓库里两套 action 版本并存，一件是镜像有了但部署还没用上）。）
+13 是发版链路本身（2026-10-05 结票），14/15 是它落地时按「记录层不骗人」
+拆出来的两件（一件是本仓库里两套 action 版本并存，一件是镜像有了但部署还没用上）。）
 
 10–12 的来源与前九张不同：不是 code-review 的「未修」，而是清账时发现的
 **一笔孤儿欠账** —— `since` 的比较语义在初次交付的票 09 里被标成已解决，
@@ -143,6 +143,21 @@ qBittorrent 多下一份文件，而没有任何告警。
   并指向 `CONTEXT.md` 的权威定义（原先那句「剩下可能还要收拾」已从本图的
   `## Not yet specified` 里拿掉）。
   另：原注释写「删掉 6 条」而名单只列 5 条，第 6 条无法复原，如实标注不猜。
+- [tag 推送即发布镜像到 GHCR](issues/13-release-image-ghcr.md)
+  — **推 `vX.Y.Z` 即构建并推 `ghcr.io/2017fighting/javdb-rss`（`linux/amd64` + `linux/arm64`），
+  只推全量精度 `X.Y.Z` 与 `latest`（latest 仅正式版），发布前先跑与 CI 同一批 `make` 目标。**
+  三处推翻/订正值得记：① 建票时把「抽成可复用 workflow」当推荐，查完事实后**推翻** ——
+  `ci.yml` 的步骤本就是 `make` 目标的薄壳，抽取换不到单一真源；② 建票时判「包可见性要手动翻」，
+  实测**包创建即 public**（用仓库自己的 `GITHUB_TOKEN` 推的包继承仓库可见性），退路没用上；
+  ③ ci.md 记的那条 8 MB 构建上下文顺带修掉（`.dockerignore` + 把容器构建排到 `make build` 之前），
+  真 CI 实测 `8.16MB → 1.03MB`。
+  首跑（run `37226112866`，2m35s）两个 job 全绿：`/version` 报的是 tag 原文 `v1.0.0`（本地 pull
+  下来起容器 curl 出来的），匿名可拉，index 里恰好两个 manifest（`provenance: false` 生效）。
+  **有意没做**：不加 `workflow_dispatch` 当重发入口、不推浮动 `1.2`/`1`、不建 GitHub Release、
+  不动 `Makefile`（多平台镜像 `--load` 不进本地 docker，目标天然半残）。
+  拆出的两件是 [14](issues/14-unify-action-versions.md)（两套 action 版本并存）与
+  [15](issues/15-deploy-pull-ghcr-image.md)（镜像有了但部署还没用上）。
+  完整事实与复核命令在 [`notes/release-first-run.md`](notes/release-first-run.md)。
 - [收藏女优的批量挑选](issues/06-collected-bulk-picking.md)
   — **交付不在本 effort 里：由 [`.scratch/javdb-rss-ui/`](../javdb-rss-ui/spec.md) 做的**
   （UI 的 spec 首页就写着「取代 06 的验收清单」；那 8 张票全部 resolved，含 08 的真实验收：
