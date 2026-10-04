@@ -35,11 +35,16 @@ func browseFeedTitle(zone int, sel catalog.BrowseSelector) string {
 	if n := len(splitCSV(sel.Tags)); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d 个标签", n))
 	}
+	// ⚠️ 月份**单独给**也是有效的（实测 `0:t:m::::3` 返回各年 3 月），
+	// 所以这一格不能只在「有年份」时才写进标题 —— 标题漏掉筛过的维度，
+	// 用户会以为没生效。
 	switch {
 	case sel.Year != "" && sel.Month != "":
 		parts = append(parts, fmt.Sprintf("%s 年 %s 月", sel.Year, sel.Month))
 	case sel.Year != "":
 		parts = append(parts, sel.Year+" 年")
+	case sel.Month != "":
+		parts = append(parts, "每年 "+sel.Month+" 月")
 	}
 	if sel.Duration != "" {
 		parts = append(parts, durationName(sel.Duration))

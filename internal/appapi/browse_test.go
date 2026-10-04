@@ -166,3 +166,29 @@ func TestBrowseSendsTheMaskAndStripsOwnParams(t *testing.T) {
 		t.Errorf("limit = %q，want 50（上游上限）", got.Get("limit"))
 	}
 }
+
+// TestValidateMainFlagsRejectsUnknown 钉住主属性字母的取值集合。
+//
+// 这份集合来自上游自己的词表（`/api/v2/tags` 的 main 组），不是猜的 ——
+// 所以未知字母只可能是笔误，而上游对笔误是**静默忽略**：
+// 用户以为筛了「含字幕」，实际拿到的是全部作品。
+//
+// 与 sort_by 刻意不同：那个的合法取值从外部不可枚举（黑盒只能证真不能证伪），
+// 硬校验会把上游新增的合法值判死；主属性有词表，情况不一样。
+func TestValidateMainFlagsRejectsUnknown(t *testing.T) {
+	for _, ok := range []string{"", "p", "m", "c", "s", "i", "v", "c,m", "p,m,c,s", "c,,m", " m "} {
+		if err := validateMainFlags(ok); err != nil {
+			t.Errorf("validateMainFlags(%q) 应当放行: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"x", "a", "cm", "c,x", "P"} {
+		err := validateMainFlags(bad)
+		if err == nil {
+			t.Errorf("validateMainFlags(%q) 应当拦下", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), catalog.ErrBadRequest.Error()) {
+			t.Errorf("%q 的错误应当可判定为 ErrBadRequest: %v", bad, err)
+		}
+	}
+}

@@ -646,6 +646,17 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 		since = v
 	}
 
+	// year（上游筛选：整个年份）与 since（本服务本地过滤：「这个日期起」）
+	// 说的是同一件事，同时给的结果必然是空 feed —— 而「选了年份反而是空的」
+	// 会让人以为是功能坏了。在两个都看得到的那一层判成用户写错。
+	if y := strings.TrimSpace(sel.Get("year")); y != "" && since != "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"year=%s 与 since=%s 不能同时给：since 是本服务的本地过滤（「这个日期起」），"+
+				"year 是上游筛选（整个年份），两个一起发的结果一定是空 feed。"+
+				"想要某一年就用 year，想要「从某天起」就用 since", y, since))
+		return
+	}
+
 	// 取作品与取名字是两次**互不依赖**的上游请求，因此并行发起。
 	//
 	// 串行的话每次轮询会白多等一个往返（实测单次约 200-430ms），

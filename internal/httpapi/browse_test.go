@@ -251,3 +251,47 @@ func TestBrowseRouteMapsBadSelectorTo400(t *testing.T) {
 		t.Fatalf("状态码 = %d, want 400（不能是 502 —— 重试无用）", rec.Code)
 	}
 }
+
+// TestYearAndSinceAreMutuallyExclusive 确认两个「范围」不能同时给。
+//
+// year 是上游筛选（整个年份），since 是本服务的本地过滤（「这个日期起」）。
+// 同时发的必然是空 feed —— 而「选了年份反而是空的」会让人以为是功能坏了。
+//
+// 检查放在 httpapi 而不是 appapi：`since` 是这一层算出来的（还可能来自白名单），
+// 只有这里同时看得到两个。
+func TestYearAndSinceAreMutuallyExclusive(t *testing.T) {
+	src := &recordingSource{works: []catalog.Work{
+		{Number: "A-1", Magnets: []catalog.Magnet{{Infohash: "h"}}}}}
+	h := newTestServer(t, "provider: stub\n", src)
+
+	rec := do(t, h, "/rss/actress/EvkJ.xml?year=2021&since=2026-01-01")
+	if rec.Code != 400 {
+		t.Fatalf("状态码 = %d, want 400（同时给必然空 feed）", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "不能同时给") {
+		t.Errorf("文案要说清原因: %s", rec.Body.String())
+	}
+	// 单独给任一个都要放行。
+	if rec := do(t, h, "/rss/actress/EvkJ.xml?year=2021"); rec.Code != 200 {
+		t.Errorf("只给 year = %d, want 200", rec.Code)
+	}
+	if rec := do(t, h, "/rss/actress/EvkJ.xml?since=2026-01-01"); rec.Code != 200 {
+		t.Errorf("只给 since = %d, want 200", rec.Code)
+	}
+}
+
+// TestBrowseTitleMentionsMonthAlone 确认「只给月份」也写进标题。
+//
+// 实测月份单独给是有效的（`0:t:m::::3` 返回各年 3 月），因此标题漏掉它
+// 就等于告诉用户「没筛」。
+func TestBrowseTitleMentionsMonthAlone(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+	var f parsedFeed
+	_ = xml.Unmarshal(do(t, h, "/rss/tags/0.xml?month=4").Body.Bytes(), &f)
+	if !strings.Contains(f.Channel.Title, "4 月") {
+		t.Errorf("标题里应当有月份: %q", f.Channel.Title)
+	}
+	if !strings.Contains(f.Channel.Title, "每年") {
+		t.Errorf("月份单独给是跨年的，标题要说清: %q", f.Channel.Title)
+	}
+}

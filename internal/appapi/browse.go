@@ -111,21 +111,53 @@ func browseFilter(zone int, sel catalog.BrowseSelector) (string, error) {
 	}, ":"), nil
 }
 
+// mainFlags 是主属性允许的字母。
+//
+// **这份集合不是猜的**，它是上游自己给的词表：`GET /api/v2/tags?type=0` 的
+// `main` 组正好这六个，每个都带中文名（可播放 / 可下載 / 含字幕 / 單體影片 /
+// 含預覽圖 / 含預覽視頻）；四个 zone 的 `main` 组实测一致。
+//
+// ⚠️ 与 `sort_by` 的处理**刻意不同**（那个不校验）：`sort_by` 的合法取值
+// 从外部**不可枚举**（黑盒只能证真不能证伪，见 notes/actress-params.md），
+// 硬校验会把上游新增的合法值判死；而主属性有一份上游直接给出的词表，
+// 未知字母只可能是笔误。
+//
+// 真出现第 7 个字母时的代价是**可见的 400**（不是静默少筛），
+// 那时改这里一行即可。
+var mainFlags = map[string]string{
+	"p": "可播放",
+	"m": "可下載（含磁鏈）",
+	"c": "含字幕",
+	"s": "單體影片",
+	"i": "含預覽圖",
+	"v": "含預覽視頻",
+}
+
 // validateMainFlags 校验主属性段：逗号分隔的单字母（`c` 或 `c,m`）。
 //
-// 与实体掩码共用同一条规矩，因为上游对两者是同一套解析。拼在一起
-// （`cm`）会被上游静默忽略 —— 那意味着用户以为筛了，实际没筛。
+// 三条规矩，每一条都对应一种**静默失败**：
+//
+//	拼在一起（`cm`）  上游静默忽略整段 → 用户以为筛了，实际没筛
+//	未知字母（`x`）   同上（上游只认它词表里那几个）
+//	空段（`c,,m`）    无害，跳过
 func validateMainFlags(main string) error {
 	if main == "" {
 		return nil
 	}
 	for _, seg := range strings.Split(main, ",") {
-		if strings.TrimSpace(seg) == "" {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
 			continue
 		}
 		if utf8.RuneCountInString(seg) > 1 {
 			return fmt.Errorf("%w：主属性 %q 应当是**单个字母**，多个用逗号分隔（如 c,m），"+
 				"而不是拼在一起", catalog.ErrBadRequest, seg)
+		}
+		if _, ok := mainFlags[seg]; !ok {
+			return fmt.Errorf("%w：主属性 %q 不是上游认的字母。上游自己给的词表是 "+
+				"p(可播放) m(含磁鏈) c(含字幕) s(單體影片) i(含預覽圖) v(含預覽視頻) —— "+
+				"写别的字母不会报错，只会被静默忽略，于是 feed 看着筛了其实没筛",
+				catalog.ErrBadRequest, seg)
 		}
 	}
 	return nil
