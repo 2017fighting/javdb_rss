@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +62,9 @@ func (s *Server) Handler() http.Handler {
 	// 清单的发现端点。它与 /collected 同形，但数据源**不同一个概念**：
 	// /collected 是「你收藏的女优」，这里是「你建的清单」。
 	mux.HandleFunc("GET /collected_lists", s.handleCollectedLists)
+	// 标签词表的发现端点。精确路径，不带 .xml：它是页面「按上游分组挑标签」
+	// 的唯一数据来源，产物是给人/给页面看的词表，qBittorrent 不会碰它。
+	mux.HandleFunc("GET /tags", s.handleTags)
 
 	// 用前缀匹配而不是 {code} 通配符：Go 的 ServeMux 要求通配符占满整个
 	// 路径段，而我们要容忍结尾的 .xml，因此在这里自己剥。
@@ -252,6 +256,111 @@ func (s *Server) handleCollected(w http.ResponseWriter, r *http.Request) {
 		out.MaxPages = col.MaxPages
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ---------------------------------------------------------------------------
+// 标签词表发现端点
+// ---------------------------------------------------------------------------
+
+// tagVocabularyBody 是 /tags 的响应体。
+//
+// 顶层刻意用 `groups` 而不是 `tags`：上游的顶层键就叫 tags，装的却是**分组** ——
+// 照抄那个名字会让每个读它的人都先误解一次。组内的字段名则沿用上游。
+type tagVocabularyBody struct {
+	Groups []tagGroupEntry `json:"groups"`
+}
+
+type tagGroupEntry struct {
+	// CategoryID / Category 都保留：分组不是我们编的，页面按它做「上游分组」的渲染。
+	CategoryID string     `json:"category_id"`
+	Category   string     `json:"category"`
+	Tags       []tagEntry `json:"tags"`
+}
+
+type tagEntry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// VideosCount 带 omitempty：词表（/api/v2/tags）实测**不返回**这个字段。
+	//
+	// 这与 /collected 里的 gender 刻意不带 omitempty 是**相反**的取舍，
+	// 因为含义相反：gender 的零值（0=女优）是有意义的真值，省掉它会让消费方
+	// 只能靠「键不在就当成 0」来猜；而这里上游根本没给过作品数，
+	// 编一个 videos_count: 0 出来等于宣布「这个标签下一部片都没有」——
+	// 那是静默假数据。上游哪天开始给，它会自动透出来。
+	VideosCount int `json:"videos_count,omitempty"`
+}
+
+// handleTags 服务 GET /tags?type={片库号}：交出上游按片库给出的标签分组词表。
+//
+// 它与 /collected、/collected_lists 同属**发现端点家族**：在 /rss/ 之外、
+// 不带 .xml、返回 JSON。
+//
+// # 为什么非法 type 必须在这里判 400
+//
+// 上游对非法的 `type` 是**静默回落**：实测 `type=9` 与 `type=0` 的响应逐字节
+// 相同。照原样透传等于把「另一个片库的词表」当成你要的答案给出去，
+// 而那是本项目最不能接受的一类失败。因此这里先本地判，并在文案里写出有效取值。
+//
+// **不需要 token**：上游该端点实测匿名可用，因此即使没配 token 也返回 200
+// （与 /collected 的 503 相反 —— 后者读的是 App 里的私有标记）。
+func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimSpace(r.URL.Query().Get("type"))
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"缺少 type 参数。它只接受四个片库号：%s", catalog.ZoneOptions()))
+		return
+	}
+	zone, err := strconv.Atoi(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"type=%q 不是数字。它只接受四个片库号：%s", raw, catalog.ZoneOptions()))
+		return
+	}
+	if !catalog.ValidZone(zone) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"type=%d 不认识。它只接受四个片库号：%s。"+
+				"上游对越界的 type 是**静默回落**（type=9 与 type=0 的响应逐字节相同），"+
+				"因此这里必须拦下，而不是把另一个片库的词表给你",
+			zone, catalog.ZoneOptions()))
+		return
+	}
+	if !s.cfg.Current().AllowsZone(strconv.Itoa(zone)) {
+		// 与 /rss/tags/{zone}.xml 同一套白名单语义：没放行的片库返回 404，
+		// 不确认它是否「存在但被禁止」—— 否则页面会渲染一个订不到的片库。
+		writeError(w, http.StatusNotFound, "未知的订阅")
+		return
+	}
+
+	vocab, err := s.src.TagVocabulary(r.Context(), zone)
+	if err != nil {
+		if errors.Is(err, catalog.ErrBadRequest) {
+			s.log.WarnContext(r.Context(), "标签词表参数不合法", "zone", zone, "err", err)
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.log.ErrorContext(r.Context(), "取标签词表失败", "zone", zone, "err", err)
+		writeUpstreamError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, tagVocabularyBodyFrom(vocab))
+}
+
+// tagVocabularyBodyFrom 把领域模型摊成响应体，**保持上游顺序**。
+func tagVocabularyBodyFrom(v catalog.TagVocabulary) tagVocabularyBody {
+	out := tagVocabularyBody{Groups: make([]tagGroupEntry, 0, len(v.Groups))}
+	for _, g := range v.Groups {
+		tags := make([]tagEntry, 0, len(g.Tags))
+		for _, t := range g.Tags {
+			tags = append(tags, tagEntry{ID: t.ID, Name: t.Name, VideosCount: t.VideosCount})
+		}
+		out.Groups = append(out.Groups, tagGroupEntry{
+			CategoryID: g.CategoryID,
+			Category:   g.Category,
+			Tags:       tags,
+		})
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

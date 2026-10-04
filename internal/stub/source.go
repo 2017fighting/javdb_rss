@@ -46,6 +46,11 @@ type Source struct {
 	ListWorks []catalog.Work
 	// BrowseWorks 是 Browse 的返回值；为 nil 时用内置样例。
 	BrowseWorks []catalog.Work
+	// TagVocabularies 覆盖 TagVocabulary 的返回值（按片库号）。
+	//
+	// 非 nil 时**只有**表里列出的片库可用，其余返回包装了 catalog.ErrBadRequest
+	// 的错误 —— 这样测试可以精确控制某几个片库，而不必依赖内置 fixture。
+	TagVocabularies map[int]catalog.TagVocabulary
 }
 
 // 样例数据刻意覆盖三种关键形态，好让端到端跑起来时一眼能看出规则生效：

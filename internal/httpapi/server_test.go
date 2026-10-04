@@ -60,6 +60,10 @@ type recordingSource struct {
 	browseZone   int
 	browseSel    catalog.BrowseSelector
 	browseParams url.Values
+	// tagVocab 是 TagVocabulary 的返回值；tagZone 记录收到的片库号。
+	tagVocab catalog.TagVocabulary
+	tagErr   error
+	tagZone  int
 }
 
 func (r *recordingSource) Code(_ context.Context, code string) ([]catalog.Work, error) {
@@ -138,6 +142,14 @@ func (r *recordingSource) Browse(_ context.Context, zone int, sel catalog.Browse
 		return nil, r.browseErr
 	}
 	return r.browseWorks, nil
+}
+
+func (r *recordingSource) TagVocabulary(_ context.Context, zone int) (catalog.TagVocabulary, error) {
+	r.tagZone = zone
+	if r.tagErr != nil {
+		return catalog.TagVocabulary{}, r.tagErr
+	}
+	return r.tagVocab, nil
 }
 
 func (r *recordingSource) ListName(_ context.Context, id string) (string, error) {

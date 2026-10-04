@@ -95,9 +95,9 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	zone, err := strconv.Atoi(raw)
-	if err != nil || catalog.ZoneName(zone) == "" {
+	if err != nil || !catalog.ValidZone(zone) {
 		writeError(w, http.StatusNotFound, fmt.Sprintf(
-			"片库号 %q 不认识。实测有效的只有 0=有码 1=无码 2=欧美 3=FC2", raw))
+			"片库号 %q 不认识。实测有效的只有 %s", raw, catalog.ZoneOptions()))
 		return
 	}
 	if !s.cfg.Current().AllowsZone(strconv.Itoa(zone)) {

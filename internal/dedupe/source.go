@@ -151,6 +151,25 @@ func (s *Source) CollectedLists(ctx context.Context) (catalog.ListCollection, er
 	return got, nil
 }
 
+// TagVocabulary 实现 catalog.Source。
+//
+// key 里必须带 zone：四个片库的词表**各不相同**，合并错了就是把另一个库的
+// 词表交给用户 —— 而那正是上游对非法 type 的静默回落造成的后果，
+// 只是换了个入口。
+func (s *Source) TagVocabulary(ctx context.Context, zone int) (catalog.TagVocabulary, error) {
+	v, err, sharedCall := s.group.Do(fmt.Sprintf("tags:%d", zone), func() (any, error) {
+		return s.inner.TagVocabulary(ctx, zone)
+	})
+	if sharedCall {
+		s.shared.Add(1)
+	}
+	if err != nil {
+		return catalog.TagVocabulary{}, err
+	}
+	got, _ := v.(catalog.TagVocabulary)
+	return got, nil
+}
+
 // WantToWatch 实现 catalog.Source。
 //
 // 它没有参数，因此所有并发调用合并成一次 —— 与收藏列表同一个理由，而且更划算：

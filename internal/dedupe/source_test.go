@@ -2,6 +2,7 @@ package dedupe
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ type countingSource struct {
 	codeCalls    atomic.Int64
 	actressCalls atomic.Int64
 	wantCalls    atomic.Int64
+	tagCalls     atomic.Int64
 	delay        time.Duration
 	gotParams    []string
 	mu           sync.Mutex
@@ -50,6 +52,64 @@ func (c *countingSource) WantToWatch(context.Context) (catalog.WantList, error) 
 	c.wantCalls.Add(1)
 	time.Sleep(c.delay)
 	return catalog.WantList{Works: []catalog.Work{{Number: "W-1"}}}, nil
+}
+
+func (c *countingSource) TagVocabulary(_ context.Context, zone int) (catalog.TagVocabulary, error) {
+	c.tagCalls.Add(1)
+	time.Sleep(c.delay)
+	return catalog.TagVocabulary{Groups: []catalog.TagGroup{{
+		CategoryID: fmt.Sprintf("zone-%d", zone),
+		Category:   "基本",
+	}}}, nil
+}
+
+// TestTagVocabularyMergesPerZone 确认合并 key 里带上了片库号。
+//
+// 四个片库的词表**各不相同**，把 zone 漏出 key 就等于让一个片库的词表冒充
+// 另一个 —— 与上游对非法 type 的静默回落是同一个后果：不报错，只发错词表。
+func TestTagVocabularyMergesPerZone(t *testing.T) {
+	merged := &countingSource{delay: 50 * time.Millisecond}
+	s := New(merged)
+
+	const n = 20
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := s.TagVocabulary(context.Background(), 0); err != nil {
+				t.Errorf("TagVocabulary: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if got := merged.tagCalls.Load(); got != 1 {
+		t.Errorf("同片库的 %d 次并发调用打出了 %d 次上游请求，want 1", n, got)
+	}
+
+	// 四个**不同**的片库必须各打一次，不能被合并成一次。
+	distinct := &countingSource{delay: 50 * time.Millisecond}
+	s2 := New(distinct)
+	var wg2 sync.WaitGroup
+	start2 := make(chan struct{})
+	for _, zone := range []int{0, 1, 2, 3} {
+		wg2.Add(1)
+		go func(zone int) {
+			defer wg2.Done()
+			<-start2
+			if _, err := s2.TagVocabulary(context.Background(), zone); err != nil {
+				t.Errorf("TagVocabulary(%d): %v", zone, err)
+			}
+		}(zone)
+	}
+	close(start2)
+	wg2.Wait()
+	if got := distinct.tagCalls.Load(); got != 4 {
+		t.Errorf("四个不同片库合并成了 %d 次上游请求，want 4（key 里漏了 zone？）", got)
+	}
 }
 
 // TestCodeMergesConcurrentIdenticalRequests 是这一层存在的全部理由：
@@ -243,6 +303,9 @@ func (emptySource) CollectedActresses(context.Context) (catalog.Collection, erro
 }
 func (emptySource) WantToWatch(context.Context) (catalog.WantList, error) {
 	return catalog.WantList{}, nil
+}
+func (emptySource) TagVocabulary(context.Context, int) (catalog.TagVocabulary, error) {
+	return catalog.TagVocabulary{}, nil
 }
 
 // truncatedSource 总是报告截断。它复用 emptySource 的空实现，只覆盖需要的一条。

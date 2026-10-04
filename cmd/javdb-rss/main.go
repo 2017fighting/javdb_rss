@@ -352,6 +352,16 @@ func (s *appapiSource) ListName(ctx context.Context, id string) (string, error) 
 	return out, err
 }
 
+func (s *appapiSource) TagVocabulary(ctx context.Context, zone int) (catalog.TagVocabulary, error) {
+	var out catalog.TagVocabulary
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.TagVocabulary(ctx, zone)
+		return e
+	})
+	return out, err
+}
+
 // withRelogin 发一次请求；若因**凭据失效**失败且配了账号密码，则重登一次并重试。
 //
 // 只对凭据类错误重试（appapi.IsAuthError）：

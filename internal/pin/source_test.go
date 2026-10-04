@@ -75,6 +75,9 @@ func cloneWorks(in []catalog.Work) []catalog.Work {
 }
 
 func (f *fakeSource) ActressName(context.Context, string) (string, error) { return "名字", nil }
+func (f *fakeSource) TagVocabulary(context.Context, int) (catalog.TagVocabulary, error) {
+	return catalog.TagVocabulary{}, nil
+}
 func (f *fakeSource) CollectedActresses(context.Context) (catalog.Collection, error) {
 	return catalog.Collection{}, nil
 }

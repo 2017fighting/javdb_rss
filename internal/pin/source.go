@@ -126,6 +126,11 @@ func (s *Source) CollectedLists(ctx context.Context) (catalog.ListCollection, er
 	return s.inner.CollectedLists(ctx)
 }
 
+// TagVocabulary 直接透传 —— 它是词表，不是 feed 内容，没有磁链可选。
+func (s *Source) TagVocabulary(ctx context.Context, zone int) (catalog.TagVocabulary, error) {
+	return s.inner.TagVocabulary(ctx, zone)
+}
+
 // WantToWatch 实现 catalog.Source。
 //
 // 它**要**钉住 —— 与番号/女优 feed 同一个理由：这条 feed 会被 qBittorrent

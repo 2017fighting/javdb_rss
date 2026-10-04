@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 )
 
@@ -134,6 +135,51 @@ type ListCollection struct {
 	MaxPages     int
 }
 
+// Tag 是标签词表里的一个标签。
+//
+// 它对应上游 `GET /api/v2/tags` 里某一组 `tags[]` 的一项，字段名与线格式一致。
+type Tag struct {
+	// ID 是上游的标签标识。
+	//
+	// ⚠️ 它**不是全局唯一**的：同一个片库的词表里，月份 1–12 与真标签的 id
+	// 全部撞号（实测 12 个，如 id=3 同时是「月份:3」与「服裝:眼鏡」）。
+	// 因此把 id 单拿出去用之前必须先确定它属于哪个分组（或与名字一起核对），
+	// 否则会把「月份」的筛选条件当成某个真标签发出去。
+	ID string
+	// Name 是显示名，**原样来自上游**（不提字、不翻译）。
+	Name string
+	// VideosCount 是上游给的该标签作品数。
+	//
+	// ⚠️ 词表（`/api/v2/tags`）实测**不返回**这个字段 —— 它是给女优自己的
+	// `tags[]` 预留的（那边逐项都有）。因此 0 既可能是「上游没给」也可能是真的 0；
+	// 序列化时应当把它整段省掉，而不是编一个 0 出来。
+	VideosCount int
+}
+
+// TagGroup 是标签词表里的一个分组（如「年份」「服裝」）。
+//
+// 分组**不是我们编的**：名字与顺序都来自上游，页面「按上游分组挑标签」
+// 依赖的就是它。
+type TagGroup struct {
+	// CategoryID 是上游的分组标识（main / year / month / subject / role / …）。
+	CategoryID string
+	// Category 是分组显示名，原样来自上游。
+	Category string
+	// Tags 是组内标签，**顺序即上游顺序**。
+	Tags []Tag
+}
+
+// TagVocabulary 是某个片库（zone）的标签分组词表。
+//
+// 它是发现端点的产物：让「这个片库有哪些标签」不再依赖一份冻结快照。
+type TagVocabulary struct {
+	// Groups 是分组，**顺序即上游顺序**。
+	//
+	// 分组顺序与组内顺序都不是我们编的：一旦在中间排序，
+	// 同样的选择就会在不同版本得到不同的 URL。
+	Groups []TagGroup
+}
+
 // 区域号（filter_by 的第一段）。
 //
 // 它同时是全站浏览的「片库」选择：实测 0/1/2/3 返回**四个不同的集合**
@@ -158,6 +204,29 @@ func ZoneName(zone int) string {
 		return "FC2"
 	}
 	return ""
+}
+
+// ZoneOptions 返回四个片库号的取值说明（嵌进「有效取值」文案的一句话）。
+//
+// 抽成函数而不是各处写一遍：这句话会出现在好几条错误信息里，
+// 而它们必须给出**同一份**取值集合 —— 各写一份就会漂。
+func ZoneOptions() string { return "0=有码 1=无码 2=欧美 3=FC2" }
+
+// ValidZone 报告 zone 是否是本服务认识的片库号（0–3）。
+//
+// 它必须与上游**实测**的有效集合一致，而不是与「看起来合理」一致：
+// 上游对越界值是**静默回落**（`type=9` 与 `type=0` 的响应逐字节相同），
+// 所以一个没被拦住的越界 zone 不会报错，只会把另一个片库的内容当成答案。
+func ValidZone(zone int) bool { return ZoneName(zone) != "" }
+
+// ErrUnknownZone 是「片库号不认识」这个用户错误的唯一构造点。
+//
+// 它被 appapi 与 stub 两处实现共用：两处各写一份 fmt.Errorf 就会有两份
+// 可以各自跑偏的文案，而这条文案是用户盯着 URL 读的那一句。
+// 返回的错误用 ErrBadRequest 包装，因此上层能把它翻成 400 而不是 502。
+func ErrUnknownZone(zone int) error {
+	return fmt.Errorf("%w：片库号 %d 不存在（实测有效的只有 %s）",
+		ErrBadRequest, zone, ZoneOptions())
 }
 
 // MaxTags 是标签筛选的上限，**上游的硬限制**，不是 UI 约定。
@@ -327,6 +396,17 @@ type Source interface {
 	// 匿名只能读 `privacy: open` 的清单（实测），`privacy: own` 的会返回
 	// NoPermission —— 那种情况下退回 id 就行。
 	ListName(ctx context.Context, id string) (string, error)
+
+	// TagVocabulary 返回某个片库的标签分组词表（分组名、分组顺序、组内标签
+	// 与顺序一律原样）。
+	//
+	// **不需要 token**：实测该上游端点匿名可用。它也不引入任何服务端状态。
+	//
+	// zone 只接受 0–3，实现方必须把越界的 zone 判成错误（用 ErrBadRequest
+	// 包装），而**不能**原样发给上游：上游对非法 `type` 是静默回落 ——
+	// `type=9` 与 `type=0` 的响应逐字节相同。照原样透传等于把「另一个片库的
+	// 词表」当成你要的答案交出去。
+	TagVocabulary(ctx context.Context, zone int) (TagVocabulary, error)
 
 	// Browse 返回**全站**（不挂任何实体）的作品列表，按 zone 分片库。
 	//
