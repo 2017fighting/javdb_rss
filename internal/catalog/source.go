@@ -77,6 +77,42 @@ type WantList struct {
 	MaxPages     int
 }
 
+// MovieList 是用户在 App 里建的一份**清单**（片单）。
+//
+// 它与 Actress 并列，都是「一块作品集合」的发现产物 —— 用户看到这份清单后
+// 自己决定把哪些 id 填进订阅 URL。
+//
+// ⚠️ 名单叫 List 而不叫 Collection 是因为 Collection 已经被「收藏女优」占了，
+// 而两者是**不同**的东西：Collection 是收藏的**女优**，MovieList 是自建的**片单**。
+type MovieList struct {
+	// ID 是上游的清单标识（如 "k4EVE4"），也是 /rss/list/{id}.xml 里的那个 id。
+	ID string
+	// Name 是清单名，由用户自己起（实测有「遥控跳弹」这种）。
+	Name string
+	// MoviesCount 是上游声明的清单长度。
+	//
+	// 它**可以**用来对账：实测 filter_by=0:l:{id} 返回的条数与它逐位相同
+	// （4 份清单实测 9/1/2/6 全对），因此它不只是参考值。
+	MoviesCount int
+	// IsDefault 表示这是账号自带的那份默认清单（名字就叫 "default"）。
+	IsDefault bool
+	// Privacy 是上游给的可见性（实测取值："open" / "own"）。
+	Privacy string
+}
+
+// ListCollection 是「你在 App 里建的清单」这份清单的读取结果。
+//
+// 它与 Collection 同构，理由也相同：清单按页拉取，而翻页有一个上限。
+// Truncated 为 false 时它是一份**完整的清单**。
+type ListCollection struct {
+	Lists []MovieList
+	// Truncated 报告上游**确实还有数据而本次没读完**（超过翻页上限）。
+	Truncated bool
+	// PagesFetched 是实际请求的页数，MaxPages 是当时生效的翻页上限。
+	PagesFetched int
+	MaxPages     int
+}
+
 // ErrNoToken 表示这次操作需要用户从 App 导出的 token，但当前没有配置它。
 //
 // 单独成一个可判定的错误，是因为它的处置方式与别的失败都不同：
@@ -166,4 +202,37 @@ type Source interface {
 	// 与 CollectedActresses 的差别只有一处：它是 feed 的数据源（不是发现端点），
 	// 因此实现方返回的作品**可能没有磁链候选**，而那不是错误（见 WantList）。
 	WantToWatch(ctx context.Context) (WantList, error)
+
+	// CollectedLists 返回用户在 App 里建的清单（片单）。
+	//
+	// **需要 token。** 没有配置 token 时，实现方必须返回包装了 ErrNoToken 的错误
+	// （用 errors.Is 可判定），而不是返回空列表 —— 空清单会被理解成
+	// 「你没建过任何清单」。
+	//
+	// ⚠️ 它与 CollectedActresses 走的是**不同**的上游端点，而且不是
+	// 看起来最像的那个：`/api/v1/users/collected_lists` 实测返回
+	// **HTTP 500**（GET/POST、带不带参数都一样），能用的只有
+	// `/api/v1/lists/simple`（需要 token）。详见 notes/tag-vocabulary.md 的姊妹篇
+	// notes/lists.md。
+	CollectedLists(ctx context.Context) (ListCollection, error)
+
+	// List 返回某份清单里的作品列表。
+	//
+	// 它是 List 订阅的数据源：与 Actress 同形（一套透传参数、一套自有参数
+	// pages），只是 filter_by 里的实体字母从 `a` 换成 `l`。
+	//
+	// ⚠️ zone **写死 0**：清单的 filter_by 实测是 `0:l:{id}`，而 zone 写错
+	// （例如 2）不会报错，只会静默返回【别的作品】—— 实测 4 份清单在 zone=0
+	// 下返回 9/1/2/6 条（与上游声明的 movies_count 逐位相同），换成 zone=2
+	// 全部变成 50 条。上游的清单形态里**没有** zone 字段，因此没得选。
+	List(ctx context.Context, id string, params url.Values) ([]Work, error)
+
+	// ListName 返回清单名，用于 feed 标题（拿不到就用 id 当标题）。
+	//
+	// 与 ActressName 同一套非关键路径语义：失败退回 id，绝不让取名
+	// 把一个本来能用的 feed 弄挂。
+	//
+	// 匿名只能读 `privacy: open` 的清单（实测），`privacy: own` 的会返回
+	// NoPermission —— 那种情况下退回 id 就行。
+	ListName(ctx context.Context, id string) (string, error)
 }

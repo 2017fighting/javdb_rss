@@ -330,3 +330,28 @@ func TestCollectedTruncationSurvivesDedupe(t *testing.T) {
 		t.Errorf("解释信号的两个字段也应当保留：%+v", got)
 	}
 }
+
+// 新增契约（清单）的测试存根：这些假实现只关心别的方法，清单那一套
+// 一律返回空 —— 它们要的是「满足接口」，而不是「清单行为」。
+
+func (c *countingSource) CollectedLists(context.Context) (catalog.ListCollection, error) {
+	return catalog.ListCollection{}, nil
+}
+func (c *countingSource) List(context.Context, string, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}
+func (c *countingSource) ListName(context.Context, string) (string, error) { return "", nil }
+
+func (emptySource) CollectedLists(context.Context) (catalog.ListCollection, error) {
+	return catalog.ListCollection{}, nil
+}
+func (emptySource) List(context.Context, string, url.Values) ([]catalog.Work, error) { return nil, nil }
+func (emptySource) ListName(context.Context, string) (string, error)                 { return "", nil }
+
+func (truncatedSource) CollectedLists(context.Context) (catalog.ListCollection, error) {
+	return catalog.ListCollection{}, nil
+}
+func (truncatedSource) List(context.Context, string, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}
+func (truncatedSource) ListName(context.Context, string) (string, error) { return "", nil }

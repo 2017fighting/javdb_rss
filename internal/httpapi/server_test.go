@@ -44,6 +44,16 @@ type recordingSource struct {
 	wantCalled int
 	// names 控制 ActressName 的返回；不在表里的 id 返回错误。
 	names map[string]string
+
+	// 清单相关的可控制行为
+	lists       *catalog.ListCollection
+	listsErr    error
+	listsCalled int
+	// listWorks 是 List 的返回值；listID/listParams 记录收到的输入。
+	listWorks  []catalog.Work
+	listErr    error
+	listID     string
+	listParams url.Values
 }
 
 func (r *recordingSource) Code(_ context.Context, code string) ([]catalog.Work, error) {
@@ -92,6 +102,35 @@ func (r *recordingSource) WantToWatch(context.Context) (catalog.WantList, error)
 		return *r.want, nil
 	}
 	return catalog.WantList{}, nil
+}
+
+func (r *recordingSource) CollectedLists(context.Context) (catalog.ListCollection, error) {
+	r.listsCalled++
+	if r.listsErr != nil {
+		return catalog.ListCollection{}, r.listsErr
+	}
+	if r.lists != nil {
+		return *r.lists, nil
+	}
+	return catalog.ListCollection{}, nil
+}
+
+func (r *recordingSource) List(_ context.Context, id string, params url.Values) ([]catalog.Work, error) {
+	r.listID = id
+	r.listParams = params
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	return r.listWorks, nil
+}
+
+func (r *recordingSource) ListName(_ context.Context, id string) (string, error) {
+	if r.names != nil {
+		if n, ok := r.names[id]; ok {
+			return n, nil
+		}
+	}
+	return "", errors.New("没有名字")
 }
 
 func newTestServer(t *testing.T, cfgYAML string, src catalog.Source) http.Handler {

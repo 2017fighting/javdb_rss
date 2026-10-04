@@ -51,6 +51,7 @@ pin 就是一个可读的 JSON 文件，可以直接看、直接改、直接备�
 | 女优订阅 + 参数透传 + 只追新 | ✅ 可用（分页与缓存未做，见 ticket 09） |
 | 读取 App 里收藏的女优 | ⚠️ 已实现为 `GET /collected`，但**尚未对着真实 API 验证过**（需要 token） |
 | 「想看」feed | ✅ 可用（`GET /rss/want.xml`，2026-10-04 用真实 token 与真实 qBittorrent 验收） |
+| 清单订阅（自己的片单） | ✅ 可用（`GET /rss/list/{id}.xml` 与发现端点 `GET /collected_lists`，2026-10-04 用真 token 对着 5 份真实清单验收） |
 | 主动推送（推给 qBittorrent + 回写「看过」） | ⛔ 本次不做（2026-10-04 用户决定）；已定的形状与 qbt/App API 契约留在 [`notes/want-push-deferred.md`](.scratch/javdb-rss/notes/want-push-deferred.md) |
 
 数据源是**真实的 JavDB App 私有 API**。`provider: stub` 是离线调试通道。
@@ -129,6 +130,45 @@ http://127.0.0.1:8080/rss/code/KV-328.xml                 番号订阅
 http://127.0.0.1:8080/rss/actress/EvkJ.xml                女优订阅
 http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=2026-01-01   只要这个日期之后的
 http://127.0.0.1:8080/rss/want.xml                        你在 App 里标了「想看」的全部作品
+http://127.0.0.1:8080/rss/list/k4EVE4.xml                 你在 App 里建的某份清单
+```
+
+### 清单订阅（`/rss/list/{id}.xml`）
+
+内容就是你 App 里那份片单。清单 id 从发现端点拿：
+
+```bash
+curl http://127.0.0.1:8080/collected_lists
+```
+
+```json
+{"lists": [
+  {"id": "k4EVE4", "name": "遥控跳弹", "movies_count": 1,
+   "privacy": "open", "feed": "/rss/list/k4EVE4.xml"},
+  {"id": "R9r77", "name": "預設清單", "movies_count": 6,
+   "is_default": true, "privacy": "own", "feed": "/rss/list/R9r77.xml"}
+]}
+```
+
+与 `/collected` 一样：**它是发现端点，不是 feed**；形状也同构，
+包括触顶时的 `truncated` / `pages_fetched` / `max_pages` 三个字段
+（同样是「看键在不在」，不是看值）。
+
+⚠️ **它是「你建的清单」，不是「你关注的清单」。** 两者在上游是两个概念，
+而名字最像的那个端点（`/api/v1/users/collected_lists`）**实测返回 HTTP 500**，
+所以服务用的是 `/api/v1/lists/simple`（能用的那个）。详见
+[`notes/lists.md`](.scratch/javdb-rss-ui/notes/lists.md)。
+
+参数与女优订阅**同一套**：`since` / `pages` 自有，`sort_by` / `order_by` /
+`filter_by` / `filter_by_tags` 原样透传。`filter_by` 留空时服务自动构造
+`0:l:{清单 id}` —— **zone 固定为 0**，因为清单形态里没有 zone，而写错 zone
+上游不报错、只会静默给别的作品（实测：4 份清单在 `0:l:{id}` 下返回
+9/1/2/6 条，与上游声明的 `movies_count` 逐位相同）。
+
+```bash
+/rss/list/k4EVE4.xml                 整份清单
+/rss/list/p36Eww.xml?pages=3         翻三页
+/rss/list/p36Eww.xml?since=2026-01-01 只要这个日期之后的
 ```
 
 ### 「想看」feed（`/rss/want.xml`）
@@ -224,9 +264,13 @@ guid 跨轮询逐条不变；磁链能被它的引擎接受（`success_count: 1`
 
 ## token：登录一次，或从环境变量给
 
-需求「番号订阅」与「女优订阅」**不需要 token**。只有这两个读 App 里
-**你自己标记的东西**的端点需要：`/collected`（收藏的女优）与
-`/rss/want.xml`（想看清单）。
+需求「番号订阅」与「女优订阅」**不需要 token**。需要 token 的是这三种读 App 里
+**你自己标记的东西**的端点：`/collected`（收藏的女优）、`/collected_lists`
+（你建的清单）与 `/rss/want.xml`（想看清单）。
+
+⚠️ 一个例外值得记一笔：清单 **feed 本身**（`/rss/list/{id}.xml`）不需要 token，
+因为作品走的是匿名端点。只有「列出你有哪些清单」与「清单标题用真名字」这两件
+事需要它（`privacy: own` 的清单匿名读不到名字，那时标题退回 id，feed 照常可用）。
 
 ### ⚠️ 先读这条：这是单会话账号
 

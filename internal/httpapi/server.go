@@ -58,11 +58,15 @@ func (s *Server) Handler() http.Handler {
 	// 发现端点 —— **不是 feed**。刻意放在 /rss/ 之外、也不带 .xml，
 	// 因为它的产物是给人看的清单（拿去填配置或 URL），qBittorrent 不会碰它。
 	mux.HandleFunc("GET /collected", s.handleCollected)
+	// 清单的发现端点。它与 /collected 同形，但数据源**不同一个概念**：
+	// /collected 是「你收藏的女优」，这里是「你建的清单」。
+	mux.HandleFunc("GET /collected_lists", s.handleCollectedLists)
 
 	// 用前缀匹配而不是 {code} 通配符：Go 的 ServeMux 要求通配符占满整个
 	// 路径段，而我们要容忍结尾的 .xml，因此在这里自己剥。
 	mux.HandleFunc("GET /rss/code/", s.handleCode)
 	mux.HandleFunc("GET /rss/actress/", s.handleActress)
+	mux.HandleFunc("GET /rss/list/", s.handleList)
 
 	// 「想看」 feed。它是一张**固定路径**的列表 feed（清单内容由 App 里的标记
 	// 决定，不在 URL 里），因此用精确路径注册而不是前缀剥尾。
@@ -238,6 +242,158 @@ func (s *Server) handleCollected(w http.ResponseWriter, r *http.Request) {
 		out.MaxPages = col.MaxPages
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ---------------------------------------------------------------------------
+// 清单（片单）：发现端点 + feed
+// ---------------------------------------------------------------------------
+
+// listEntry 是 /collected_lists 里的一条。
+//
+// 与 collectedEntry 同形，但**多两个字段**：`movies_count` 是上游声明的
+// 清单长度（实测与 feed 实际条数逐位相同，因此可以拿去对账），
+// `is_default` 标出账号自带的那份默认清单。
+type listEntry struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	MoviesCount int    `json:"movies_count"`
+	IsDefault   bool   `json:"is_default,omitempty"`
+	Privacy     string `json:"privacy,omitempty"`
+	// Feed 是可以直接拿去用的 feed 路径。给出它而不是让用户自己拼：
+	// 拼错了只会得到 404，而用户会以为服务坏了。
+	Feed string `json:"feed"`
+}
+
+type listBody struct {
+	Lists []listEntry `json:"lists"`
+	// 截断信号，语义与 collectedBody 完全相同：
+	// **看 truncated 键存不存在，而不是看它的值**。
+	Truncated    bool `json:"truncated,omitempty"`
+	PagesFetched int  `json:"pages_fetched,omitempty"`
+	MaxPages     int  `json:"max_pages,omitempty"`
+}
+
+// handleCollectedLists 服务 GET /collected_lists：列出你在 App 里建的清单。
+//
+// # 它与 /collected 不是同一张清单
+//
+// /collected 读的是**收藏的女优**；这里读的是**你自己建的片单**。
+// 上游那个名字最像的端点（`/users/collected_lists` = 你**关注**的清单）
+// 实测返回 HTTP 500，因此这里用的是 `/api/v1/lists/simple`（你**建的**清单）。
+// 「建的」与「关注的」不是一回事 —— 这一条写在笔记里，路由名保持与 /collected
+// 同形，因为它同样是一个发现端点。
+func (s *Server) handleCollectedLists(w http.ResponseWriter, r *http.Request) {
+	col, err := s.src.CollectedLists(r.Context())
+	if err != nil {
+		s.log.ErrorContext(r.Context(), "取清单列表失败", "err", err)
+		writeListError(w, err, "清单列表")
+		return
+	}
+
+	out := listBody{Lists: make([]listEntry, 0, len(col.Lists))}
+	for _, l := range col.Lists {
+		out.Lists = append(out.Lists, listEntry{
+			ID:          l.ID,
+			Name:        l.Name,
+			MoviesCount: l.MoviesCount,
+			IsDefault:   l.IsDefault,
+			Privacy:     l.Privacy,
+			Feed:        "/rss/list/" + url.PathEscape(l.ID) + ".xml",
+		})
+	}
+	if col.Truncated {
+		s.log.WarnContext(r.Context(), "清单数超过翻页上限，/collected_lists 返回的是不完整清单",
+			"已读页数", col.PagesFetched, "上限", col.MaxPages, "已读条数", len(col.Lists))
+		out.Truncated = true
+		out.PagesFetched = col.PagesFetched
+		out.MaxPages = col.MaxPages
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleList 服务 GET /rss/list/{id}.xml?<透传参数>&since=<日期>。
+//
+// 它与 handleActress 几乎逐行同形，因为在上游它们本就是同一个端点
+// （`/api/v1/movies/tags` + 同一个复合掩码，只有实体字母不同）。
+// 两份分开写而不是抽一个共用 handler，是因为它们的**文案与白名单不同**：
+// 女优那条会说「女优」，这条会说「清单」，而把差异做成参数会让两个 handler
+// 的调用点都变得难读。共用的是更下面那一层（appapi 的 entityWorks）。
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathParam(r.URL.Path, "/rss/list/")
+	if !ok {
+		writeError(w, http.StatusNotFound, "需要形如 /rss/list/{清单 id}.xml 的路径")
+		return
+	}
+	if !s.cfg.Current().AllowsList(id) {
+		// 与番号/女优白名单一样返回 404，不向调用方确认这个清单是否「存在但被禁止」。
+		writeError(w, http.StatusNotFound, "未知的订阅")
+		return
+	}
+
+	query := r.URL.Query()
+
+	// 与女优订阅同一套参数分离：自有参数（since / page / limit）不进上游，
+	// `pages` 除外（它由 appapi 消费，必须流到那一层）。
+	params := make(map[string]string, len(query))
+	for k, vs := range query {
+		if len(vs) == 0 || (catalog.IsOwnParam(k) && k != "pages") {
+			continue
+		}
+		params[k] = vs[0]
+	}
+
+	since := strings.TrimSpace(query.Get("since"))
+
+	// 取作品与取名字互不依赖，并行发起。理由与女优那条相同：
+	// qBittorrent 会周期轮询这条 feed，串行就白多等一个往返。
+	nameCh := make(chan string, 1)
+	go func() {
+		// ⚠️ 这里的 recover 是必需的：net/http 只为 handler 所在的那个
+		// goroutine 恢复 panic，逃出那层保护会杀掉整个进程。
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.log.Error("取清单名字时 panic，标题退回 id", "id", id, "panic", rec)
+				nameCh <- "JavDB · " + id
+			}
+		}()
+		nameCh <- s.listTitle(r.Context(), id)
+	}()
+
+	works, err := s.src.List(r.Context(), id, toValues(params))
+	if err != nil {
+		if errors.Is(err, catalog.ErrBadRequest) {
+			s.log.WarnContext(r.Context(), "清单订阅参数不合法", "id", id, "err", err)
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.log.ErrorContext(r.Context(), "取清单作品失败", "id", id, "err", err)
+		writeUpstreamError(w, err)
+		return
+	}
+
+	if since != "" {
+		works = filterSince(s.log, works, since)
+	}
+
+	s.renderItems(w, r, feed.Meta{
+		Title:       <-nameCh,
+		Link:        s.feedURL(r),
+		Description: "清单 " + id + " 的订阅源",
+		Language:    s.cfg.Current().Feed.Language,
+	}, feed.Build(works))
+}
+
+// listTitle 拼清单 feed 的标题，能用真名字就用。
+//
+// 与 actressTitle 同一套非关键路径语义。一处差别：清单名可能读不到
+// （`privacy: "own"` 的清单匿名会返回 NoPermission），那时退回 id。
+func (s *Server) listTitle(ctx context.Context, id string) string {
+	name, err := s.src.ListName(ctx, id)
+	if err != nil || strings.TrimSpace(name) == "" {
+		s.log.DebugContext(ctx, "取清单名字失败，标题退回 id", "id", id, "err", err)
+		return "JavDB · " + id
+	}
+	return "JavDB · " + name
 }
 
 // writeListError 把「读一份需要 token 的 App 清单」的三种失败分开。

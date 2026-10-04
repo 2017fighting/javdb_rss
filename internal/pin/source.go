@@ -87,6 +87,32 @@ func (s *Source) CollectedActresses(ctx context.Context) (catalog.Collection, er
 	return s.inner.CollectedActresses(ctx)
 }
 
+// List 实现 catalog.Source。
+//
+// 它**要**钉住，理由与番号/女优 feed 完全相同：清单订阅会被 qBittorrent
+// 周期轮询，而「选中哪条磁链」决定 guid。不钉的话上游候选一变就多一条 guid，
+// 客户端把同一部片再下一份。
+//
+// 同一部作品可能既在某份清单里、又在女优订阅里 —— 两条 feed 共用同一张 pin 表
+// （按作品 id 键），所以两边会钉到同一条磁链，跨 feed 自然一致。
+func (s *Source) List(ctx context.Context, id string, params url.Values) ([]catalog.Work, error) {
+	works, err := s.inner.List(ctx, id, params)
+	if err != nil {
+		return nil, err
+	}
+	return s.pinAll(works)
+}
+
+// ListName 直接透传 —— 它不是 feed 内容，没有选择可言。
+func (s *Source) ListName(ctx context.Context, id string) (string, error) {
+	return s.inner.ListName(ctx, id)
+}
+
+// CollectedLists 直接透传 —— 清单列表不产生 guid。
+func (s *Source) CollectedLists(ctx context.Context) (catalog.ListCollection, error) {
+	return s.inner.CollectedLists(ctx)
+}
+
 // WantToWatch 实现 catalog.Source。
 //
 // 它**要**钉住 —— 与番号/女优 feed 同一个理由：这条 feed 会被 qBittorrent

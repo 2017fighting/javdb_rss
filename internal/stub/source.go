@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 )
@@ -36,10 +37,13 @@ type Source struct {
 	// catalog.ErrNoToken，用来验证上层对「没配 token」的处置。
 	NoToken bool
 	// Want 是 WantToWatch 的返回值；为 nil 时用内置样例。
-	//
 	// 它也是一个完整的 catalog.WantList，因此要构造截断场景的测试
 	// 可以同时给出 Truncated / PagesFetched / MaxPages。
 	Want *catalog.WantList
+	// Lists 是 CollectedLists 的返回值；为 nil 时用内置样例。
+	Lists *catalog.ListCollection
+	// ListWorks 是 List 的返回值；为 nil 时用内置样例。
+	ListWorks []catalog.Work
 }
 
 // 样例数据刻意覆盖三种关键形态，好让端到端跑起来时一眼能看出规则生效：
@@ -161,4 +165,53 @@ func (s *Source) WantToWatch(_ context.Context) (catalog.WantList, error) {
 		return *s.Want, nil
 	}
 	return catalog.WantList{Works: []catalog.Work{sampleWithSub, sampleNoMagnet}}, nil
+}
+
+// CollectedLists 实现 catalog.Source。
+func (s *Source) CollectedLists(_ context.Context) (catalog.ListCollection, error) {
+	if s.NoToken {
+		return catalog.ListCollection{}, fmt.Errorf("取清单列表: %w", catalog.ErrNoToken)
+	}
+	if s.Err != nil {
+		return catalog.ListCollection{}, s.Err
+	}
+	if s.Lists != nil {
+		return *s.Lists, nil
+	}
+	return catalog.ListCollection{Lists: []catalog.MovieList{
+		{ID: "k4EVE4", Name: "遥控跳弹", MoviesCount: 1, Privacy: "open"},
+		{ID: "R9r77", Name: "default", MoviesCount: 6, IsDefault: true, Privacy: "own"},
+	}}, nil
+}
+
+// List 实现 catalog.Source。
+//
+// 它复用同一套样例作品：清单 feed 与女优 feed 在选磁链、pin 上完全同形，
+// 因此样例也应当同形 —— 否则离线跑出来的清单 feed 看着就「和别的不一样」，
+// 而那正是最容易漏掉差异的地方。
+func (s *Source) List(_ context.Context, id string, _ url.Values) ([]catalog.Work, error) {
+	if s.Err != nil {
+		return nil, s.Err
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("清单 id 为空: %w", catalog.ErrBadRequest)
+	}
+	if s.ListWorks != nil {
+		return s.ListWorks, nil
+	}
+	return []catalog.Work{sampleWithSub}, nil
+}
+
+// ListName 实现 catalog.Source。
+//
+// 与 ActressName 共用 Names 表：两者都是「拿 id 换一个好看标题」，
+// 而且测试里同时用到两份订阅时，一张表比两张更不容易写错。
+func (s *Source) ListName(_ context.Context, id string) (string, error) {
+	if s.Err != nil {
+		return "", s.Err
+	}
+	if n, ok := s.Names[id]; ok {
+		return n, nil
+	}
+	return "", fmt.Errorf("清单 %s 没有可用的名字", id)
 }

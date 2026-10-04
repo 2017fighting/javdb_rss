@@ -112,6 +112,14 @@ app_api:
 #   codes:
 #     - KV-328
 #     - ABC-123
+#   # 清单订阅的白名单。
+#   #
+#   # 它**只有 id**（没有 params/since）：透传参数写在 URL 上就行，
+#   # 而 zone 不在配置里 —— 清单的 filter_by 实测固定为 `0:l:{id}`，
+#   # 写错 zone 上游不报错、只会静默给别的作品，因此不把这个旋钮交出来。
+#   # 清单 id 从 /collected_lists 取（它是发现端点，不是 feed）。
+#   lists:
+#     - k4EVE4
 #   actresses:
 #     - id: EvkJ
 #       # 原样透传给 App 女优页的查询参数，本服务不解释这些键值。

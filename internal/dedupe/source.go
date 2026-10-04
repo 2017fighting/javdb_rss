@@ -92,6 +92,52 @@ func (s *Source) CollectedActresses(ctx context.Context) (catalog.Collection, er
 	return got, nil
 }
 
+// List 实现 catalog.Source。
+//
+// key 与 Actress 同形（实体 + 全部参数）：参数不同的请求合并到一起
+// 会让用户拿到别人那份订阅的内容。
+func (s *Source) List(ctx context.Context, id string, params url.Values) ([]catalog.Work, error) {
+	key := "list:" + id + "?" + canonicalParams(params)
+	return s.do(key, func() ([]catalog.Work, error) {
+		return s.inner.List(ctx, id, params)
+	})
+}
+
+// ListName 实现 catalog.Source。
+//
+// 与 ActressName 同一个理由：一条清单 feed 每次渲染都会问一次名字，
+// 而 qBittorrent 可能同时拉同一个 feed 的多个连接。
+func (s *Source) ListName(ctx context.Context, id string) (string, error) {
+	v, err, sharedCall := s.group.Do("listname:"+id, func() (any, error) {
+		return s.inner.ListName(ctx, id)
+	})
+	if sharedCall {
+		s.shared.Add(1)
+	}
+	if err != nil {
+		return "", err
+	}
+	name, _ := v.(string)
+	return name, nil
+}
+
+// CollectedLists 实现 catalog.Source。
+//
+// 与 CollectedActresses 同一个理由合并（无参数、要翻页、只在发现端点被请求）。
+func (s *Source) CollectedLists(ctx context.Context) (catalog.ListCollection, error) {
+	v, err, sharedCall := s.group.Do("collected_lists", func() (any, error) {
+		return s.inner.CollectedLists(ctx)
+	})
+	if sharedCall {
+		s.shared.Add(1)
+	}
+	if err != nil {
+		return catalog.ListCollection{}, err
+	}
+	got, _ := v.(catalog.ListCollection)
+	return got, nil
+}
+
 // WantToWatch 实现 catalog.Source。
 //
 // 它没有参数，因此所有并发调用合并成一次 —— 与收藏列表同一个理由，而且更划算：

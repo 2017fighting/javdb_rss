@@ -676,3 +676,14 @@ func TestNilStoreDegradesInsteadOfPanicking(t *testing.T) {
 		t.Errorf("没有 store 时应当退化为纯函数选择，得到 %q", got)
 	}
 }
+
+// 新增契约（清单）的测试存根：这些假实现只关心别的方法，清单那一套
+// 一律返回空 —— 它们要的是「满足接口」，而不是「清单行为」。
+
+func (f *fakeSource) CollectedLists(context.Context) (catalog.ListCollection, error) {
+	return catalog.ListCollection{}, nil
+}
+func (f *fakeSource) List(context.Context, string, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}
+func (f *fakeSource) ListName(context.Context, string) (string, error) { return "", nil }

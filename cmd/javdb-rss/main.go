@@ -312,6 +312,36 @@ func (s *appapiSource) WantToWatch(ctx context.Context) (catalog.WantList, error
 	return out, err
 }
 
+func (s *appapiSource) CollectedLists(ctx context.Context) (catalog.ListCollection, error) {
+	var out catalog.ListCollection
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.CollectedLists(ctx)
+		return e
+	})
+	return out, err
+}
+
+func (s *appapiSource) List(ctx context.Context, id string, params url.Values) ([]catalog.Work, error) {
+	var out []catalog.Work
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.List(ctx, id, params)
+		return e
+	})
+	return out, err
+}
+
+func (s *appapiSource) ListName(ctx context.Context, id string) (string, error) {
+	var out string
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.ListName(ctx, id)
+		return e
+	})
+	return out, err
+}
+
 // withRelogin 发一次请求；若因**凭据失效**失败且配了账号密码，则重登一次并重试。
 //
 // 只对凭据类错误重试（appapi.IsAuthError）：

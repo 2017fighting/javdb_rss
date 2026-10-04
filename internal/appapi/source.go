@@ -118,7 +118,60 @@ func (c *Client) Code(ctx context.Context, code string) ([]catalog.Work, error) 
 // 不会透传给上游。这一点必须在文档里说清楚，
 // 否则用户设了 limit 却不生效会变成难以解释的行为。
 func (c *Client) Actress(ctx context.Context, id string, params url.Values) ([]catalog.Work, error) {
-	filterBy, err := buildEntityFilter(id, params)
+	return c.entityWorks(ctx, entityOf("a", id), params, entityNouns{
+		route: "女优页",
+		what:  "女优",
+		empty: "女优 id 为空",
+	})
+}
+
+// List 实现 catalog.Source：返回某份清单里的作品。
+//
+// 与 Actress 共用全部机制（透传参数、pages、逐页去重、并发补磁链），
+// 差别只在 filter_by 的实体字母与 zone。
+//
+// zone 写死 0 的理由见 catalog.Source.List 的注释：清单形态里没有 zone，
+// 而写错 zone 不会报错、只会静默给别的作品。
+func (c *Client) List(ctx context.Context, id string, params url.Values) ([]catalog.Work, error) {
+	return c.entityWorks(ctx, entityOf("l", id), params, entityNouns{
+		route: "清单 feed",
+		what:  "清单",
+		empty: "清单 id 为空",
+	})
+}
+
+// entityNouns 是一个实体的各处文案。
+//
+// 抽出来是因为错误文案必须点名**哪个路由、哪个实体**：
+// 「第二段的实体字母应当是 `a`」在清单路由上会把人指错方向，
+// 而这类文案是给正看着 URL 的人读的。
+type entityNouns struct {
+	route string // 路由名（「女优页」/「清单 feed」）
+	what  string // 实体名（「女优」/「清单」）
+	empty string // id 为空时的提示
+}
+
+// entity 是 filter_by 掩码里的实体描述：{zone}:{letter}:{id}。
+type entity struct {
+	zone   int
+	letter string
+	id     string
+}
+
+// entityOf 构造默认 zone=0 的实体。
+func entityOf(letter, id string) entity { return entity{zone: 0, letter: letter, id: id} }
+
+func (e entity) filter() string {
+	return fmt.Sprintf("%d:%s:%s", e.zone, e.letter, e.id)
+}
+
+// entityWorks 是女优订阅与清单订阅**共用**的取作品实现。
+//
+// 两份订阅在上游是同一个端点（`/api/v1/movies/tags`）+ 同一个复合掩码，
+// 只有实体字母不同。分开写两份会把「逐页去重」「短页即到底」「并发补磁链」
+// 这些真正需要一致的地方变成两份可以各自跑偏的代码。
+func (c *Client) entityWorks(ctx context.Context, e entity, params url.Values, n entityNouns) ([]catalog.Work, error) {
+	filterBy, err := buildFilter(e, params, n)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +185,7 @@ func (c *Client) Actress(ctx context.Context, id string, params url.Values) ([]c
 		if catalog.IsOwnParam(k) {
 			continue
 		}
-		// ⚠️ filter_by 必须排除。buildEntityFilter 已经校验并 trim 过它，
+		// ⚠️ filter_by 必须排除。buildFilter 已经校验并 trim 过它，
 		// 而这里再写一次会把**原始、未校验的值**盖回去 ——
 		// 校验就白做了（例如 " 0:a:EvkJ " 的空白会重新出现）。
 		if k == "filter_by" {
@@ -212,7 +265,19 @@ func pageCount(params url.Values) int {
 	return n
 }
 
-// buildEntityFilter 构造 `filter_by` 复合掩码。
+// buildEntityFilter 构造**女优页**的 `filter_by` 复合掩码。
+//
+// 保留这个签名是因为它被一批单测直接调用（它们验的是女优页的校验规则）；
+// 实现已经搬到通用的 buildFilter，清单订阅走同一个。
+func buildEntityFilter(actressID string, params url.Values) (string, error) {
+	return buildFilter(entityOf("a", actressID), params, entityNouns{
+		route: "女优页",
+		what:  "女优",
+		empty: "女优 id 为空",
+	})
+}
+
+// buildFilter 构造任意实体的 `filter_by` 复合掩码。
 //
 // 格式实测确认（2026-09-28）：
 //
@@ -222,29 +287,40 @@ func pageCount(params url.Values) int {
 // letter 是实体类型字母（actor=a series=s maker=m director=d code=c list=l）。
 //
 // 用户透传的参数里可以带 `filter_by` 覆盖默认值 —— 这正是「按照 App 里的参数来」
-// 的落点：我们提供一个能用的默认（该女优的全部作品），
+// 的落点：我们提供一个能用的默认（该实体的全部作品），
 // 用户想加条件（只看中文字幕、只看单体作品）就自己传。
-func buildEntityFilter(actressID string, params url.Values) (string, error) {
-	if strings.TrimSpace(actressID) == "" {
-		return "", fmt.Errorf("女优 id 为空")
+func buildFilter(e entity, params url.Values, n entityNouns) (string, error) {
+	if strings.TrimSpace(e.id) == "" {
+		return "", fmt.Errorf("%s", n.empty)
 	}
 	raw := strings.TrimSpace(params.Get("filter_by"))
 	if raw == "" {
-		return "0:a:" + actressID, nil
+		return e.filter(), nil
 	}
-	if err := validateMask(raw, actressID); err != nil {
+	if err := validateEntityMask(raw, e, n); err != nil {
 		return "", err
 	}
 	return raw, nil
 }
 
-// validateMask 拦住那些会让上游**静默返回错误内容**的 `filter_by`。
+// validateMask 拦住女优页上那些会让上游**静默返回错误内容**的 `filter_by`。
+//
+// 保留它是为了不清洗已有的单测调用点；规则本身在 validateEntityMask。
+func validateMask(mask, actressID string) error {
+	return validateEntityMask(mask, entityOf("a", actressID), entityNouns{
+		route: "女优页",
+		what:  "女优",
+		empty: "女优 id 为空",
+	})
+}
+
+// validateEntityMask 拦住那些会让上游**静默返回错误内容**的 `filter_by`。
 //
 // 上游对非法 `filter_by` 不报错、只忽略（实测 2026-09-30），因此本地不拦的后果是：
 // 用户以为加了条件，实际拿到的是**别的东西**，而且看不出来。两种真实形态：
 //
 //	缺骨架（如 "apmc"、"a"）  -> 上游当它无效，返回【全站最新作品】
-//	id 与 URL 不符           -> 返回【别人的作品】，而 feed 标题写着这个女优
+//	id 与 URL 不符           -> 返回【别人的作品】，而 feed 标题写着这个实体
 //
 // 两类共五项校验，每一项都对应上面两种灾难的一种具体入口：
 //
@@ -252,21 +328,21 @@ func buildEntityFilter(actressID string, params url.Values) (string, error) {
 //     这是第一版漏掉的一维：当时只看主属性段（第 4 段），于是 "apmc" 被切成一段、
 //     主属性为空，直接放行 —— 而 "apmc" 正是票里记录的那个陷阱。
 //  2. zone 必须是数字（区域号）。
-//  3. 实体字母必须是单个字符，且必须是 `a` —— 路由是女优页，
+//  3. 实体字母必须是单个字符，且必须是**当前路由的**那个。
 //     写成 `0:s:EvkJ` 是在要一个叫 EvkJ 的系列，几平总是笔误。
-//  4. id 必须与 URL 里的女优一致 —— 否则会静默展示别人的作品。
+//  4. id 必须与 URL 里的实体一致 —— 否则会静默展示别人的作品。
 //  5. 主属性必须是逗号分隔的单字母（如 `c,m`），不能拼在一起（如 `cm`）。
 //
 // 刻意**不**校验主属性字母本身是否在已知集合里：那会在这张私有契约新增
 // 一个字母时把一个本来能用的配置判死，而那种新增是我们无法预知的。
 // 上游对未知字母是忽略 —— 那个后果比误判死一个合法配置轻。
-func validateMask(mask, actressID string) error {
+func validateEntityMask(mask string, e entity, n entityNouns) error {
 	parts := strings.Split(mask, ":")
 
 	// 1. 骨架
 	if len(parts) < 3 {
 		return badMask(mask, "它不是复合掩码。`filter_by` 的格式是 "+
-			"{区域}:{实体字母}:{实体id}[:主属性::]，例如 0:a:EvkJ")
+			fmt.Sprintf("{区域}:{实体字母}:{实体id}[:主属性::]，例如 %s", e.filter()))
 	}
 	// 2. zone
 	if parts[0] == "" || strings.IndexFunc(parts[0], func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
@@ -276,20 +352,20 @@ func validateMask(mask, actressID string) error {
 	if utf8.RuneCountInString(parts[1]) != 1 {
 		return badMask(mask, "第二段应当是单个实体字母（a=女优 s=系列 m=片商 d=导演 c=番号 l=列表）")
 	}
-	if !strings.EqualFold(parts[1], "a") {
+	if !strings.EqualFold(parts[1], e.letter) {
 		return badMask(mask, fmt.Sprintf(
-			"第二段的实体字母是 %q，但这个路由是**女优页**，应当用 `a`。"+
-				"想订阅别的实体的作品，请用它自己的路由", parts[1]))
+			"第二段的实体字母是 %q，但这个路由是**%s**，应当用 `%s`。"+
+				"想订阅别的实体的作品，请用它自己的路由", parts[1], n.route, e.letter))
 	}
 	// 4. id
 	id := strings.TrimSpace(parts[2])
 	if id == "" {
 		return badMask(mask, "第三段的实体 id 为空")
 	}
-	if !strings.EqualFold(id, actressID) {
+	if !strings.EqualFold(id, e.id) {
 		return badMask(mask, fmt.Sprintf(
-			"第三段的实体 id 是 %q，但 URL 里的女优是 %q。"+
-				"不相同会让 feed 标题写着 %s 却展示 %s 的作品", id, actressID, actressID, id))
+			"第三段的实体 id 是 %q，但 URL 里的%s是 %q。"+
+				"不相同会让 feed 标题写着 %s 却展示 %s 的作品", id, n.what, e.id, e.id, id))
 	}
 	// 5. 主属性（可缺省）
 	if len(parts) > 3 {
@@ -299,8 +375,8 @@ func validateMask(mask, actressID string) error {
 			}
 			if utf8.RuneCountInString(seg) > 1 {
 				return badMask(mask, fmt.Sprintf(
-					"主属性 %q 应当是**单个字母**，多个用逗号分隔（如 0:a:%s:c,m::），"+
-						"而不是拼在一起", seg, actressID))
+					"主属性 %q 应当是**单个字母**，多个用逗号分隔（如 %s:c,m::），"+
+						"而不是拼在一起", seg, e.filter()))
 			}
 		}
 	}

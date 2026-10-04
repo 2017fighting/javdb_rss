@@ -443,3 +443,24 @@ func TestSaveTokenRejectsEmptyPath(t *testing.T) {
 		t.Error("空路径下不该写出 .tmp 文件")
 	}
 }
+
+// TestAllowsList 钉住清单白名单的语义。
+//
+// 与 AllowsCode 同一套规矩：白名单不存在 → 全放行（URL 本身就是订阅声明）；
+// 存在 → 只放行列出的。大小写与空白要宽容（Postel's Law：用户手抄 id 会带上空格）。
+func TestAllowsList(t *testing.T) {
+	open := &Config{}
+	if !open.AllowsList("k4EVE4") {
+		t.Error("没有 feeds 段时应当全放行")
+	}
+
+	c := &Config{Feeds: &FeedsConfig{Lists: []string{"k4EVE4", " R9r77 "}}}
+	for _, id := range []string{"k4EVE4", "k4eve4", "R9r77"} {
+		if !c.AllowsList(id) {
+			t.Errorf("%q 在白名单里，应当放行", id)
+		}
+	}
+	if c.AllowsList("other") {
+		t.Error("白名单外的清单不该放行")
+	}
+}

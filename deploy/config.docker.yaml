@@ -63,6 +63,9 @@ app_api:
 # feeds:
 #   codes:
 #     - KV-328
+#   # 清单订阅的白名单，只有 id（透传参数写在 URL 上）。
+#   lists:
+#     - k4EVE4
 #   actresses:
 #     - id: EvkJ
 #       params:

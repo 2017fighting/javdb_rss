@@ -107,6 +107,16 @@ type AppAPIConfig struct {
 type FeedsConfig struct {
 	Codes     []string     `yaml:"codes"`
 	Actresses []ActressSub `yaml:"actresses"`
+	// Lists 是清单订阅的白名单（只列 id）。
+	//
+	// 它刻意比 Actresses **简单**（没有 params / since）：清单 feed 的
+	// 透传参数直接写在 URL 上就够（`sort_by`/`order_by`/`pages` 都会被转发），
+	// 而女优那套 params 是当初为了把「App 里的筛选」固化进配置才加的。
+	// 两者不同是刻意的 —— 把没验证过的对称性加上去，只会多一处要同步维护的东西。
+	//
+	// zone **不在配置里**：清单的 filter_by 实测固定为 `0:l:{id}`（写错 zone
+	// 不会报错，只会静默给别的作品），因此不把一个危险的旋钮交给配置。
+	Lists []string `yaml:"lists"`
 }
 
 // ActressSub 是一条女优订阅。
@@ -202,6 +212,22 @@ func (c *Config) AllowsCode(code string) bool {
 	}
 	for _, x := range c.Feeds.Codes {
 		if strings.EqualFold(strings.TrimSpace(x), code) {
+			return true
+		}
+	}
+	return false
+}
+
+// AllowsList 报告白名单是否放行某份清单。
+//
+// 与 AllowsCode 同一套语义：白名单不存在时全部放行（URL 本身就是订阅声明），
+// 存在但没列出时返回 false，由路由层变成 404。
+func (c *Config) AllowsList(id string) bool {
+	if c.Feeds == nil {
+		return true
+	}
+	for _, x := range c.Feeds.Lists {
+		if strings.EqualFold(strings.TrimSpace(x), strings.TrimSpace(id)) {
 			return true
 		}
 	}

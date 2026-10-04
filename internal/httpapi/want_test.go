@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -258,3 +259,14 @@ func TestWantFeedRejectsNonGET(t *testing.T) {
 		t.Errorf("POST = %d, want 405", rec.Code)
 	}
 }
+
+// 新增契约（清单）的测试存根：这些假实现只关心别的方法，清单那一套
+// 一律返回空 —— 它们要的是「满足接口」，而不是「清单行为」。
+
+func (wantAuthErrSource) CollectedLists(context.Context) (catalog.ListCollection, error) {
+	return catalog.ListCollection{}, nil
+}
+func (wantAuthErrSource) List(context.Context, string, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}
+func (wantAuthErrSource) ListName(context.Context, string) (string, error) { return "", nil }
