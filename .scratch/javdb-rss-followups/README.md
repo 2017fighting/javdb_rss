@@ -119,6 +119,10 @@ qBittorrent 多下一份文件，而没有任何告警。
   **已知限制**：窗口判断是必要条件检测，上游分页重叠时会被去重压低而漏报（只漏报、不假报）；
   要精确需让 `catalog.Source` 的三个取作品方法像 `Collection` 那样带回
   `Truncated`/`PagesFetched` —— 跨 5 个实现 × 3 个方法的接口改动，未做。
+  **落地后修订（同日）**：两条 since 告警改为**每个订阅只报一次**（它们是配置的性质，
+  每轮都真），并补上 `订阅=<path>`；窗口条件从 `>= since` 收紧为 `> since`。
+  依据是实测：`/rss/tags/0.xml?since=<今天>&pages=1` 给 50 部，`pages=2` 给 100 部
+  **且全部满足 since** —— 这是真警报，所以是保留告警而不是降级。
 
 ## Not yet specified
 

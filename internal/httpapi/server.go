@@ -37,6 +37,11 @@ type Server struct {
 	upstream *health.Tracker
 	// now 可在测试里替换，让 pubDate 与 lastBuildDate 可确定。
 	now func() time.Time
+	// sinceWarned 是 since 两条「配置性质」告警的去重表（见 warnOnce）。
+	//
+	// 零值即可用，因此不必在 New 里初始化。它只在进程内、重启即丢 ——
+	// 丢了的代价只是再提醒一次，而本服务的领域状态仍然只有 pin 那一个例外。
+	sinceWarned warnOnce
 }
 
 // New 构造 Server。log 为 nil 时使用 slog.Default()。
@@ -634,7 +639,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 过滤必须放在取数之后：要先看到作品与它们的发行日期。
-	works = s.applySince(sinceBound, works, values)
+	works = s.applySince(sinceBound, works, r, values)
 
 	s.renderItems(w, r, feed.Meta{
 		Title:       <-nameCh,
@@ -965,7 +970,7 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 过滤必须放在取数之后：要先看到作品与它们的发行日期。
-	works = s.applySince(sinceBound, works, values)
+	works = s.applySince(sinceBound, works, r, values)
 
 	s.renderItems(w, r, feed.Meta{
 		Title:       <-nameCh,

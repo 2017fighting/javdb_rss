@@ -3,8 +3,11 @@ package httpapi
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
@@ -82,8 +85,79 @@ func isStrictDate(s string) bool {
 //
 // 之所以收成一个方法而不是在三处各写一行：那三行里包含「窗口是否取满」这个判断，
 // 而任何一条路由漏掉它的表现都是**静默地少一条告警** —— 看不见的那种不一致。
-func (s *Server) applySince(bound sinceBound, works []catalog.Work, values url.Values) []catalog.Work {
-	return bound.filter(s.log, works, catalog.WindowFull(len(works), values))
+func (s *Server) applySince(bound sinceBound, works []catalog.Work, r *http.Request, values url.Values) []catalog.Work {
+	if bound == "" {
+		return works
+	}
+	return bound.filter(s.log, works, sinceEnv{
+		// path 就是订阅身份：告警必须能指到具体是哪个 feed（去重之后尤其重要）。
+		where: r.URL.Path,
+		// pages 归一化成**生效值**（缺省 1、越界夹住），而不是原文：
+		// 日志里写 pages="" 读起来像「没分页」，而键也该把 `?pages=1` 与
+		// 不传 pages 视作同一份配置 —— 它们确实是。
+		pages:  strconv.Itoa(catalog.PageCount(values)),
+		full:   catalog.WindowFull(len(works), values),
+		warned: &s.sinceWarned,
+	})
+}
+
+// sinceEnv 是一次 since 过滤的「环境」（与作品本身无关的那几样）。
+//
+// 收成一个结构体而不是给 filter 挂四个参数：它们总是同时出现，散成参数就是
+// 一处数据泥团，而且调用点会长到看不出谁是谁。
+//
+// full 由调用方给（见 catalog.WindowFull）：它回答「不能证明上游已经到底」，
+// 而不是「一定还有更旧的」—— 后者只有 appapi 知道，且我们不猜。
+type sinceEnv struct {
+	where  string // 订阅身份（URL path）
+	pages  string // 生效的页数（归一化过的），用于文案与去重键
+	full   bool   // 取数窗是否取满
+	warned *warnOnce
+}
+
+// warnOnce 让「对某个订阅会**永远为真**的告警」每个进程只报一次。
+//
+// 为什么需要它：下面两条告警报的是**配置的性质**，不是故障 —— 同一个 URL 每次轮询
+// 都会命中。qBittorrent 默认 15 分钟一次，于是真话变成 96 条/天，
+// 而噪声的代价很具体：真出问题时没人再看 WARN。
+//
+// 实测撑住了这个判断（2026-10-05，真实上游）：`/rss/tags/0.xml?since=<今天>&pages=1`
+// 只给 50 部，而 `pages=2` 给 100 部且**全部满足 since** —— 也就是 pages=1
+// 真的少给了 50 部符合条件的作品。因此这里的结论是「保留告警、杀掉重复」，
+// 而不是降级或加一个「明显错配」阈值（那会把这个真警报一起闷掉）。
+//
+// 它是**可丢弃的观测状态**（丢了只意味着重启后再提醒一次），不是领域状态 ——
+// 本服务的领域状态仍然只有 pin 那一个例外。与 health.Tracker 的
+// 「重复失败不重复刷屏」是同一类东西。
+type warnOnce struct {
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+// warnOnceMaxKeys 是去重表的键数上限，防止它无限长。
+//
+// 键空间是 path × since × pages，而 path 与 since 都写在一个用户可以自己拼的
+// URL 里 —— 也就是可枚举的。上限取 1024：一个实例常见的订阅数是个位数到百位级
+// （`/collected` 实测 144 位女优，全订也就 144 个 path），1024 是很宽的余量。
+const warnOnceMaxKeys = 1024
+
+// first 报告这个键是不是第一次出现。
+func (w *warnOnce) first(key string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.seen == nil {
+		w.seen = make(map[string]bool)
+	}
+	if w.seen[key] {
+		return false
+	}
+	if len(w.seen) >= warnOnceMaxKeys {
+		// 清空而不是逐个淘汰：它只影响「还会不会再提醒一次」，
+		// 最坏的结果是多提醒几次 —— 比让一个可枚举的键空间无限长要好。
+		w.seen = make(map[string]bool)
+	}
+	w.seen[key] = true
+	return true
 }
 
 // filter 只保留 release_date 不早于 since 的作品，并把「发生了什么」如实说清。
@@ -101,14 +175,16 @@ func (s *Server) applySince(bound sinceBound, works []catalog.Work, values url.V
 //
 //  1. **闭区间** `>=`。订阅链接生成器的追新模式发的就是 `since=<今天>`，
 //     开区间会把当天发行的作品挡在外面 —— 「只追新」反而丢掉最新的那批。
+//
 //  2. **形状不对或为空的一律保留**，且与「丢弃」分开计数：上游字段一旦变格式，
 //     「按错误规则丢弃数据」比「多给几条」危险得多，后者用户看得见。
+//
 //  3. **只报异常**：正常路径一条 Debug。qBittorrent 每 15 分钟轮询一次，
 //     每条都 WARN 只会把日志淹掉，真出问题时反而没人看。
 //
-// windowFull 由调用方给（见 catalog.WindowFull）：它是「不能证明上游已经到底」，
-// 而不是「一定还有更旧的」—— 后者只有 appapi 知道，且我们不猜。
-func (b sinceBound) filter(log *slog.Logger, works []catalog.Work, windowFull bool) []catalog.Work {
+//  4. **两条告警每条订阅只报一次**（见 warnOnce）：它们说的是配置的性质，
+//     每轮都真、因而每轮都重复。
+func (b sinceBound) filter(log *slog.Logger, works []catalog.Work, env sinceEnv) []catalog.Work {
 	if b == "" {
 		return works
 	}
@@ -156,7 +232,7 @@ func (b sinceBound) filter(log *slog.Logger, works []catalog.Work, windowFull bo
 	// feed.Build 会跳过（上游常见状态，不是错误）。实测第 1 页 50 部里有 33 部
 	// 没有磁链候选 —— 只报作品数会让这句数字骗人。
 	log.Debug("since 过滤",
-		"since", since, "比较字段", "release_date",
+		"订阅", env.where, "since", since, "比较字段", "release_date",
 		"取到", len(works), "有磁链候选", withMagnet,
 		"保留", len(out), "保留且能成条目", keptMagnet, "丢弃", dropped,
 		"缺发行日期", noDate, "发行日期形状不对", badShape)
@@ -166,20 +242,25 @@ func (b sinceBound) filter(log *slog.Logger, works []catalog.Work, windowFull bo
 	//
 	// 与「上游本就没返回作品」分开：后者不是因为 since，说成「被 since 筛掉了」
 	// 会把排查指错方向（那种情况下 Debug 行里的「取到=0」才是线索）。
-	if len(out) == 0 && len(works) > 0 {
+	if len(out) == 0 && len(works) > 0 && env.warned.first(env.where+"|empty|"+since) {
 		log.Warn("since 把本轮作品一条都没剩",
-			"since", since, "取到", len(works), "丢弃", dropped,
+			"订阅", env.where, "since", since, "取到", len(works), "丢弃", dropped,
 			"缺发行日期", noDate, "发行日期形状不对", badShape,
-			"提示", "若这不是你要的结果，检查 since 是否写成了未来的日期")
+			"提示", "若这不是你要的结果，检查 since 是否写成了未来的日期（同一条只报一次）")
 	}
 
-	// 异常二：取数窗取满了，而最旧一条仍不早于 since —— 下界不完整。
+	// 异常二：取数窗取满了，而最旧一条仍**晚于** since —— 下界不完整。
+	//
 	// 「取满了」与「上游到底了」是两回事，这里只报前者能证明的那个结论。
-	if windowFull && (oldest == "" || oldest >= since) {
+	// 边界是严格大于：最旧一条正好等于 since 时，未取到的那些作品按倒序只会更旧，
+	// 因此它们都不可能满足 since —— 下界其实是完整的，不该报警。
+	if env.full && (oldest == "" || oldest > since) &&
+		env.warned.first(env.where+"|window|"+since+"|"+env.pages) {
 		log.Warn("取数窗没走到 since：这次拿到的下界不完整",
-			"since", since, "取到", len(works), "最旧可比较的发行日期", oldest,
+			"订阅", env.where, "since", since, "取到", len(works),
+			"最旧可比较的发行日期", oldest, "pages", env.pages,
 			"提示", "本轮只取了 pages 指定的页数，更旧的作品里可能还有符合 since 的；"+
-				"要更深的历史请加大 pages（上限 20）")
+				"要更深的历史请加大 pages（上限 20）。同一条只报一次")
 	}
 	return out
 }

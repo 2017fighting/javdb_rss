@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -153,7 +154,7 @@ func sinceWorks() []catalog.Work {
 // TestSinceFilterKeepsBadDates 钉住「按错误规则丢弃数据比多给几条危险得多」。
 func TestSinceFilterKeepsBadDates(t *testing.T) {
 	log, _ := captureLog(t)
-	got := mustSince(t, "2026-01-01").filter(log, sinceWorks(), false)
+	got := mustSince(t, "2026-01-01").filter(log, sinceWorks(), newSinceEnv(false))
 
 	kept := make(map[string]bool, len(got))
 	for _, w := range got {
@@ -176,7 +177,7 @@ func TestSinceFilterKeepsBadDates(t *testing.T) {
 func TestSinceFilterWarnsOnlyOnAnomalies(t *testing.T) {
 	t.Run("正常路径：只有 Debug，没有 WARN", func(t *testing.T) {
 		log, buf := captureLog(t)
-		mustSince(t, "2026-01-01").filter(log, sinceWorks(), false)
+		mustSince(t, "2026-01-01").filter(log, sinceWorks(), newSinceEnv(false))
 
 		out := buf.String()
 		if strings.Contains(out, "level=WARN") {
@@ -196,7 +197,7 @@ func TestSinceFilterWarnsOnlyOnAnomalies(t *testing.T) {
 
 	t.Run("坏日期分开计数", func(t *testing.T) {
 		log, buf := captureLog(t)
-		mustSince(t, "2026-01-01").filter(log, sinceWorks(), false)
+		mustSince(t, "2026-01-01").filter(log, sinceWorks(), newSinceEnv(false))
 
 		out := buf.String()
 		if !strings.Contains(out, "缺发行日期=1") {
@@ -217,7 +218,7 @@ func TestSinceFilterWarnsOnlyOnAnomalies(t *testing.T) {
 				Magnets: []catalog.Magnet{{Infohash: "b"}}},
 		}
 		// since 在未来：合法输入，但结果一定是空 feed —— 手滑多打一位年份的典型症状。
-		mustSince(t, "2030-01-01").filter(log, allOld, false)
+		mustSince(t, "2030-01-01").filter(log, allOld, newSinceEnv(false))
 
 		out := buf.String()
 		if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "2030-01-01") {
@@ -231,7 +232,7 @@ func TestSinceFilterWarnsOnlyOnAnomalies(t *testing.T) {
 	t.Run("取数窗没走到 since：WARN", func(t *testing.T) {
 		log, buf := captureLog(t)
 		// 窗口取满（50 部）而最旧一部仍晚于 since → 不能证明更旧的作品里没有符合条件的。
-		mustSince(t, "2020-01-01").filter(log, sinceWorks(), true)
+		mustSince(t, "2020-01-01").filter(log, sinceWorks(), newSinceEnv(true))
 
 		out := buf.String()
 		if !strings.Contains(out, "取数窗") || !strings.Contains(out, "pages") {
@@ -242,7 +243,7 @@ func TestSinceFilterWarnsOnlyOnAnomalies(t *testing.T) {
 	t.Run("窗口取满但确实走过了 since：不 WARN", func(t *testing.T) {
 		log, buf := captureLog(t)
 		// 最旧一部（2025-12-31）早于 since（2026-01-01）→ 已经越过下界，下界是完整的。
-		mustSince(t, "2026-01-01").filter(log, sinceWorks(), true)
+		mustSince(t, "2026-01-01").filter(log, sinceWorks(), newSinceEnv(true))
 
 		if out := buf.String(); strings.Contains(out, "取数窗") {
 			t.Errorf("已经越过 since 就不该提窗口：\n%s", out)
@@ -251,7 +252,7 @@ func TestSinceFilterWarnsOnlyOnAnomalies(t *testing.T) {
 
 	t.Run("空取数：不该喊「筛空」", func(t *testing.T) {
 		log, buf := captureLog(t)
-		mustSince(t, "2026-01-01").filter(log, nil, false)
+		mustSince(t, "2026-01-01").filter(log, nil, newSinceEnv(false))
 
 		if out := buf.String(); strings.Contains(out, "一条都没剩") {
 			t.Errorf("本轮根本没取到作品，不能说「被 since 筛掉了」：\n%s", out)
@@ -260,7 +261,7 @@ func TestSinceFilterWarnsOnlyOnAnomalies(t *testing.T) {
 
 	t.Run("那条「尚未定稿」的 WARN 必须消失", func(t *testing.T) {
 		log, buf := captureLog(t)
-		mustSince(t, "2030-01-01").filter(log, sinceWorks(), true)
+		mustSince(t, "2030-01-01").filter(log, sinceWorks(), newSinceEnv(true))
 
 		if out := buf.String(); strings.Contains(out, "尚未定稿") {
 			t.Errorf("定稿后不该再出现「尚未定稿」：\n%s", out)
@@ -273,7 +274,7 @@ func TestSinceFilterDisabledIsNoop(t *testing.T) {
 	log, buf := captureLog(t)
 	works := sinceWorks()
 
-	got := mustSince(t, "").filter(log, works, true)
+	got := mustSince(t, "").filter(log, works, newSinceEnv(true))
 	if len(got) != len(works) {
 		t.Errorf("不过滤时应当原样返回 %d 部，得到 %d 部", len(works), len(got))
 	}
@@ -288,10 +289,113 @@ func TestSinceFilterDoesNotMutateInput(t *testing.T) {
 	works := sinceWorks()
 	first := works[0].Number
 
-	_ = mustSince(t, "2026-01-01").filter(log, works, false)
+	_ = mustSince(t, "2026-01-01").filter(log, works, newSinceEnv(false))
 
 	if works[0].Number != first || len(works) != 7 {
 		t.Errorf("入参被就地改写了：len=%d first=%s", len(works), works[0].Number)
+	}
+}
+
+// newSinceEnv 构造一次过滤的环境。
+//
+// 每个用例拿一个**新的空去重表**：告警现在「每个订阅只报一次」，
+// 用例之间共用一张表会让后来的用例被前面的把告警吃掉。
+func newSinceEnv(full bool) sinceEnv {
+	return sinceEnv{
+		where:  "/rss/actress/EvkJ.xml",
+		pages:  "1",
+		full:   full,
+		warned: &warnOnce{},
+	}
+}
+
+// TestSinceAnomaliesWarnOncePerSubscription 钉住「配置性质的真话不重复刷屏」。
+//
+// 这两条告警对某个订阅会**永远为真**（它们是配置的性质，不是故障），
+// 而 qBittorrent 每 15 分钟轮询一次 —— 不去重的话一天 96 条，
+// 而噪声的代价很具体：真出问题时没人再看 WARN。
+//
+// 另一个方向同样重要：**不同的订阅必须各自提醒**，
+// 否则运维看到一条告警却不知道是哪个 feed 有问题。
+func TestSinceAnomaliesWarnOncePerSubscription(t *testing.T) {
+	t.Run("窗口告警", func(t *testing.T) {
+		log, buf := captureLog(t)
+		env := newSinceEnv(true)
+
+		// 同一订阅 + 同一 since + 同一 pages，轮询三次。
+		for i := 0; i < 3; i++ {
+			mustSince(t, "2020-01-01").filter(log, sinceWorks(), env)
+		}
+		// 另一个订阅命中同一件事。
+		other := env
+		other.where = "/rss/tags/0.xml"
+		mustSince(t, "2020-01-01").filter(log, sinceWorks(), other)
+
+		if got := strings.Count(buf.String(), "取数窗没走到 since"); got != 2 {
+			t.Errorf("窗口告警出现 %d 次，want 2（每个订阅一次）:\n%s", got, buf.String())
+		}
+		if !strings.Contains(buf.String(), "/rss/tags/0.xml") {
+			t.Error("告警要能指到具体是哪个订阅")
+		}
+	})
+
+	t.Run("筛空告警", func(t *testing.T) {
+		log, buf := captureLog(t)
+		env := newSinceEnv(false)
+		allOld := []catalog.Work{
+			{Number: "A-1", ReleaseDate: "2025-01-01",
+				Magnets: []catalog.Magnet{{Infohash: "a"}}},
+		}
+
+		for i := 0; i < 3; i++ {
+			mustSince(t, "2030-01-01").filter(log, allOld, env)
+		}
+
+		if got := strings.Count(buf.String(), "一条都没剩"); got != 1 {
+			t.Errorf("筛空告警出现 %d 次，want 1:\n%s", got, buf.String())
+		}
+	})
+
+	t.Run("换 since 要重新提醒", func(t *testing.T) {
+		log, buf := captureLog(t)
+		env := newSinceEnv(true)
+
+		mustSince(t, "2020-01-01").filter(log, sinceWorks(), env)
+		mustSince(t, "2019-01-01").filter(log, sinceWorks(), env)
+
+		if got := strings.Count(buf.String(), "取数窗没走到 since"); got != 2 {
+			t.Errorf("换了 since 就是另一件事实，应当再提醒一次；出现 %d 次:\n%s", got, buf.String())
+		}
+	})
+
+	t.Run("去重表有上限", func(t *testing.T) {
+		w := &warnOnce{}
+		for i := 0; i < warnOnceMaxKeys+10; i++ {
+			if !w.first(fmt.Sprintf("k%d", i)) {
+				t.Fatalf("第 %d 个新键应当是第一次", i)
+			}
+		}
+		if len(w.seen) > warnOnceMaxKeys {
+			t.Errorf("去重表长到 %d，应当有界（%d）", len(w.seen), warnOnceMaxKeys)
+		}
+	})
+}
+
+// TestSinceWindowWarnBoundaryIsStrict 钉住窗口告警的边界。
+//
+// 最旧一条正好**等于** since 时，未取到的作品按倒序只会更旧 ——
+// 它们都不可能满足 since，下界其实完整，不该报警。
+func TestSinceWindowWarnBoundaryIsStrict(t *testing.T) {
+	log, buf := captureLog(t)
+	works := []catalog.Work{
+		{Number: "EXACT", ReleaseDate: "2026-01-01",
+			Magnets: []catalog.Magnet{{Infohash: "exact"}}},
+	}
+
+	mustSince(t, "2026-01-01").filter(log, works, newSinceEnv(true))
+
+	if strings.Contains(buf.String(), "取数窗") {
+		t.Errorf("最旧一条正好等于 since 时下界是完整的，不该报窗口：\n%s", buf.String())
 	}
 }
 
@@ -322,7 +426,7 @@ func TestSinceComparesReleaseDateNotMagnetCreatedAt(t *testing.T) {
 			Magnets: []catalog.Magnet{{Infohash: "m-compilation", CreatedAt: "2020-09-22"}}},
 	}
 
-	got := mustSince(t, "2026-01-01").filter(log, works, false)
+	got := mustSince(t, "2026-01-01").filter(log, works, newSinceEnv(false))
 
 	kept := make(map[string]bool, len(got))
 	for _, w := range got {

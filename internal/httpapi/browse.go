@@ -173,7 +173,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 过滤必须放在取数之后：要先看到作品与它们的发行日期。
-	works = s.applySince(sinceBound, works, values)
+	works = s.applySince(sinceBound, works, r, values)
 
 	s.renderItems(w, r, feed.Meta{
 		Title:       browseFeedTitle(zone, sel),
