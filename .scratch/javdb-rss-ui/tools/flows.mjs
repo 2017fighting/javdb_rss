@@ -126,12 +126,12 @@ check(
 check(
   "年份是原生 select（26 个选项不铺成 chip）",
   await page.$$eval("#year-select option", (n) => n.slice(0, 3).map((e) => e.textContent.trim()).join(",")),
-  "不限,2026 年起,2025 年起",
+  "不限,2026 年,2025 年",
 );
 check(
   "月份按日历升序，且标签写明只有下界",
   await page.$$eval("#month-group [data-time]", (n) => n.slice(0, 4).map((e) => e.textContent.trim()).join(",")),
-  "不限,1 月起,2 月起,3 月起",
+  "不限,1 月,2 月,3 月",
 );
 await page.selectOption("#year-select", "2024");
 check(
@@ -140,6 +140,16 @@ check(
   "http://127.0.0.1:8080/rss/actress/EvkJ.xml?year=2024",
 );
 check("年份提示说明了让位", (await page.textContent("#year-hint")).includes("让位"), true);
+check(
+  "年份选项不带「起」—— 它是精确的一年，不是下界",
+  (await page.$$eval("#year-select option", (n) => n.map((e) => e.textContent).join(","))).includes("起"),
+  false,
+);
+check(
+  "月份选项不带「起」",
+  (await page.$$eval("#month-group [data-time]", (n) => n.map((e) => e.textContent).join(","))).includes("起"),
+  false,
+);
 await page.selectOption("#year-select", "");
 
 await page.click('[data-flag="c"]'); // 中文字幕
@@ -197,10 +207,11 @@ check("全站模式下时长可用（0 个禁用）", await page.$$eval("#durati
 await page.click('[data-flag="c"]');
 await page.click("[data-clear-tags]");
 await page.click('[data-source="actress"]');
+// 年份**留着**（两种模式都支持），月份与时长清掉（女优订阅没有它们）。
 check(
-  "切回女优模式后时间维度不残留",
+  "切回女优模式：年份留着，月份/时长清掉",
   await page.textContent("#tag-url"),
-  `http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=${today}`,
+  "http://127.0.0.1:8080/rss/actress/EvkJ.xml?year=2020",
 );
 check(
   "女优模式下时长禁用（App 面板里也没有它）",

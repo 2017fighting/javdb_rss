@@ -272,8 +272,9 @@ const DURATION_LABEL = {
     if (ids.length) qs.set("tags", ids.join(","));
     if (state.year) qs.set("year", state.year);
     if (state.month) qs.set("month", state.month);
-    // 时长必须与年份一起给（实测单独给会被上游静默忽略）。
-    if (state.duration && state.year) qs.set("duration", state.duration);
+    // 时长必须与年份一起给（实测单独给会被上游静默忽略），
+    // 而那一排 chip 在没有年份时本来就是禁用的 —— 这里不再做静默丢弃。
+    if (state.duration) qs.set("duration", state.duration);
     return `${feedBase()}/rss/tags/${state.zone}.xml?${qs.toString()}`;
   }
 
@@ -615,9 +616,10 @@ const DURATION_LABEL = {
     el.yearSelect.innerHTML =
       '<option value="">不限</option>' +
       (YEAR_GROUP?.tags ?? [])
-        // 「起」不是装饰：服务只有 since=（下界），没有 until=。把语义写进选项，
-        // 比只写在下面那行提示里可靠 —— 提示可以不被读，选项一定会被读到。
-        .map((t) => `<option value="${t.id}">${t.name} 年起</option>`)
+        // 注释：选项文字**不带「起」**。这里曾经写「2021 年起」，因为当时以为
+        // 服务只有 since=（下界）。抓包验出年份是掩码第 5 段之后，它是**精确的一年**
+        // （::2021 → 19 部，全部落在 2021 内），所以写「起」是错的。
+        .map((t) => `<option value="${t.id}">${t.name} 年</option>`)
         .join("");
     el.yearSelect.value = state.year ?? "";
     // 月份反过来升序：月份是周期量，按日历排才符合直觉（Jakob's Law）。
@@ -626,7 +628,7 @@ const DURATION_LABEL = {
       "month",
       site ? state.month : null,
       (MONTH_GROUP?.tags ?? [])
-        .map((t) => ({ value: t.id, label: `${t.name} 月起` }))
+        .map((t) => ({ value: t.id, label: `${t.name} 月` }))
         .sort((a, b) => Number(a.value) - Number(b.value))
         .map((o) => ({ ...o, extra: site ? "" : 'disabled aria-disabled="true" title="女优订阅不支持月份"' })),
     );
@@ -637,9 +639,11 @@ const DURATION_LABEL = {
       (DURATION_GROUP?.tags ?? []).map((t) => ({
         value: t.id,
         label: DURATION_LABEL[t.id] ?? t.name,
-        extra: site
-          ? ""
-          : 'disabled aria-disabled="true" title="女优订阅不支持时长"',
+        extra: !site
+          ? 'disabled aria-disabled="true" title="女优订阅不支持时长"'
+          : state.year
+            ? ""
+            : 'disabled aria-disabled="true" title="先选年份：时长必须与年份一起给"',
       })),
     );
     el.durationHint.textContent = site
@@ -1123,12 +1127,18 @@ const DURATION_LABEL = {
     renderTagUrl();
   }
 
-  /** 时间维度的可用性随模式变，切换模式时要整块重渲染。 */
+  /**
+   * 切换模式时收拾时间维度。
+   *
+   * **年份要留着**：它在两种模式里都是真筛选（女优走掩码第 5 段、全站走第 5 槽），
+   * 用户切过去切回来不该丢掉刚选的年份。
+   *
+   * **月份与时长只在全站模式有**，所以切回女优模式时必须清掉 ——
+   * 留着就会出现「界面上选着、链接里没有」这种最坏的不一致
+   * （它们在那条 URL 上根本不会出现）。
+   */
   function refreshTime() {
     if (!timeControlsEnabled()) {
-      // 切回女优模式时清掉这三个 —— 它们在那条 URL 上根本不出现，
-      // 留着会让「界面上选着、链接里没有」这种最坏的不一致出现。
-      state.year = null;
       state.month = null;
       state.duration = null;
     }
