@@ -34,6 +34,13 @@ config.local.yml
 .env.*
 
 # 构建产物与调试文件
+#
+# 根目录的这个二进制是 `make build` 的产物。**必须带开头的 `/`** ——
+# 不带会误伤任何同名目录。
+# 它的来历值得记一笔：`ci.yml` 曾经是先 `make build` 再 `docker build`，
+# 于是整个工作树（含这 8 MB 二进制）都被当成构建上下文拷了一遍。
+# 现在两头都堵上了：这里排掉它，ci.yml 里容器构建也排在 `make build` 之前。
+/javdb-rss
 bin/
 dist/
 *.log

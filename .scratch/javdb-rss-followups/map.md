@@ -26,9 +26,14 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 10 | `since` 的语义定稿 | ~~无~~ 已 resolved（2026-10-05，grilling with user） |
 | 11 | 按定稿语义落地 `since` | ~~10~~ 已 resolved（2026-10-05） |
 | 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | ~~无~~ 已 resolved（2026-10-05） |
+| 13 | tag 推送即发布镜像到 GHCR | 无 |
+| 14 | 统一 action 版本：ci.yml 的 v4/v5 → v7 | 无（13 把它从「观察」升级成「不一致」） |
+| 15 | 三份部署配置改为拉已发布的镜像 | 13 |
 
 （**01–12 全部 resolved，见下 Decisions so far**；
-07 为机械验收项，已随 push 关闭。**本 effort 已全部结票。**）
+07 为机械验收项，已随 push 关闭。**13–15 是 2026-10-04 新开的**：
+13 是发版链路本身，14/15 是它落地时按「记录层不骗人」拆出来的两件
+（一件本仓库里两套 action 版本并存，一件是镜像有了但部署还没用上）。）
 
 10–12 的来源与前九张不同：不是 code-review 的「未修」，而是清账时发现的
 **一笔孤儿欠账** —— `since` 的比较语义在初次交付的票 09 里被标成已解决，
@@ -153,11 +158,16 @@ qBittorrent 多下一份文件，而没有任何告警。
 
 <!-- 看得出方向、但还捏不成 ticket 的东西 -->
 
-- **CI 的三条维护性观察**（来自 ticket 07 首跑，见
-  [`javdb-rss/notes/ci.md`](../javdb-rss/notes/ci.md)）：`.dockerignore` 漏排根目录
-  `javdb-rss` 导致 8 MB 构建上下文（不影响最终镜像）；`checkout@v4` / `setup-go@v5`
-  的 Node 20 弃用警告（最新是 v7，跨大版本）；`ubuntu-latest` 2026-11 迁 Ubuntu 26.04。
-  三条都不阻塞任何东西，因此不开票。
+- **CI 的两条维护性观察**（来自 ticket 07 首跑，见
+  [`javdb-rss/notes/ci.md`](../javdb-rss/notes/ci.md)）：`ubuntu-latest` 2026-11 迁
+  Ubuntu 26.04；`checkout`/`setup-go` 的 Node 20 弃用警告。
+  原先并列的第三条（`.dockerignore` 漏排根目录 `javdb-rss` 导致 8 MB 构建上下文）
+  **已由票 13 修掉**：加了忽略行，并把 `ci.yml` 的容器构建排到 `make build` 之前 ——
+  两头都堵上，以后不再依赖「记得那行忽略规则」。
+  弃用警告那条在票 13 之后不再是「已知遗留」而是**同一仓库里两套 action 版本并存**
+  （`release.yml` 已是 v7），因此收进票 14。
+  Ubuntu 26.04 迁移仍只是时间问题：本项目的 CI 只依赖 Go 与 Docker，
+  两者在 26.04 上都有，到那天复核一次即可。
 - **ticket 03 复勘暴露的两条口径未知**（都记在 notes 里，未开票）：
   `tags[].videos_count` 与 `filter_by_tags` 实得条数口径不同（80 个标签里 15 个
   对不上，两个方向都有）；`i`/`v` 的含义是从字段反推的，没有上游文案佐证。

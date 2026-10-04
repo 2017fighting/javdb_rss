@@ -8,7 +8,13 @@ ARG GO_VERSION=1.27
 # ---------------------------------------------------------------------------
 # 构建阶段
 # ---------------------------------------------------------------------------
-FROM golang:${GO_VERSION}-alpine AS build
+# ⚠️ 构建阶段钉在**构建机自己的架构**上（`$BUILDPLATFORM`），不是目标架构。
+#
+# 多平台发布时若不钉，Docker 会为目标架构（如 linux/arm64）也开一个 QEMU 执行环境：
+# 一个 `GOARCH` 就能出结果的编译，走模拟器只是纯浪费（慢一个数量级，而且模拟器
+# 出错时要靠猜）。钉住之后 build 阶段原生跑，只有下面那个 alpine 阶段才需要
+# 目标架构 —— 多平台时由 buildx 处理，本地 `docker build` 时两者本来就相同。
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
 
 WORKDIR /src
 
@@ -18,10 +24,19 @@ RUN go mod download
 
 COPY . .
 
+# 目标平台由 buildx 自动填入（多平台构建时逐个平台填一遍），本地 `docker build`
+# 时等于本机架构。
+#
+# 刻意**不给默认值**：写 `ARG TARGETARCH=amd64` 会让「忘了传」变成静默地建出
+# 一个架构不对的镜像；留空只退回 Go 自己的默认（本机架构），后者是安全的失败方式。
+ARG TARGETOS
+ARG TARGETARCH
+
 # VERSION 由构建时传入，会被写进 /version 端点。
 # 不传时是 "dev" —— 宁可显示 dev，也不要显示一个编造的版本号。
+# 发布时传的是 tag 本身（`v1.2.3`），与本地 `make build` 的 `git describe` 同形。
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
         -trimpath \
         -ldflags "-s -w -X github.com/2017fighting/javdb_rss/internal/httpapi.Version=${VERSION}" \
         -o /out/javdb-rss \

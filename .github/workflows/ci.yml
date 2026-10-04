@@ -30,10 +30,14 @@ jobs:
       - name: test (race)
         run: make race
 
-      - name: build
-        run: make build
-
-      # 容器构建单独跑：它慢，且能抓到 .dockerignore / Dockerfile 的问题
+      # 容器构建排在 `make build` **之前**，而不是之后：`make build` 会在仓库
+      # 根目录留下一个 javdb-rss 二进制，而 `docker build .` 把整个工作树当上下文。
+      # `.dockerignore` 已经排掉了它，顺序再排一道是为了让这个浪费在结构上
+      # 不可能发生（而不是靠记得那行）。
+      # 这一步还能抓到 .dockerignore / Dockerfile 的问题
       # （例如忘了 ca-certificates 会导致运行时连不上上游）。
       - name: docker build
         run: make docker-build
+
+      - name: build
+        run: make build

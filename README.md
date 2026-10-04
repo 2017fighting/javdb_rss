@@ -205,6 +205,37 @@ pin（见上）是**唯一需要可写磁盘**的东西。三套部署分别把�
 隔离由容器/集群提供，「暴露出去」由端口映射或 Service 类型决定 ——
 请把它当成一个需要动手的决定。
 
+### 发版与拉取镜像
+
+发布不需要在本地做任何事 —— 推一个 tag 就会自动构建并推送镜像：
+
+```bash
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin v1.0.0
+```
+
+坐标是 `ghcr.io/2017fighting/javdb-rss`，平台 `linux/amd64` 与 `linux/arm64`。
+每次发布推**两个 tag**：`1.0.0`（全量精度，唯一该被人钉住的形状）与 `latest`
+（**仅正式版** —— `v1.0.0-rc1` 这类预发布只出 `1.0.0-rc1`，不动 `latest`）。
+浮动的小版本 tag（`1.0`/`1`）**不推**：在单用户场景里它唯一的作用是让
+`docker compose pull` 静默换版本，而升级应该是一个有意识的动作。
+
+发布链路会先跑一遍与 CI 相同的 `make fmt-check / vet / race` 才构建 —— tag 推送
+**不会**触发 `ci.yml`，所以「这个提交绿过」是在发布这一步重新确立的，不是假设。
+两个平台是否真的都推上去了，写在那次 Actions run 的摘要里。
+
+```bash
+docker pull ghcr.io/2017fighting/javdb-rss:1.0.0
+```
+
+⚠️ 镜像里的 `/version` 报告的是 **tag 原文**（`v1.0.0`），而镜像 tag 是去 v 的
+`1.0.0`。两种形状是有意的：前者要与本地 `make build`（走 `git describe`）的说法
+逐字对得上，后者是 docker 的惯例。理由与取舍见
+[`docs/adr/0001-release-images-to-ghcr.md`](docs/adr/0001-release-images-to-ghcr.md)。
+
+`deploy/docker-compose.yml` 与 `deploy/k8s.yaml` 目前仍按本地构建/本地镜像名来写；
+想用现成镜像，把 compose 里的 `build:` 段换成 `image:` 即可（文件里已留注释）。
+
 ## 订阅地址
 
 qBittorrent → 添加 RSS 订阅，填入完整 URL：

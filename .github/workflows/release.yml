@@ -1,0 +1,150 @@
+name: Release
+
+# 目标：把「推一个 vX.Y.Z tag」变成「一个已发布的镜像」，而不是变成一个假设。
+#
+# 这里**不是**单纯的 build+push，理由有一条具体的：tag 推送不会触发 ci.yml
+# （它只挂在 main 的 push 与 PR 上）。若这里只构建与推送，一个从未绿过的提交
+# 也能被发成镜像，而且发出去之后没有便宜的办法收回。
+#
+# 为什么点名 make 目标而不是抄 ci.yml 的步骤：这些目标的定义在 Makefile 里
+# （唯一真源），workflow 只负责点名。本仓库吃过一次「同一个检查写两处」的亏
+# （见 README 部署段那条 device_uuid），没必要再来一次。
+#
+# ⚠️ 本文件里所有 `|` 块（metadata-action 的 tags、build-push-action 的 build-args）
+# 都是**逐行解析的数据**，不是 YAML 注释区。要写解释请写在块外面 —— 块里的
+# `#` 会作为一行数据喂给解析器。
+
+on:
+  push:
+    tags:
+      # 严格 semver。不用 `v*.*.*` —— 那个 pattern 会放过 `vfoo.bar.baz`。
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      # 预发布同样出镜像（tag 就是 v1.2.3-rc1），但**不打 latest**：
+      # latest 只指正式版，否则一次候选发布就会悄悄改掉所有人的 latest。
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+# 同一个 tag 重推是**有意的恢复路径**（发坏了就 `git tag -f` 再推一次），
+# 因此不取消进行中的那一次：排队重跑比中途杀掉更安全。
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read # checkout
+  packages: write # 推 ghcr
+
+env:
+  # 镜像名与仓库名不同（仓库是 javdb_rss，镜像是 javdb-rss）—— 沿用
+  # deploy/docker-compose.yml 注释里已经写下的那个名字，别处无需再解释一遍。
+  # owner 必须全小写，这是 ghcr 的硬要求（本仓库的 owner 本来就是小写）。
+  IMAGE: ghcr.io/${{ github.repository_owner }}/javdb-rss
+
+jobs:
+  # tag 上的提交本身先过与 CI 同一批检查。这一步只有几秒，换的是
+  # 「镜像里的提交一定绿过」这句话可以当真。
+  verify:
+    name: 提交先过 CI 同款检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      # ci.yml 里同样的理由：本服务有并发拉取与 singleflight，
+      # 竞态只会在负载下出现，而那时已经在生产里了。
+      - name: test (race)
+        run: make race
+
+  publish:
+    name: 构建并推送镜像
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # QEMU 是**必需**的，虽然 Go 那一步是原生交叉编译：最终那个 alpine 阶段
+      # （apk add / adduser / mkdir）跑在目标架构里，arm64 那份 manifest
+      # 在 amd64 runner 上就得靠模拟器。
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # tags 块的含义（写在块外面，见文件头那条警告）：
+      #   1. type=semver,pattern={{version}} —— 全量精度 1.2.3，
+      #      唯一该被人钉住的形状。
+      #   2. type=raw,value=latest —— 只对正式版生效（预发布里带 `-`）。
+      #      浮动的小版本 tag（1.2 / 1）刻意不推：在单用户场景里它们唯一的
+      #      作用是让 `docker compose pull` 静默换版本。要升级请改 tag。
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=javdb-rss
+            org.opencontainers.image.description=JavDB 订阅 → qBittorrent 可订阅的 RSS
+
+      # build-args 只有一行，含义：传 tag 本身（v1.2.3）而不是去掉 v 的形状 ——
+      # 本地 `make build` 走 `git describe --tags`，在同一个 tag 上它也给 v1.2.3。
+      # 两种形状会让「镜像里的版本」与「本地构建的版本」无法逐字比对。
+      #
+      # provenance: false —— 它会给镜像额外加一个 attestation manifest，
+      # 老一些的 docker/containerd 拉到会看到 multi-manifest 的怪象，
+      # 而这里没有任何下游会去验签名。可拉取性 > 供应链仪式。
+      - id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 推送之后唯一还值得做的一件事：把「两个平台真的都在」写进日志。
+      # 它拦不住坏推送（已经推完了），但它是事后唯一能复核的凭据。
+      - name: 把镜像坐标与实际平台写进 run 摘要
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "## 已发布 \`${IMAGE}:${VERSION}\`"
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo "digest ${DIGEST}"
+            echo '```'
+            echo
+            echo "推送后的 manifest 里实际列出的平台："
+            echo
+            echo '```'
+            docker buildx imagetools inspect "${IMAGE}:${VERSION}" | sed -n '/Manifests:/,$p'
+            echo '```'
+            echo
+            echo "拉取：\`docker pull ${IMAGE}:${VERSION}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
