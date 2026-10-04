@@ -174,6 +174,12 @@ type collectedEntry struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	VideosCount int    `json:"videos_count"`
+	// Gender 是上游给的性别：0 = 女优，1 = 男优。
+	//
+	// 刻意**不带 omitempty**：0 是女优，而女优是这个端点的绝大多数 ——
+	// 用 omitempty 会让最常见的那个取值从 JSON 里消失，消费方只能靠
+	// 「键不在就当成 0」来猜，而那正是本服务反复要避免的隐式约定。
+	Gender int `json:"gender"`
 	// Feed 是可以直接拿去用的 feed 路径。
 	//
 	// 给出它而不是让用户自己拼：拼错了只会得到 404，而用户会以为服务坏了。
@@ -228,6 +234,7 @@ func (s *Server) handleCollected(w http.ResponseWriter, r *http.Request) {
 			ID:          a.ID,
 			Name:        a.Name,
 			VideosCount: a.VideosCount,
+			Gender:      a.Gender,
 			Feed:        "/rss/actress/" + url.PathEscape(a.ID) + ".xml",
 		})
 	}

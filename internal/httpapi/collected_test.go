@@ -424,3 +424,37 @@ type panicNameSource struct{ *stub.Source }
 func (panicNameSource) ActressName(context.Context, string) (string, error) {
 	panic("故意在取名时炸")
 }
+
+// TestCollectedExposesGender 确认 /collected 把 gender 交给前端。
+//
+// 带不带 omitempty 是有意的：0 是女优（绝大多数），用 omitempty 会让最常见的
+// 取值从 JSON 里消失，消费方只能靠「键不在就当成 0」来猜。
+func TestCollectedExposesGender(t *testing.T) {
+	src := &recordingSource{collected: &catalog.Collection{
+		Actresses: []catalog.Actress{
+			{ID: "D2EdJ", Name: "花守夏歩", VideosCount: 179, Gender: catalog.GenderFemale},
+			{ID: "PpQ0", Name: "森林原人", VideosCount: 12, Gender: catalog.GenderMale},
+		},
+	}}
+	h := newTestServer(t, "provider: stub\n", src)
+
+	rec := do(t, h, "/collected")
+	var raw struct {
+		Actresses []map[string]any `json:"actresses"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Actresses) != 2 {
+		t.Fatalf("得到 %d 条", len(raw.Actresses))
+	}
+	for i, want := range []float64{catalog.GenderFemale, catalog.GenderMale} {
+		got, ok := raw.Actresses[i]["gender"]
+		if !ok {
+			t.Fatalf("第 %d 条的 JSON 里没有 gender 键 —— 前端分不出男女", i+1)
+		}
+		if got != want {
+			t.Errorf("第 %d 条 gender = %v, want %v", i+1, got, want)
+		}
+	}
+}

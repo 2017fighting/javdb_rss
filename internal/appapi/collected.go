@@ -29,6 +29,11 @@ type collectedActress struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	VideosCount int    `json:"videos_count"`
+	// Gender 是上游给的性别：0 = 女优，1 = 男优（实测，见 catalog.Actress.Gender）。
+	//
+	// 它必须透出去：收藏里真的有男优（该账号 144 位里 6 位），而用户要的是
+	// 「只看女优」—— 前端没有这个字段就只能把男女混在一起列。
+	Gender int `json:"gender"`
 }
 
 // collectedEnvelope 是 `/api/v1/users/collected_actors` 的负载形态。
@@ -70,6 +75,7 @@ func (c *Client) CollectedActresses(ctx context.Context) (catalog.Collection, er
 			ID:          strings.TrimSpace(a.ID),
 			Name:        strings.TrimSpace(a.Name),
 			VideosCount: a.VideosCount,
+			Gender:      a.Gender,
 		})
 	}
 	return catalog.Collection{

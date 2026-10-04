@@ -328,11 +328,16 @@ curl http://127.0.0.1:8080/collected
 ```json
 {
   "actresses": [
-    {"id": "EvkJ", "name": "河北彩花", "videos_count": 229,
+    {"id": "EvkJ", "name": "河北彩花", "videos_count": 229, "gender": 0,
      "feed": "/rss/actress/EvkJ.xml"}
   ]
 }
 ```
+
+`gender` 是**上游直接给的**：`0` = 女优，`1` = 男优。它不是可有可无的字段 ——
+收藏里**确实有男优**（实测该账号 144 位里 6 位：森林原人、小沢とおる…），
+而要看的是「只看女优」。它**不带 `omitempty`**：`0` 是绝大多数，用 `omitempty`
+会让最常见的取值从 JSON 里消失，消费方只能靠「键不在就当成 0」来猜。
 
 `GET /collected` 返回收藏女优清单：**它是一个发现端点，不是 feed。** 本服务不会因为你收藏了谁就自动为它建订阅 ——
 它只把清单交给你，由你决定把哪些 id 填进 `feeds.actresses` 或直接拿去填 URL。

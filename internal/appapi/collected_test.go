@@ -411,3 +411,37 @@ func TestCollectedActressesPassesPageParam(t *testing.T) {
 		t.Error("公共参数丢了")
 	}
 }
+
+// TestCollectedActressesCarriesGender 钉住 gender 的透出。
+//
+// 这不是可选字段：收藏里**真的有男优**（实测该账号 144 位里 6 位），
+// 而页面要的是「只看女优」。服务以前把它丢掉了，前端就只能把男女混着列。
+func TestCollectedActressesCarriesGender(t *testing.T) {
+	srv := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") != "1" {
+			_, _ = w.Write([]byte(emptyCollectedPage()))
+			return
+		}
+		// 用**真实形状**：上游每项都带 gender。
+		_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"actors":[
+			{"id":"D2EdJ","name":"花守夏歩","videos_count":179,"gender":0},
+			{"id":"PpQ0","name":"森林原人","videos_count":12,"gender":1}
+		]}}`))
+	})
+	srv.Token = "tok"
+
+	got, err := srv.CollectedActresses(context.Background())
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	if len(got.Actresses) != 2 {
+		t.Fatalf("得到 %d 位，want 2", len(got.Actresses))
+	}
+	if got.Actresses[0].Gender != catalog.GenderFemale {
+		t.Errorf("花守夏歩 的 gender = %d，want %d（女优）", got.Actresses[0].Gender, catalog.GenderFemale)
+	}
+	if got.Actresses[1].Gender != catalog.GenderMale {
+		t.Errorf("森林原人 的 gender = %d，want %d（男优）—— 0/1 反了的话整个筛选就是反的",
+			got.Actresses[1].Gender, catalog.GenderMale)
+	}
+}
