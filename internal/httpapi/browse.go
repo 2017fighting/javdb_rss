@@ -150,7 +150,17 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 	since := strings.TrimSpace(query.Get("since"))
 
-	works, err := s.src.Browse(r.Context(), zone, sel, toValues(params))
+	// 全站路由的 year / month 是掩码里的**正当维度**（女优页只有 year），
+	// 而 since 是本地的下界 —— 两者同时给必然是空 feed。
+	// 这条闸此前只有女优路由有，而订阅链接生成器的文案已经写着「服务那侧也会判 400」。
+	sinceBound, err := parseSince(since, sel.Year, sel.Month)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	values := toValues(params)
+	works, err := s.src.Browse(r.Context(), zone, sel, values)
 	if err != nil {
 		if errors.Is(err, catalog.ErrBadRequest) {
 			s.log.WarnContext(r.Context(), "全站订阅参数不合法", "zone", zone, "err", err)
@@ -162,9 +172,8 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if since != "" {
-		works = filterSince(s.log, works, since)
-	}
+	// 过滤必须放在取数之后：要先看到作品与它们的发行日期。
+	works = s.applySince(sinceBound, works, values)
 
 	s.renderItems(w, r, feed.Meta{
 		Title:       browseFeedTitle(zone, sel),

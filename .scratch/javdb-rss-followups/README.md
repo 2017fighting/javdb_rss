@@ -24,12 +24,11 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 08 | 「钉住」磁链的存储与失效 | 无（04 决策新开） |
 | 09 | pin 的切换语义 | 无（04 决策新开） |
 | 10 | `since` 的语义定稿 | ~~无~~ 已 resolved（2026-10-05，grilling with user） |
-| 11 | 按定稿语义落地 `since` | 10 |
+| 11 | 按定稿语义落地 `since` | ~~10~~ 已 resolved（2026-10-05） |
 | 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | 无 |
 
-维护性工作本来没有天然顺序。11 原本要等 10 的结论，**10 已 resolved（2026-10-05）**，
-因此 11 现在就可以开工。（01/02/03/04/05/07/08/09/10 已 resolved，见下 Decisions so far；
-07 为机械验收项，已随 push 关闭。**开着的还有 06、11、12。**）
+（01/02/03/04/05/07/08/09/10/11 已 resolved，见下 Decisions so far；
+07 为机械验收项，已随 push 关闭。**开着的还有 06、12。**）
 
 10–12 的来源与前九张不同：不是 code-review 的「未修」，而是清账时发现的
 **一笔孤儿欠账** —— `since` 的比较语义在初次交付的票 09 里被标成已解决，
@@ -108,6 +107,18 @@ qBittorrent 多下一份文件，而没有任何告警。
   ISO 时间戳静默丢弃当天发行的作品 —— 因此 `since` 非严格 `YYYY-MM-DD` 一律判 400。
   `pubDate` 不动（如实转述上游，可能早于 `since`）；`since` 只在取到的页里生效，
   窗口没走完只 WARN（RSS 没有机读位，也不自动翻页）。证据见 [`notes/api-recon.md` §10.4.2](../javdb-rss/notes/api-recon.md)。
+- [按定稿语义落地 `since`](issues/11-since-landing.md)
+  — **一个实现文件**（`internal/httpapi/since.go`：`parseSince` 校验 + `sinceBound.filter` 过滤与日志），
+  三条路由（女优 / 清单 / 全站）共用，校验放在取数**之前**。
+  `pages` 的两个跨层事实（每页上限 50、夹到 20 页）从 appapi 私有实现上提到 `catalog`，
+  新增 `catalog.WindowFull`：`pages` 现在有**两个消费者**（appapi 决定翻几页、httpapi 判断窗口是否取满），
+  两处各写一份迟早会漂，而漂的表现是窗口判断静默算错。
+  真实验收：`?since=2026-01-01` → 11 条（Debug：取到 50 / 有磁链候选 17 / 保留 38 / **保留且能成条目 11**）；
+  `?since=2025-01-01` 触发「取数窗没走到 `since`」；`?since=2030-01-01` 触发「一条都没剩」且**不**报窗口；
+  坏形状与 `year`/`month`+`since` 一律 400。「保留 38 而 feed 只有 11 条」就是拆计数器的实证理由。
+  **已知限制**：窗口判断是必要条件检测，上游分页重叠时会被去重压低而漏报（只漏报、不假报）；
+  要精确需让 `catalog.Source` 的三个取作品方法像 `Collection` 那样带回
+  `Truncated`/`PagesFetched` —— 跨 5 个实现 × 3 个方法的接口改动，未做。
 
 ## Not yet specified
 

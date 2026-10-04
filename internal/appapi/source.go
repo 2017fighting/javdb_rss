@@ -71,7 +71,7 @@ func (c *Client) resolveExact(ctx context.Context, code string) ([]movieSlim, er
 	// 表现为一个莫名其妙的「没有精确匹配」。
 	var env movieListEnvelope
 	if err := c.GetJSON(ctx, "/api/v2/search",
-		url.Values{"q": {code}, "limit": {strconv.Itoa(limitPerPage)}}, &env); err != nil {
+		url.Values{"q": {code}, "limit": {strconv.Itoa(catalog.UpstreamPageLimit)}}, &env); err != nil {
 		return nil, err
 	}
 
@@ -192,7 +192,7 @@ func (c *Client) worksByMask(ctx context.Context, filterBy string, params url.Va
 		return nil, err
 	}
 
-	pages := pageCount(params)
+	pages := catalog.PageCount(params)
 
 	base := url.Values{"filter_by": {filterBy}}
 	for k, vs := range params {
@@ -215,7 +215,7 @@ func (c *Client) worksByMask(ctx context.Context, filterBy string, params url.Va
 	if base.Get("order_by") == "" {
 		base.Set("order_by", "desc")
 	}
-	base.Set("limit", strconv.Itoa(limitPerPage)) // 实测服务端上限就是 50
+	base.Set("limit", strconv.Itoa(catalog.UpstreamPageLimit)) // 实测服务端上限就是 50
 
 	// 逐页拉取。页数很少（默认 1），而且翻页是为了「从零建库」这类少见场景，
 	// 因此这里不做跨页并行 —— 保持上游压力可预测，也避免同一订阅被并发拉扯。
@@ -250,7 +250,7 @@ func (c *Client) worksByMask(ctx context.Context, filterBy string, params url.Va
 		all = append(all, works...)
 
 		// 这一页没满，说明已经到底，不再白打请求。
-		if len(env.Movies) < limitPerPage {
+		if len(env.Movies) < catalog.UpstreamPageLimit {
 			break
 		}
 	}
@@ -275,30 +275,6 @@ func validateFilterByTags(csv string) error {
 			catalog.ErrBadRequest, n, catalog.MaxTags, catalog.MaxTags+1, catalog.MaxTags)
 	}
 	return nil
-}
-
-// limitPerPage 是每页条数。实测服务端上限就是 50（传 100/200/500 都只给 50）。
-const limitPerPage = 50
-
-// maxPages 是 `?pages=N` 的上限，防止一个 URL 把上游拖死。
-//
-// 一个女优约 230 部作品，5 页就够建全库；给到 20 页是很宽松的余量。
-const maxPages = 20
-
-// pageCount 从透传参数里读页数，并夹到合理范围。
-func pageCount(params url.Values) int {
-	raw := strings.TrimSpace(params.Get("pages"))
-	if raw == "" {
-		return 1
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 {
-		return 1
-	}
-	if n > maxPages {
-		return maxPages
-	}
-	return n
 }
 
 // buildEntityFilter 构造**女优页**的 `filter_by` 复合掩码。

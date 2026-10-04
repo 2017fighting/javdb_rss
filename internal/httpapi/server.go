@@ -595,6 +595,16 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 
 	since := strings.TrimSpace(query.Get("since"))
 
+	// since 在本层消费：先校验再取数，写错的 URL 不该花掉一次上游请求。
+	//
+	// 清单路由没有「与上游范围参数互斥」这一条：`year` 在更下层（掩码构造）
+	// 就被拒绝了，而 month 不属于清单形态、压根不会透传。
+	sinceBound, err := parseSince(since, "", "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// 取作品与取名字互不依赖，并行发起。理由与女优那条相同：
 	// qBittorrent 会周期轮询这条 feed，串行就白多等一个往返。
 	nameCh := make(chan string, 1)
@@ -610,7 +620,8 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		nameCh <- s.listTitle(r.Context(), id)
 	}()
 
-	works, err := s.src.List(r.Context(), id, toValues(params))
+	values := toValues(params)
+	works, err := s.src.List(r.Context(), id, values)
 	if err != nil {
 		if errors.Is(err, catalog.ErrBadRequest) {
 			s.log.WarnContext(r.Context(), "清单订阅参数不合法", "id", id, "err", err)
@@ -622,9 +633,8 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if since != "" {
-		works = filterSince(s.log, works, since)
-	}
+	// 过滤必须放在取数之后：要先看到作品与它们的发行日期。
+	works = s.applySince(sinceBound, works, values)
 
 	s.renderItems(w, r, feed.Meta{
 		Title:       <-nameCh,
@@ -906,12 +916,11 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 
 	// year（上游筛选：整个年份）与 since（本服务本地过滤：「这个日期起」）
 	// 说的是同一件事，同时给的结果必然是空 feed —— 而「选了年份反而是空的」
-	// 会让人以为是功能坏了。在两个都看得到的那一层判成用户写错。
-	if y := strings.TrimSpace(sel.Get("year")); y != "" && since != "" {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf(
-			"year=%s 与 since=%s 不能同时给：since 是本服务的本地过滤（「这个日期起」），"+
-				"year 是上游筛选（整个年份），两个一起发的结果一定是空 feed。"+
-				"想要某一年就用 year，想要「从某天起」就用 since", y, since))
+	// 会让人以为是功能坏了。女优路由只认 year 这一个上游范围参数
+	// （month 不是女优页的维度），全站路由认 year/month，两条走同一个 parseSince。
+	sinceBound, err := parseSince(since, sel.Get("year"), "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -940,7 +949,8 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 		nameCh <- s.actressTitle(r.Context(), id)
 	}()
 
-	works, err := s.src.Actress(r.Context(), id, toValues(params))
+	values := toValues(params)
+	works, err := s.src.Actress(r.Context(), id, values)
 	if err != nil {
 		// 用户参数写错（400）与上游出错（502）必须分开：
 		// 前者重试无用，后者重试有用。
@@ -954,9 +964,8 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if since != "" {
-		works = filterSince(s.log, works, since)
-	}
+	// 过滤必须放在取数之后：要先看到作品与它们的发行日期。
+	works = s.applySince(sinceBound, works, values)
 
 	s.renderItems(w, r, feed.Meta{
 		Title:       <-nameCh,
@@ -987,10 +996,14 @@ func (s *Server) actressTitle(ctx context.Context, id string) string {
 // 而那个数字必须写进 channel 标题 —— 也就是必须在 meta 之前就算出来。
 // 在这里再 build 一次的话，同一道判据就有了两个执行点，而它们必须永远一致。
 //
-// feed 是**请求时现算**的。这不是最终形态 —— ticket 09 会决定要不要在
-// catalog.Source 外面包一层缓存或后台刷新。之所以现在不提前决定，
-// 是因为成本量级还没量出来；而选择「现算 + Source 作为唯一端口」的好处是，
-// 将来加缓存只需要包一层装饰器，这里一行都不用改。
+// feed 是**请求时现算**的，且已定稿：**不做缓存也不做后台刷新**。
+// 量出来的成本大头在我们自己串行发 N+1（上游只需 ~218ms），因此改成
+// 并行拉磁链（默认并发 8）+ singleflight 合并并发相同请求就完了 ——
+// 缓存会引入「陈旧数据」这个新概念，而它换不来多少（qBittorrent 的轮询间隔
+// 远大于任何合理 TTL）。决策与实测见 .scratch/javdb-rss/issues/09-cost-cache-throttle.md。
+//
+// 选「现算 + catalog.Source 作为唯一端口」的好处是：真到了要加缓存那天，
+// 只需在 Source 外面包一层装饰器（dedupe / pin 就是这么包的），这里一行不用改。
 func (s *Server) renderItems(w http.ResponseWriter, r *http.Request, meta feed.Meta, items []feed.Item) {
 
 	// 曾经这里有一段「上游已知损坏时把警告写进 channel 描述」，已删除：
@@ -1033,45 +1046,6 @@ func pathParam(path, prefix string) (string, bool) {
 		return "", false
 	}
 	return rest, true
-}
-
-// filterSince 只保留 release_date 不早于 since 的作品。
-//
-// 语义是**临时的**：ticket 09 尚未决定「只追新」应当拿发行日期还是上架时间比较。
-// 这里按发行日期实现，因为用户的原话是「我已经有这个人的所有作品了，
-// 只需要追新就行了」——在有全量旧作的前提下，发行日期正是「新」的含义。
-//
-// 两条刻意的取舍：
-//
-//  1. 日期格式按 YYYY-MM-DD 做字典序比较，不引入时间解析。
-//  2. **解析不了的作品一律保留**。因为线上字段格式一旦变化，
-//     「按错误规则丢弃数据」比「多给几条」危险得多 —— 后者用户看得见，
-//     前者会让 feed 静默变空。
-func filterSince(log *slog.Logger, works []catalog.Work, since string) []catalog.Work {
-	since = strings.TrimSpace(since)
-	if since == "" {
-		return works
-	}
-	out := make([]catalog.Work, 0, len(works))
-	dropped, unparsed := 0, 0
-	for _, w := range works {
-		d := strings.TrimSpace(w.ReleaseDate)
-		if d == "" {
-			unparsed++
-			out = append(out, w)
-			continue
-		}
-		if d >= since {
-			out = append(out, w)
-			continue
-		}
-		dropped++
-	}
-	log.Warn("since 过滤已启用，但其语义尚未定稿",
-		"since", since, "比较字段", "release_date",
-		"保留", len(out), "丢弃", dropped, "缺发行日期而保留", unparsed,
-		"见", "ticket 09")
-	return out
 }
 
 // writeUpstreamError 把上游错误映射成合适的 HTTP 状态。

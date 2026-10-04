@@ -484,9 +484,9 @@ func TestResolveExactPassesLimit(t *testing.T) {
 	if _, err := c.resolveExact(context.Background(), "KV-328"); err != nil {
 		t.Fatal(err)
 	}
-	if got.Get("limit") != strconv.Itoa(limitPerPage) {
+	if got.Get("limit") != strconv.Itoa(catalog.UpstreamPageLimit) {
 		t.Errorf("limit = %q，应当显式要满上限 %d —— 否则精确匹配可能被挤出前 10 条",
-			got.Get("limit"), limitPerPage)
+			got.Get("limit"), catalog.UpstreamPageLimit)
 	}
 }
 

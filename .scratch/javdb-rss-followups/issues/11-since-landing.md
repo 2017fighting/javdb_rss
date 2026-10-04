@@ -4,13 +4,59 @@
 
 **Blocked by:** [10 — `since` 的语义定稿](10-since-semantics.md)
 
-**Status:** ready-for-agent
+**Status:** resolved（2026-10-05；落地与真实验收见文末）
 
-- [ ] `since` 必须是严格 `YYYY-MM-DD`，否则 400。现在 `since=2026-1-1` 会静默丢掉 1–9 月、`since=hello` 会静默只剩 1/6、ISO 时间戳会静默丢弃当天发行的作品 —— 三条路由共用一份校验
-- [ ] `year`（女优、全站）或 `month`（全站）与 `since` 同时给 → 400，三条路由规则一致（女优已有；清单靠自己的 `year` 拒绝间接覆盖）
-- [ ] `release_date` 为空或形状不对 → **保留**，并**分开**计数（与「丢弃」不是一回事）
-- [ ] 日志：删掉「语义尚未定稿」那条 WARN；正常路径一条 **Debug**（作品 N / 能成 item M / 保留 K / 丢弃 D / 坏数据 E）；「筛空」（含 `since` 在未来）与「取数窗没走到 `since`」各一条 **WARN**
-- [ ] 表驱动单测：闭区间边界日、四种坏形状的 `since` 各判断为 400、坏 `release_date` 保留、两条 WARN 各被触发一次
-- [ ] 文案与文档：`grep -rn "尚未定稿"` 与 `grep -rn "TODO(ticket-09)"` 在代码与 live 文档里归零（`javdb-rss/issues/` 下的历史票面是**记录**，不改）；`config.yaml` / `config.example.yaml` / `notes/actress-params.md` / `README.md` 与实现一致
-- [ ] 三件事写进 notes 与 README：`since` 比 `release_date` 闭区间（`>=` 是因为订阅链接生成器发 `since=<今天>`，开区间会把当天发行的挡在外面）、`pubDate` 可能早于 `since`（如实转述上游，刻意不改）、`since` 只在取到的页里生效（要更深的历史用 `pages`）
-- [ ] 留一句给后人的注释：为什么是这个比较字段 —— 理由进代码，不只进票面
+- [x] `since` 必须是严格 `YYYY-MM-DD`，否则 400（`parseSince`；三条路由共用一份校验，且在**取数之前**判 —— 写错的 URL 不花上游请求）
+- [x] `year`（女优、全站）或 `month`（全站）与 `since` 同时给 → 400（女优原有那条改成走同一个 `parseSince`；全站补上；清单的 `year` 仍在掩码层就被拒绝）
+- [x] `release_date` 为空或形状不对 → **保留**，并在 Debug 行里**分开**计数（`缺发行日期` / `发行日期形状不对`）
+- [x] 日志：删掉「语义尚未定稿」那条 WARN；正常路径一条 **Debug**（取到 / 有磁链候选 / 保留 / 保留且能成条目 / 丢弃 / 缺发行日期 / 发行日期形状不对）；「筛空」与「取数窗没走到 `since`」各一条 **WARN**
+- [x] 表驱动单测：闭区间边界日、12 种 `since` 形态、三条路由 × 4 种坏形状各判 400、坏 `release_date` 保留、两条 WARN 各被触发一次
+- [x] 文案与文档：`grep -rn "尚未定稿"` 与 `grep -rn "TODO(ticket-09)"` 在代码与 live 文档里归零（只剩票面记录）；`config.yaml` / `config.example.yaml` / `notes/actress-params.md` / `README.md` 与实现一致
+- [x] 三件事写进 notes 与 README：闭区间及其理由、`pubDate` 可能早于 `since`、`since` 只在取到的页里生效
+- [x] 留一句给后人的注释：为什么比发行日期（`since.go` 的 `filter` / `catalog.Work.ReleaseDate` / `config.ActressSub.Since` 三处）
+
+## 落地（2026-10-05）
+
+**唯一实现：`internal/httpapi/since.go`** —— `parseSince`（校验 + 归一化）+ `sinceBound.filter`
+（过滤 + 日志 + 两条告警），三条路由（女优 / 清单 / 全站）共用。校验放在取数**之前**。
+
+**两个跨层事实搬到了 `catalog`**（`paging.go`）：`UpstreamPageLimit` / `MaxPages` / `PageCount`
+原本是 appapi 的私有实现。搬家的理由不是「更整洁」，而是 `pages` 现在有**两个消费者**
+（appapi 拿它决定翻几页，httpapi 拿它判断取数窗是否取满）—— 两处各写一份，
+「夹到上限」这类规则迟早会漂，而漂的表现是窗口判断静默算错。
+新增 `catalog.WindowFull`（取数窗是否取满）。
+
+**真实端到端**（真实上游 + 真实 `config.yaml`，2026-10-05）：
+
+| 请求 | 结果 |
+|---|---|
+| `?since=2026-01-01` | 200，11 条。Debug：取到 50 / 有磁链候选 17 / 保留 38 / **保留且能成条目 11** / 丢弃 12 |
+| `?since=2025-01-01` | 200，17 条 + 「取数窗没走到 `since`」WARN（窗口取满 50，最旧可比较日期 2025-10-14） |
+| `?since=2030-01-01` | 200，0 条 + 「一条都没剩」WARN，且**不**报窗口（那次下界其实走到底了） |
+| `?since=2026-1-1` / ISO 时间戳 / `hello` / `2026-13-45` | 400（三条路由都拦） |
+| 全站 `year=` 或 `month=` 与 `since` 同时给 | 400（新补的闸；文案里点名冲突参数） |
+
+⭐ 「保留 38 而 feed 只有 11 条」正是拆两个计数器的理由：只报作品数的话，
+这句数字在骗看日志的人（实测第 1 页 50 部里有 33 部没有磁链候选）。
+
+**测试**：`internal/httpapi/since_test.go`（形态 12 例、互斥 7 例、过滤与日志 8 例、
+三条路由 × 4 种坏形状）、`internal/catalog/paging_test.go`。`go test -race ./...` 全绿。
+
+**两轴复核后补的钉子**（评审提的，都已补）：
+
+- 决策 1 的**否定面**：磁链的 `created_at` 不能把发行日期旧的作品救回来
+  （`TestSinceComparesReleaseDateNotMagnetCreatedAt` 两个方向都钉：发行日期旧 + 磁链新 → 丢；
+  发行日期新 + 磁链旧（合集再版）→ 留）。原样本里没有 `Magnet.CreatedAt`，
+  因此「顺手改成比磁链时间」这个很合理的回归原本能静静溜过去。
+- 「校验在取数之前」原本只是注释里的断言，现在被钉住：`recordingSource.worksCalls`
+  断言 400 的那几次没有向数据源取过作品（合法请求恰好取一次）。
+- 三条路由的收尾原本是逐行复制的三行，现收进 `Server.applySince`；
+  `toValues(params)` 不再每请求转两遍。
+- `parseSince` 不再每请求造一个 `map[string]string` 来装 year/month，改成显式参数。
+
+**未做（诚实标注）**：真正的截断信号。现在的窗口判断是**必要条件检测**
+（条数 ≥ 页数 × 每页上限），上游分页**重叠**时会被去重压低而漏报一条 WARN
+（只漏报、不假报 —— 假报更糟：一条在数据完整时也响的告警会让真响的那次没人信）。
+要精确就得让 `catalog.Source` 的三个取作品方法像 `Collection` 那样带回
+`Truncated` / `PagesFetched`，那是跨 5 个实现 × 3 个方法的接口改动，
+票 10 也没决定它 —— 不在本票范围。

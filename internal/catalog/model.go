@@ -78,8 +78,10 @@ type Work struct {
 	//
 	// 原样保留，理由同 Magnet.CreatedAt。
 	//
-	// TODO(ticket-09): "since=<日期> 只追新" 到底该拿哪个字段比还没定
-	// （发行日期 vs 上架时间），定了之后再决定要不要在这里解析。
+	// `since` 就是拿它与下界比（闭区间，严格 `YYYY-MM-DD`）：比发行日期而不是
+	// 磁链的 `created_at`，因为「只追新」要的是**新作品**，而磁链时间普遍早于
+	// 发售日（实测，见 notes/api-recon.md §10.4.2）。形状不对的值由调用方
+	// 一律保留，因此这里不需要替它解析。
 	ReleaseDate string
 
 	// Magnets 是磁链候选，**顺序即服务端返回的顺序**。

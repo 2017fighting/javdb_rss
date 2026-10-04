@@ -133,10 +133,11 @@ type ActressSub struct {
 	// Params 是**原样透传**给 App 女优页的查询参数。
 	// 本服务不解释这些键值，只负责搬运（用户已选定这个做法）。
 	Params map[string]string `yaml:"params"`
-	// Since 是「只追新」的起始日期。
+	// Since 是「只追新」的起始日期：只保留发行日期不早于它的作品（**闭区间**）。
 	//
-	// TODO(ticket-09): 用它和哪个字段比较、开区间还是闭区间尚未定，
-	// 因此这里只负责记录与透传，不做任何过滤。
+	// 比的是作品的 `release_date`（不是磁链的 `created_at`），且形态必须是严格的
+	// `YYYY-MM-DD` —— 否则拒绝服务。语义已定稿（followups 票 10），
+	// 实测与理由见 .scratch/javdb-rss/notes/api-recon.md §10.4.2。
 	Since string `yaml:"since"`
 }
 

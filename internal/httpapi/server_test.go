@@ -42,6 +42,13 @@ type recordingSource struct {
 	want       *catalog.WantList
 	wantErr    error
 	wantCalled int
+	// worksCalls 数的是**取作品**那三个方法的调用次数（Actress / List / Browse）。
+	//
+	// 它存在是为了钉住「参数校验在取数之前」：写错的 URL 不该花掉一次上游请求。
+	// 单独一个计数而不是复用 gotActressID/listID，是因为它们的零值也是合法输入
+	// （空 id、zone 0），看不出「到底调没调」。取名（ActressName）不计入 ——
+	// 它是非关键路径，与订阅参数无关。
+	worksCalls int
 	// names 控制 ActressName 的返回；不在表里的 id 返回错误。
 	names map[string]string
 	// actressTags 是 ActressTags 的返回值；actressTagsErr 控制失败；
@@ -111,6 +118,7 @@ func (r *recordingSource) CollectedActresses(context.Context) (catalog.Collectio
 }
 
 func (r *recordingSource) Actress(_ context.Context, id string, params url.Values) ([]catalog.Work, error) {
+	r.worksCalls++
 	r.gotActressID = id
 	r.gotActressCur = params
 	if r.err != nil {
@@ -142,6 +150,7 @@ func (r *recordingSource) CollectedLists(context.Context) (catalog.ListCollectio
 }
 
 func (r *recordingSource) List(_ context.Context, id string, params url.Values) ([]catalog.Work, error) {
+	r.worksCalls++
 	r.listID = id
 	r.listParams = params
 	if r.listErr != nil {
@@ -151,6 +160,7 @@ func (r *recordingSource) List(_ context.Context, id string, params url.Values) 
 }
 
 func (r *recordingSource) Browse(_ context.Context, zone int, sel catalog.BrowseSelector, params url.Values) ([]catalog.Work, error) {
+	r.worksCalls++
 	r.browseZone = zone
 	r.browseSel = sel
 	r.browseParams = params
