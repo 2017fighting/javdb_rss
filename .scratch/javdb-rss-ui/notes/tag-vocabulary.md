@@ -315,3 +315,103 @@ go run ./cmd/contractprobe -out $OUT raw $B limit=20 filter_by_tags=68
 **仍未验证**：`letter=s`（系列）/ `m`（片商）上是否生效 —— 手里没有可用的 series/maker id，
 试过的 `0:s:1` 两种都返回 0 条，区分不了「没有这个系列」与「标签被忽略」。
 不影响结论（女优之外的形态都没有可用通道）。
+
+---
+
+## 7. ⚠️ 更正：`/api/v1/movies/tags` 有两套掩码形态，全站标签**是可能的**
+
+**上一节（第 6 节）的结论「上游没有全站标签形态」是错的。** 它测的是
+`filter_by_tags` 作为**独立参数**的行为 —— 那个结论（只对女优实体生效）本身没错，
+但我据此推断了「全站标签不可能」，而漏掉了另一条通道：**标签可以是 `filter_by`
+掩码里的一个槽位**。
+
+触发这次更正的是一份**真机抓包**（Android 模拟器 + mitmproxy，
+`/api/v1/movies/tags` 的浏览页请求）：
+
+```
+GET /api/v1/movies/tags?filter_by=0%3At%3Am%3A%3A%3A%3A&sort_by=release&order_by=desc&page=1&limit=24
+                                 → 0:t:m::::      ← App「浏览」页自己发的
+GET /api/v1/movies/tags?filter_by=0%3Aa%3ANPD3%3Am&sort_by=update&page=1&limit=24
+                                 → 0:a:NPD3:m     ← 女优页
+GET /api/v1/movies/latest?type=all&filter_by=can_play&sort_by=update&page=1&limit=9
+                                 → filter_by 是**单词**（can_play / magnets），不是掩码
+```
+
+第三行说明 `/movies/latest` 的 `filter_by` 是另一套词表 —— 与本文无关，但记一笔，
+免得下次看到它以为看错了。
+
+### 全站掩码的语法（逐槽位实测）
+
+```
+{zone}:t:{main}:{tags}:{year}:{duration}:{month}
+```
+
+`letter = t` 是「全站浏览」，**没有实体 id** —— 因此它比实体掩码（`{zone}:{letter}:{id}:{main}:…`）
+少一段，main 落在实体掩码里 id 的位置上。证据是：我们自己按这个顺序拼出来的
+**空筛选**掩码是 `0:t:m::::`，与抓包里 App 发的那条**逐字符相同**（7 段 6 个冒号）。
+
+每一个槽位都用「在不存在的值上会怎样」的对照验过：
+
+| 掩码 | 结果 | 判定 |
+|---|---|---|
+| `0:t:m::::` | 2026-10（最新）| 基线（＝抓包那条） |
+| `0:t:c::::` | **cnsub 50/50** | index 2 = 主属性 |
+| `0:t:m:68:::` | 50 条，跨 2026-09→10 | index 3 有作用 |
+| `0:t:m:999999:::` | **0 条** | ✅ index 3 = **标签**（证伪式对照） |
+| `0:t:m:10,8,28,312,65::::` vs `…,65,999999::::` | **相同** | 标签槽也是**只认前 5 个** |
+| `0:t:m::2020:::` desc page9 | 2020-**12** | index 4 = 年份 |
+| `0:t:m::2020:::` **asc** page1 | 2020-**01** | ✅ 是整年，不是只有 12 月 |
+| `0:t:m::2020:gt-120:` | 2020-01，时长 **121–481** | index 5 = 时长 |
+| `0:t:m::2020::3` | 2020-**03**（全年月） | index 6 = 月份 |
+| `0:t:m::2020:gt-120:3` | 2020-03，**≥121 分钟** | 三者能组合 |
+| `0:t:m::2020:45-90:3` | 2020-03，**45–90 分钟** | 档位边界就是上游那四个 id |
+| `0:t:c:68:2020:gt-120:3` | 2020-03，125–230 分钟，**cnsub 21/21** | 五个槽位全开 |
+
+### 两个**必须自己拦住**的静默坑
+
+1. **时长必须与年份一起给。** `0:t:m:::90-120:` 返回的时长是 **76–300**
+   （根本没筛），`0:t:m::2020:90-120:` 才是 93–120（15/15 全在档内）。
+   月份**没有**这个限制：`0:t:m::::3` 单独给也生效（返回全是 3 月）。
+2. **不发 `m`（含磁鏈）时浏览结果是「没有磁链」的一批。**
+   `0:t:::::` 返回的 50 部里 `magnets_count` **全是 0**（50/50）。
+   抓包里 App 自己发的是 `0:t:m::::` —— 也就是说 m 是浏览页的默认值。
+   对 feed 而言它是**必需**：没有磁链的条目发不出去，去掉它只会得到空 feed。
+
+### 四个片库
+
+`zone` 不是装饰：实测 `0/1/2/3` 返回**四个不同的集合**（0 有码 NMSL/FAYS…、
+1 无码 HEYZO…、2 欧美 Wifey/Blackedraw…、3 FC2-xxx）。**写错 zone 不报错**，
+只会给另一个库的作品 —— 所以它必须在 URL 里看得见、改得动。
+
+### 复跑
+
+```bash
+OUT=/tmp/browse-probe
+B=/api/v1/movies/tags
+go run ./cmd/contractprobe -out $OUT raw $B filter_by=0:t:m:::: limit=50                 # 基线＝抓包那条
+go run ./cmd/contractprobe -out $OUT raw $B filter_by=0:t:c:::: limit=50                 # 主属性
+go run ./cmd/contractprobe -out $OUT raw $B filter_by=0:t:m:999999::: limit=50           # 标签（应 0 条）
+go run ./cmd/contractprobe -out $OUT raw $B filter_by=0:t:m::2020:gt-120:3 limit=50      # 年+时长+月
+go run ./cmd/contractprobe -out $OUT raw $B filter_by=0:t:::90-120: limit=50             # 时长单独给（被忽略）
+go run ./cmd/contractprobe -out $OUT raw $B filter_by=0:t::::: limit=50                  # 不发 m（全无磁链）
+```
+
+### 还没验的：女优页掩码的尾部
+
+第 6 节证明了 `filter_by_tags` 对**女优实体**生效（那是 App 女优页发的形态）。
+但女优页的掩码里**有没有** tags/年份/时长这些槽位，还没验出来：
+
+```
+0:a:EvkJ:m:68::        → 0 条
+0:a:EvkJ:m::2020::     → 0 条
+0:a:EvkJ:m:68:2020:gt-120:3 → 0 条
+0:a:EvkJ:c,m           → 50 条、cnsub 50/50（这一条是对的）
+```
+
+也就是说：把值放进实体掩码的第 4 段之后就一律 0 条，**区分不了**
+「这个槽位存在但值不对」与「这个槽位根本不存在、整条掩码因此无效」。
+**不能再靠猜**：需要一份女优页筛选的抓包（见下文「还需要的抓包」）。
+
+现有代码对此的处理是**保守且不静默**的：女优/清单路由上出现
+`tags`/`year`/`month`/`duration`/`main` 一律返回 **400** 并说明原因，
+而不是让它变成一条「看着筛过、其实没筛」的 feed。

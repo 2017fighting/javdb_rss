@@ -307,48 +307,27 @@
         </div>
 
         <!-- 全站标签：后端还没有。宁可看见缺失，也不要一条会 404 的链接。 -->
-        <div
-          id="site-warning"
-          class="mt-4 rounded-lg border border-destructive/40 bg-destructive/5 p-4"
-          role="note"
-        >
-          <p class="flex items-start gap-2 font-medium text-foreground">
-            <span aria-hidden="true">⛔</span>
-            全站标签做不成 —— 不是缺一条路由，是上游不给
+        <div id="site-note" class="note mt-4" role="note">
+          <p>
+            <strong class="font-medium text-foreground"
+              >全站标签走的是掩码里的一个槽位，不是
+              <code class="font-mono">filter_by_tags</code>。</strong
+            >
+            实测后者只在**女优实体**上生效（清单/搜索/latest/top 全被静默忽略），
+            而 App「浏览」页根本不发它 —— 它把标签写进
+            <code class="font-mono">filter_by</code>：
+            <code class="font-mono">{片库}:t:{主属性}:{标签}:{年}:{时长}:{月}</code>。
+            这条形态是**真机抓包**反推出来的，五个槽位逐个验过。
           </p>
-          <ul class="mt-2 ms-6 list-disc space-y-1 text-xs text-muted-foreground">
-            <li>
-              词汇表是全站的（下面 355 个标签都是真的），但
-              <code class="font-mono">filter_by_tags</code> 只在
-              <strong class="font-medium text-foreground">女优实体</strong>上生效。
-              判别方法是拿一个<strong class="font-medium text-foreground">不存在的 id</strong>
-              当对照 —— 在筛就会变 0 条，被忽略就原样返回。
-            </li>
-            <li>
-              <code class="font-mono">0:a:EvkJ</code> + <code class="font-mono">999999</code>
-              → <strong class="font-medium text-foreground">0 条</strong>（确实在筛）·
-              <code class="font-mono">0:l:p36Eww</code> + <code class="font-mono">999999</code>
-              → 9 条（＝整份清单）·
-              搜索 / <code class="font-mono">movies/latest</code> /
-              <code class="font-mono">movies/top</code> 全部与基线逐条相同。
-            </li>
-            <li>
-              没有实体时更直接：<code class="font-mono">filter_by</code> 是必填参数，
-              不传就 <code class="font-mono">ParameterInvalid: 參數不能爲空</code> ——
-              连发都发不出去。所以一条
-              <code class="font-mono">/rss/tags/…</code> 路由只会返回<strong class="font-medium text-foreground">没筛过的</strong>最新作品，
-              那比 404 更坏。
-            </li>
-            <li>
-              本地也筛不了：列表响应里<strong class="font-medium text-foreground">没有</strong> <code class="font-mono">tags[]</code>
-              （逐字段查过）。详情端点有，但那意味着一部候选一次详情请求。
-            </li>
-            <li>
-              所以标签筛选只跟<strong class="font-medium text-foreground">女优订阅</strong>绑在一起
-              —— 与 App 一样，它的筛选面板也挂在实体页上。下面这 355 个标签是真的，
-              但只能拿来挑「要看哪些」。
-            </li>
-          </ul>
+          <div class="mt-3">
+            <span id="zone-label" class="text-xs font-medium text-muted-foreground">片库</span>
+            <div
+              id="zone-group"
+              role="radiogroup"
+              aria-labelledby="zone-label"
+              class="mt-1.5 flex flex-wrap gap-2"
+            ></div>
+          </div>
         </div>
 
         <div id="actress-picker-wrap" class="mt-4">
@@ -430,13 +409,13 @@
         <div id="tag-time" class="mt-6 rounded-lg border border-border p-4">
           <h3 class="text-xs font-medium text-foreground">时间与时长</h3>
           <p class="mt-2 text-xs leading-relaxed text-muted-foreground">
-            上游把这三组和标签放在同一个响应里，但它们的 id
-            <strong class="font-medium text-foreground">不是标签 id</strong>：月份 1–12
-            与真标签 id 完全撞号（<span class="font-mono">3</span> = 服裝:眼鏡），時長 的 id
-            形如 <span class="font-mono">lt-45</span>；试过的 30 个参数名在 4 个端点上又全部被
-            静默忽略。所以这三组不走上游，由本服务按
-            <code class="font-mono">release_date</code> / <code class="font-mono">duration</code>
-            在本地筛 —— 这两个字段在列表响应里 100% 出现。
+            这三组在**全站模式**下是真上游筛选 —— 就是掩码的第 4/5/6 个槽位
+            （抓包反推，逐槽位验过）。在<strong class="font-medium text-foreground"
+              >女优模式</strong
+            >下它们暂时禁用：女优页掩码有没有这几个槽位还没验出来，
+            而把值塞进第 4 段之后一律返回 0 条，**区分不了**「槽位存在但值不对」
+            与「槽位不存在、整条掩码因此无效」。宁可现在不给，也不给一条看着筛过、
+            其实没筛的 feed（服务那侧遇到这种参数直接返回 400）。
           </p>
 
           <div class="mt-4 space-y-3">
@@ -460,13 +439,16 @@
                 class="mt-1.5 flex flex-wrap gap-2"
               ></div>
             </div>
-            <p class="text-xs text-muted-foreground">
-              时長（<span class="font-mono">lt-45</span> / <span class="font-mono">45-90</span> /
-              <span class="font-mono">90-120</span> / <span class="font-mono">gt-120</span>）
-              <strong class="font-medium text-foreground">这一版不做</strong> ——
-              它需要一条本服务自己的 <code class="font-mono">duration=</code> 过滤，
-              而这个需求还没定。放在这里只是为了不让人以为漏了。
-            </p>
+            <div>
+              <span id="duration-label" class="text-xs font-medium text-muted-foreground">时长</span>
+              <div
+                id="duration-group"
+                role="radiogroup"
+                aria-labelledby="duration-label"
+                class="mt-1.5 flex flex-wrap gap-2"
+              ></div>
+              <p id="duration-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+            </div>
           </div>
 
           <details class="mt-3">

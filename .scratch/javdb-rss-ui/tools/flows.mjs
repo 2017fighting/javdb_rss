@@ -133,11 +133,6 @@ check(
   await page.$$eval("#month-group [data-time]", (n) => n.slice(0, 4).map((e) => e.textContent.trim()).join(",")),
   "不限,1 月起,2 月起,3 月起",
 );
-check(
-  "时長这一版不做：整块控件都不在（不给可点却无用的东西）",
-  await page.$$eval("#tag-time [data-time]", (n) => n.filter((e) => e.dataset.time === "duration").length),
-  0,
-);
 await page.selectOption("#year-select", "2024");
 check(
   "选年份 -> since= + pages=20（本地筛，强制拉全量）",
@@ -164,21 +159,56 @@ check("触顶后第 6 个被禁用", await page.isDisabled('[data-tag="212"]'), 
 check("触顶有解释", (await page.textContent("#tag-empty")).includes("已经选满 5 个"), true);
 check("每组带已选计数", (await page.textContent("#tag-groups")).includes("已选"), true);
 
-// 全站标签：词汇表能列出来，但不给一条会 404 的链接
+// 全站模式：标签走**掩码槽位**（抓包反推的那条），不是 filter_by_tags
 await page.click('[data-source="site"]');
-check("全站标签禁用生成", await page.isDisabled("#tag-add"), true);
+check("片库四选一", await page.$$eval("#zone-group [data-zone]", (n) => n.length), 4);
+// 先清掉女优模式留下的选择，才谈得上「裸」URL
+await page.click("[data-clear-tags]");
+await page.click('[data-flag="c"]');
 check(
-  "全站标签不谎报 URL，且原因指向上游而不是「缺路由」",
-  (await page.textContent("#tag-url")).includes("上游只在女优实体上认") &&
-    (await page.textContent("#tag-url-hint")).includes("上游没有全站形态"),
-  true,
+  "裸全站 URL 自动带上 m（不发它上游返回的全都没有磁链）",
+  await page.textContent("#tag-url"),
+  "http://127.0.0.1:8080/rss/tags/0.xml?main=m",
 );
 check(
   "全站词汇表包含 7 个可筛组共 307 个标签（折叠时也在 DOM 里）",
   await page.$$eval("#tag-groups [data-tag]", (n) => n.length),
   307,
 );
+// 全站模式下 年/月/时长 全部可用。先选回 c，验证 m 是被「并进去」而不是覆盖。
+await page.click('[data-flag="c"]');
+if (await page.$$eval("#tag-groups details:not([open])", (n) => n.length)) {
+  await page.click("#tag-expand");
+}
+await page.click('[data-tag="68"]');
+await page.click('[data-tag="46"]');
+await page.selectOption("#year-select", "2020");
+await page.click('#month-group [data-value="3"]');
+await page.click('#duration-group [data-value="gt-120"]');
+await page.click('#zone-group [data-zone="2"]');
+check(
+  "全站完整 URL（掩码的六个槽位齐了）",
+  await page.textContent("#tag-url"),
+  "http://127.0.0.1:8080/rss/tags/2.xml?main=c%2Cm&tags=46%2C68&year=2020&month=3&duration=gt-120",
+);
+check("全站模式下时长可用（0 个禁用）", await page.$$eval("#duration-group [data-time]", (n) => n.filter((e) => e.disabled).length), 0);
+
+// 切回女优模式：时间维度清空（它们在那条 URL 上根本不出现），并禁用
+await page.click('[data-flag="c"]');
+await page.click("[data-clear-tags]");
 await page.click('[data-source="actress"]');
+check(
+  "切回女优模式后时间维度不残留",
+  await page.textContent("#tag-url"),
+  `http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=${today}`,
+);
+check(
+  "女优模式下时长禁用（尾部槽位未验证）",
+  await page.$$eval("#duration-group [data-time]", (n) => n.filter((e) => e.disabled).length),
+  4,
+);
+// 清掉，免得影响后面的服务地址断言
+if (await page.$("[data-clear-tags]")) await page.click("[data-clear-tags]");
 
 // ── 需求 4：清单（后端已实现），每份清单一条可复制的链接 ──
 await page.click("#tab-lists");

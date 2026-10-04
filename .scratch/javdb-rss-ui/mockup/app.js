@@ -36,7 +36,24 @@
   // 改由本服务按 release_date / duration 本地筛。
   const YEAR_GROUP = D.tagVocab.find((g) => g.categoryId === "year");
   const MONTH_GROUP = D.tagVocab.find((g) => g.categoryId === "month");
+  const DURATION_GROUP = D.tagVocab.find((g) => g.categoryId === "duration");
   const GROUP_ORDER = new Map(TAG_GROUPS.map((g, i) => [g.categoryId, i]));
+
+// 四个片库。名字与「实测四个库返回不同集合」这件事都写在 index.html 的说明里。
+const ZONES = [
+  { id: 0, name: "有码" },
+  { id: 1, name: "无码" },
+  { id: 2, name: "欧美" },
+  { id: 3, name: "FC2" },
+];
+
+// 时长档位：id 是上游给的四个，人读文字是我们拆出边界的。
+const DURATION_LABEL = {
+  "lt-45": "45 分钟以内",
+  "45-90": "45–90 分钟",
+  "90-120": "90–120 分钟",
+  "gt-120": "120 分钟以上",
+};
 
   // id → 候选组。**同一个 id 会出现在多个组里**（月份 1–12 与真实标签 id 全撞），
   // 所以挑选时必须用**名字**消歧：女优自己的 tags[] 带的是真实名字。
@@ -78,7 +95,7 @@
     modeGroup: $("mode-group"),
     todayEcho: $("today-echo"),
     sourceGroup: $("tag-source-group"),
-    siteWarning: $("site-warning"),
+    siteNote: $("site-note"),
     pickerWrap: $("actress-picker-wrap"),
     picker: $("actress-picker"),
     pickerOptions: $("actress-options"),
@@ -91,6 +108,9 @@
     tagEmpty: $("tag-empty"),
     tagCount: $("tag-count"),
     tagExpand: $("tag-expand"),
+    zoneGroup: $("zone-group"),
+    durationGroup: $("duration-group"),
+    durationHint: $("duration-hint"),
     yearSelect: $("year-select"),
     monthGroup: $("month-group"),
     yearHint: $("year-hint"),
@@ -132,6 +152,9 @@
     // 时间与时长（本地过滤维度，单选；null = 不限）。
     year: null,
     month: null,
+    duration: null,
+    // 全站模式的片库号。实测四个库返回**不同**集合，写错不报错只会给别的作品。
+    zone: 0,
     // 标签组的展开状态（用户显式点过的才记在这里；其余按「有已选」推定）。
     groupOpen: new Map(),
     links: [], // 待复制。只存「怎么生成」，URL 每次现算 —— 换服务地址要立刻跟上
@@ -238,7 +261,24 @@
     return qs;
   }
 
+  /** 全站订阅的 URL。形态与女优订阅**不同**：片库在路径里，筛选在 query 里。 */
+  function siteUrl() {
+    const qs = new URLSearchParams();
+    // m（含磁鏈）**总是**并进去（不是"没有别的才用 m"）：实测不发它时浏览返回的
+    // 50 部 magnets_count 全是 0，而没有磁链的条目发不出去 —— 服务那侧也是这么补的。
+    const letters = sortedFlags();
+    qs.set("main", letters.includes("m") ? letters.join(",") : [...letters, "m"].join(","));
+    const ids = sortedTags().map((t) => t.id);
+    if (ids.length) qs.set("tags", ids.join(","));
+    if (state.year) qs.set("year", state.year);
+    if (state.month) qs.set("month", state.month);
+    // 时长必须与年份一起给（实测单独给会被上游静默忽略）。
+    if (state.duration && state.year) qs.set("duration", state.duration);
+    return `${feedBase()}/rss/tags/${state.zone}.xml?${qs.toString()}`;
+  }
+
   function tagUrl() {
+    if (state.source === "site") return siteUrl();
     if (!actorById(state.picker)) return "";
     return `${feedBase()}/rss/actress/${encodeURIComponent(state.picker)}.xml?${tagQuery().toString()}`;
   }
@@ -567,6 +607,8 @@
   }
 
   function renderTime() {
+    const site = state.source === "site";
+    renderZones();
     // 年份用原生 select：26 个选项铺成一排 chip 会让这一屏被年份淹没
     // （Hick's Law），而 select 自带键盘跳转与手机滚轮，不用自己实现弹层。
     // 顺序保留词表的倒序（2026, 2025, …）—— 「最近的在前」正是选的时候要的。
@@ -586,7 +628,35 @@
         .map((t) => ({ value: t.id, label: `${t.name} 月起` }))
         .sort((a, b) => Number(a.value) - Number(b.value)),
     );
+    // 时长：全站模式可用（掩码第 5 槽）；女优模式禁用 —— 那个槽位还没验出来。
+    el.durationGroup.innerHTML = radioChips(
+      "duration",
+      site ? state.duration : null,
+      (DURATION_GROUP?.tags ?? []).map((t) => ({
+        value: t.id,
+        label: DURATION_LABEL[t.id] ?? t.name,
+        extra: site
+          ? ""
+          : 'disabled aria-disabled="true" title="女优页掩码的尾部语法还没验出来（正在抓包）"',
+      })),
+    );
+    el.durationHint.textContent = site
+      ? "必须与年份一起给 —— 实测单独给时长的结果与不筛逐条相同（服务那侧会把这种写法定成 400）。"
+      : "女优模式暂时禁用：女优页掩码有没有这几个槽位还没验出来，塞进去只会得到 0 条（区分不了「槽位不存在」与「值不对」）。";
+
     renderTimeHint();
+  }
+
+  function renderZones() {
+    el.zoneGroup.innerHTML = ZONES.map(
+      (z) => `<button type="button" class="chip" role="radio" data-zone="${z.id}"
+        aria-checked="${z.id === state.zone}" tabindex="${z.id === state.zone ? 0 : -1}">${z.name}</button>`,
+    ).join("");
+  }
+
+  /** 年/月/时长这两组只在全站模式下可用。 */
+  function timeControlsEnabled() {
+    return state.source === "site";
   }
 
   function renderTimeHint() {
@@ -705,21 +775,18 @@
   function renderTagUrl() {
     const site = state.source === "site";
     const a = actorById(state.picker);
-    const canBuild = !site && !!a;
+    // 全站模式不再依赖女优 —— 它自己就是一条完整的订阅。
+    const canBuild = site || !!a;
 
-    el.tagUrl.textContent = site
-      ? "—— 全站标签做不成：上游只在女优实体上认 filter_by_tags ——"
-      : canBuild
-        ? tagUrl()
-        : "先从上面选一位女优。";
+    el.tagUrl.textContent = canBuild ? tagUrl() : "先从上面选一位女优。";
 
     const parts = [];
     if (site) {
-      parts.push(
-        "上游只在女优实体上认 filter_by_tags；没有实体时 filter_by 本身是必填的 —— " +
-          "所以这不是缺一条路由，是上游没有全站形态（对照实验：不存在的 id 在女优页会变 0 条，" +
-          "在搜索/清单上原样返回）",
-      );
+      parts.push(`掩码 ${state.zone}:t:{主属性}:{标签}:{年}:{时长}:{月}（片库在路径里）`);
+      parts.push("主属性里的 m 是自动带的 —— 不发它时上游返回的 50 部全都没有磁链");
+      const ids = sortedTags().map((t) => t.id);
+      if (ids.length) parts.push(`${ids.length} 个标签（上限 5 是上游硬限制）`);
+      if (state.duration && !state.year) parts.push("⚠️ 时长必须与年份一起给，否则不会生效");
     } else if (canBuild) {
       const since = timeSince();
       if (since) {
@@ -872,12 +939,13 @@
 
   radioGroup(el.sourceGroup, (v) => {
     state.source = v;
-    el.siteWarning.classList.toggle("hidden", v !== "site");
+    el.siteNote.classList.toggle("hidden", v !== "site");
     el.pickerWrap.classList.toggle("hidden", v === "site");
     state.tagSearch = "";
     el.tagSearch.value = "";
     renderTagGroups();
     renderTagSelection();
+    refreshTime();
     renderTagUrl();
   });
 
@@ -960,6 +1028,7 @@
     el.tagSearch.value = "";
     renderTagGroups();
     renderTagSelection();
+    refreshTime();
     renderTagUrl();
     el.pickerStatus.textContent = describePicker(a);
   });
@@ -1029,6 +1098,14 @@
     renderTagUrl();
   });
   el.monthGroup.addEventListener("click", (e) => onTimePick(e, "month"));
+  el.durationGroup.addEventListener("click", (e) => onTimePick(e, "duration"));
+  el.zoneGroup.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-zone]");
+    if (!btn) return;
+    state.zone = Number(btn.dataset.zone);
+    renderTime();
+    renderTagUrl();
+  });
 
   function onTimePick(e, name) {
     const btn = e.target.closest("[data-time]");
@@ -1036,6 +1113,18 @@
     state[name] = btn.dataset.value || null;
     renderTime();
     renderTagUrl();
+  }
+
+  /** 时间维度的可用性随模式变，切换模式时要整块重渲染。 */
+  function refreshTime() {
+    if (!timeControlsEnabled()) {
+      // 切回女优模式时清掉这三个 —— 它们在那条 URL 上根本不出现，
+      // 留着会让「界面上选着、链接里没有」这种最坏的不一致出现。
+      state.year = null;
+      state.month = null;
+      state.duration = null;
+    }
+    renderTime();
   }
 
   el.listCards.addEventListener("click", (e) => {
