@@ -180,6 +180,45 @@ type TagVocabulary struct {
 	Groups []TagGroup
 }
 
+// MainAttribute 是女优**支持的一个主属性** —— 也就是 feed URL 里 `main=` 能取的值
+// （如 p=可播放、m=含磁鏈、c=含字幕、s=單體作品）。
+//
+// ⚠️ 上游把这个集合放在顶层 `filter_tags` 里。本服务**刻意不沿用那个名字**：
+// 里面装的不是标签，叫 filter_tags 会让下一个读到它的人先误解一次 ——
+// 以为可以拿它去筛标签。
+type MainAttribute struct {
+	// ID 是主属性字母（单个字母，如 "p"）。它就是 `main=` 的取值。
+	ID string
+	// Name 是显示名，原样来自上游。
+	Name string
+}
+
+// ActressTags 是「某位女优自己的标签」这份读取结果。
+//
+// 它是 /actress_tags/{id} 的产物：页面据此把她的标签按词表反查落到上游分组上，
+// 并只列出她**支持的**主属性（而不是词表里的全部主属性）。
+//
+// 三样东西来自**同一个**上游读取（`/api/v1/actors/{id}`）：名字与作品数在 `actor` 里，
+// 主属性在顶层 `filter_tags`，标签在顶层 `tags[]`。合并成一次读取是为了让
+// 「feed 标题要的名字」与「页面要的标签」不会各漂各的。
+type ActressTags struct {
+	// ID 是这位女优的标识（URL 里那个 id）。
+	ID string
+	// Name 是显示名。语言由 `app_api.lang` 决定（与 Actress.Name 同源同义）。
+	Name string
+	// VideosCount 是上游声明的她的作品数。
+	VideosCount int
+	// Main 是她**支持的主属性**，来自上游顶层 `filter_tags`。
+	//
+	// 刻意叫 Main 而不是 FilterTags：它是 `main=` 的取值集合，与 Tags 是两回事。
+	Main []MainAttribute
+	// Tags 是她自己的标签，来自上游顶层 `tags[]`。
+	//
+	// ⚠️ 上游**不给分组**：每一项只有 id/name/videos_count。分组由页面拿词表
+	// 按 id 反查，而且必须先按**名字**消歧 —— id 会撞号（月份 1–12 与真标签全撞）。
+	Tags []Tag
+}
+
 // 区域号（filter_by 的第一段）。
 //
 // 它同时是全站浏览的「片库」选择：实测 0/1/2/3 返回**四个不同的集合**
@@ -407,6 +446,18 @@ type Source interface {
 	// `type=9` 与 `type=0` 的响应逐字节相同。照原样透传等于把「另一个片库的
 	// 词表」当成你要的答案交出去。
 	TagVocabulary(ctx context.Context, zone int) (TagVocabulary, error)
+
+	// ActressTags 一次交出某位女优的显示名、她**支持的主属性**、以及她自己的标签。
+	//
+	// 三样来自同一个上游读取（`/api/v1/actors/{id}`），因此实现方必须让
+	// 本方法与 ActressName 共用同一次读取 —— 两份 envelope 各写一遍会在
+	// 上游改名时各漂各的。
+	//
+	// **不需要 token**：上游该端点匿名可用。
+	//
+	// 返回的 Tags 里**没有分组**（上游不给），分组由页面按词表反查；
+	// Main 与 Tags 是两回事，不能互相替代。
+	ActressTags(ctx context.Context, id string) (ActressTags, error)
 
 	// Browse 返回**全站**（不挂任何实体）的作品列表，按 zone 分片库。
 	//

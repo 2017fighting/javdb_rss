@@ -292,6 +292,16 @@ func (s *appapiSource) ActressName(ctx context.Context, id string) (string, erro
 	return out, err
 }
 
+func (s *appapiSource) ActressTags(ctx context.Context, id string) (catalog.ActressTags, error) {
+	var out catalog.ActressTags
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.ActressTags(ctx, id)
+		return e
+	})
+	return out, err
+}
+
 func (s *appapiSource) CollectedActresses(ctx context.Context) (catalog.Collection, error) {
 	var out catalog.Collection
 	err := s.withRelogin(ctx, func(c *appapi.Client) error {

@@ -44,6 +44,11 @@ type recordingSource struct {
 	wantCalled int
 	// names 控制 ActressName 的返回；不在表里的 id 返回错误。
 	names map[string]string
+	// actressTags 是 ActressTags 的返回值；actressTagsErr 控制失败；
+	// gotActressTagsID 记录收到的 id。
+	actressTags      catalog.ActressTags
+	actressTagsErr   error
+	gotActressTagsID string
 
 	// 清单相关的可控制行为
 	lists       *catalog.ListCollection
@@ -81,6 +86,17 @@ func (r *recordingSource) ActressName(_ context.Context, id string) (string, err
 		}
 	}
 	return "", errors.New("没有名字")
+}
+
+func (r *recordingSource) ActressTags(_ context.Context, id string) (catalog.ActressTags, error) {
+	r.gotActressTagsID = id
+	if r.actressTagsErr != nil {
+		return catalog.ActressTags{}, r.actressTagsErr
+	}
+	if r.actressTags.ID != "" || r.actressTags.Name != "" {
+		return r.actressTags, nil
+	}
+	return catalog.ActressTags{ID: id, Name: "名字-" + id}, nil
 }
 
 func (r *recordingSource) CollectedActresses(context.Context) (catalog.Collection, error) {

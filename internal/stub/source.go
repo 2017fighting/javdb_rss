@@ -26,8 +26,9 @@ type Source struct {
 	CodeWorks []catalog.Work
 	// ActressWorks 是 Actress 的返回值；为 nil 时用内置的样例数据。
 	ActressWorks []catalog.Work
-	// Names 覆盖 ActressName 的返回值。不在表里的 id 返回错误
-	// （模拟上游没有这个名字），调用方据此退回 id。
+	// Names 覆盖女优显示名。ActressName 与 ActressTags 共用它：
+	// 前者拿不到名字就报错（feed 标题据此退回 id），后者用 id 兜底。
+	// 不在表里的 id 对 ActressName 返回错误（模拟上游没有这个名字）。
 	Names map[string]string
 	// Collected 是 CollectedActresses 的返回值；为 nil 时用内置样例。
 	// 它是一个完整的 catalog.Collection，因此需要构造截断场景的测试
@@ -51,6 +52,11 @@ type Source struct {
 	// 非 nil 时**只有**表里列出的片库可用，其余返回包装了 catalog.ErrBadRequest
 	// 的错误 —— 这样测试可以精确控制某几个片库，而不必依赖内置 fixture。
 	TagVocabularies map[int]catalog.TagVocabulary
+	// ActressTagProfiles 覆盖 ActressTags 的返回值（按女优 id）。
+	//
+	// 与 TagVocabularies 同一套语义：非 nil 时**只有**表里列出的 id 可用，
+	// 其余返回错误 —— 含混的取值来源正是最容易让测试假通过的地方。
+	ActressTagProfiles map[string]catalog.ActressTags
 }
 
 // 样例数据刻意覆盖三种关键形态，好让端到端跑起来时一眼能看出规则生效：
@@ -130,13 +136,25 @@ func (s *Source) ActressName(_ context.Context, id string) (string, error) {
 	if s.Err != nil {
 		return "", s.Err
 	}
-	if name, ok := s.Names[id]; ok && name != "" {
+	if name, ok := s.actressName(id); ok {
 		return name, nil
 	}
-	if s.Names == nil && id == "EvkJ" {
-		return "河北彩花", nil
-	}
 	return "", fmt.Errorf("女优 %s 没有名字", id)
+}
+
+// actressName 是内置的名字解析：Names 表优先，默认样例里只有 EvkJ 有名字。
+//
+// 它与 ActressName 的分歧只有一处：拿不到时 ActressName 报错（feed 标题据此退回 id），
+// 而 ActressTags 用 id 兜底（页面手输的 id 也要能显示）。两处共用这一份解析，
+// 免得「谁认识哪个 id」有两份可以各自跑偏的答案。
+func (s *Source) actressName(id string) (string, bool) {
+	if name, ok := s.Names[id]; ok && name != "" {
+		return name, true
+	}
+	if s.Names == nil && id == "EvkJ" {
+		return "河北彩花", true
+	}
+	return "", false
 }
 
 // CollectedActresses 实现 catalog.Source。

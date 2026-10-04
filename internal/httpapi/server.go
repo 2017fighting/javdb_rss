@@ -65,6 +65,13 @@ func (s *Server) Handler() http.Handler {
 	// 标签词表的发现端点。精确路径，不带 .xml：它是页面「按上游分组挑标签」
 	// 的唯一数据来源，产物是给人/给页面看的词表，qBittorrent 不会碰它。
 	mux.HandleFunc("GET /tags", s.handleTags)
+	// 某位女优**自己的**标签。与 /tags 同属发现端点家族，但回答的是另一个问题：
+	// 「这个片库有哪些标签」 vs 「她身上有哪几个」。上游**不给分组**，
+	// 分组由页面拿词表按 id 反查。
+	//
+	// 用 {id} 通配符而不是前缀剥尾：这个路径不带 .xml，单个段就是完整的 id。
+	// 打成 /actress_tags/ 或 /actress_tags 会自然地落到 404。
+	mux.HandleFunc("GET /actress_tags/{id}", s.handleActressTags)
 
 	// 用前缀匹配而不是 {code} 通配符：Go 的 ServeMux 要求通配符占满整个
 	// 路径段，而我们要容忍结尾的 .xml，因此在这里自己剥。
@@ -359,6 +366,110 @@ func tagVocabularyBodyFrom(v catalog.TagVocabulary) tagVocabularyBody {
 			Category:   g.Category,
 			Tags:       tags,
 		})
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// 女优自己的标签发现端点
+// ---------------------------------------------------------------------------
+
+// actressTagsBody 是 /actress_tags/{id} 的响应体。
+//
+// 字段名刻意用 `main` 而不是上游那个 `filter_tags`：它装的是**主属性**
+// （feed URL 里 `main=` 的取值集合），不是标签。沿用上游的名字会让下一个读到它的人
+// 先误解一次，然后拿它去筛标签 —— 而那是另一条通道。
+type actressTagsBody struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	VideosCount int               `json:"videos_count"`
+	Main        []mainAttrEntry   `json:"main"`
+	Tags        []actressTagEntry `json:"tags"`
+}
+
+// mainAttrEntry 是 `main` 里的一项：只有 id/name。
+//
+// 它与 actressTagEntry 分开而不是合用，是因为两者的上游形状**不同**：
+// `main` 来自 `filter_tags`（没有 videos_count），`tags[]` 才逐项有。
+// 合用一个结构会让 main 里出现一个上游从未给过的 `videos_count: 0` ——
+// 等于宣布「这个主属性下一部片都没有」，那是静默假数据。
+type mainAttrEntry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// actressTagEntry 是她自己的一个标签。videos_count **不带 omitempty**：
+// 上游逐项都给了它，而 0 也可能是个真值；省掉它会迫使消费方靠「键不在就当成 0」来猜。
+type actressTagEntry struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	VideosCount int    `json:"videos_count"`
+}
+
+// handleActressTags 服务 GET /actress_tags/{id}：一次交待出她的显示名、
+// 她**支持的主属性**、以及她自己的标签。
+//
+// # 为什么叫 main 而不是 filter_tags
+//
+// 上游顶层那个键叫 `filter_tags`，装的却是一组主属性（EvkJ 是 p/s/m/c）。
+// 名字纠正只发生在本服务的对外形状上 —— 上游线格式照收不误（见 appapi）。
+//
+// # 不需要 token
+//
+// 上游该端点实测匿名可用，因此没配 token 时也是 200（与 `/collected` 的 503 相反）。
+// 标签筛选本身是匿名的，不该被「收藏读不到」连坐。
+//
+// # 女优白名单
+//
+// 与 `/rss/actress/{id}.xml` 同一套语义：没放行的 id 返回 404「未知的订阅」，
+// 不向调用方确认它是否「存在但被禁止」—— 否则页面会渲染一个订不到的链接。
+func (s *Server) handleActressTags(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusNotFound, "需要形如 /actress_tags/{女优 id} 的路径")
+		return
+	}
+	if _, allowed := s.cfg.Current().ActressSub(id); !allowed {
+		writeError(w, http.StatusNotFound, "未知的订阅")
+		return
+	}
+
+	tags, err := s.src.ActressTags(r.Context(), id)
+	if err != nil {
+		// 与 /tags 同一条分工：用户参数写错（重试无用）与上游出错（重试有用）
+		// 必须分开返回 4xx 与 5xx。
+		if errors.Is(err, catalog.ErrBadRequest) {
+			s.log.WarnContext(r.Context(), "女优标签参数不合法", "id", id, "err", err)
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.log.ErrorContext(r.Context(), "取女优标签失败", "id", id, "err", err)
+		writeUpstreamError(w, err)
+		return
+	}
+
+	body := actressTagsBodyFrom(tags)
+	if strings.TrimSpace(body.ID) == "" {
+		// 数据源没回 id 时用 URL 里的那个：白名单与页面都认这一个标识。
+		body.ID = id
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// actressTagsBodyFrom 把领域模型摊成响应体，各列表**保持上游顺序**。
+func actressTagsBodyFrom(t catalog.ActressTags) actressTagsBody {
+	out := actressTagsBody{
+		ID:          t.ID,
+		Name:        t.Name,
+		VideosCount: t.VideosCount,
+		Main:        make([]mainAttrEntry, 0, len(t.Main)),
+		Tags:        make([]actressTagEntry, 0, len(t.Tags)),
+	}
+	for _, m := range t.Main {
+		out.Main = append(out.Main, mainAttrEntry{ID: m.ID, Name: m.Name})
+	}
+	for _, tg := range t.Tags {
+		out.Tags = append(out.Tags, actressTagEntry{ID: tg.ID, Name: tg.Name, VideosCount: tg.VideosCount})
 	}
 	return out
 }

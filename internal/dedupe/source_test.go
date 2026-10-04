@@ -18,9 +18,11 @@ type countingSource struct {
 	actressCalls atomic.Int64
 	wantCalls    atomic.Int64
 	tagCalls     atomic.Int64
-	delay        time.Duration
-	gotParams    []string
-	mu           sync.Mutex
+	// actressTagCalls 计 ActressTags 的上游调用次数，用来验证合并 key。
+	actressTagCalls atomic.Int64
+	delay           time.Duration
+	gotParams       []string
+	mu              sync.Mutex
 }
 
 func (c *countingSource) Code(context.Context, string) ([]catalog.Work, error) {
@@ -61,6 +63,12 @@ func (c *countingSource) TagVocabulary(_ context.Context, zone int) (catalog.Tag
 		CategoryID: fmt.Sprintf("zone-%d", zone),
 		Category:   "基本",
 	}}}, nil
+}
+
+func (c *countingSource) ActressTags(_ context.Context, id string) (catalog.ActressTags, error) {
+	c.actressTagCalls.Add(1)
+	time.Sleep(c.delay)
+	return catalog.ActressTags{ID: id, Name: "名字-" + id}, nil
 }
 
 // TestTagVocabularyMergesPerZone 确认合并 key 里带上了片库号。
@@ -109,6 +117,55 @@ func TestTagVocabularyMergesPerZone(t *testing.T) {
 	wg2.Wait()
 	if got := distinct.tagCalls.Load(); got != 4 {
 		t.Errorf("四个不同片库合并成了 %d 次上游请求，want 4（key 里漏了 zone？）", got)
+	}
+}
+
+// TestActressTagsMergesPerID 确认合并 key 里带上了女优 id。
+//
+// 合并错了就是拿**别人的标签**给用户 —— 而标签决定 link 里 "tags=" 那些 id，
+// 静默筛错一批作品正是本项目最不能接受的一类失败。
+func TestActressTagsMergesPerID(t *testing.T) {
+	merged := &countingSource{delay: 50 * time.Millisecond}
+	s := New(merged)
+
+	const n = 20
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := s.ActressTags(context.Background(), "EvkJ"); err != nil {
+				t.Errorf("ActressTags: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if got := merged.actressTagCalls.Load(); got != 1 {
+		t.Errorf("同一位女优的 %d 次并发调用打出了 %d 次上游请求，want 1", n, got)
+	}
+
+	// 不同的女优必须各打一次，不能被合并成一次。
+	distinct := &countingSource{delay: 50 * time.Millisecond}
+	s2 := New(distinct)
+	var wg2 sync.WaitGroup
+	start2 := make(chan struct{})
+	for _, id := range []string{"EvkJ", "83V", "kzx6"} {
+		wg2.Add(1)
+		go func(id string) {
+			defer wg2.Done()
+			<-start2
+			if _, err := s2.ActressTags(context.Background(), id); err != nil {
+				t.Errorf("ActressTags(%s): %v", id, err)
+			}
+		}(id)
+	}
+	close(start2)
+	wg2.Wait()
+	if got := distinct.actressTagCalls.Load(); got != 3 {
+		t.Errorf("三位不同女优合并成了 %d 次上游请求，want 3（key 里漏了 id？）", got)
 	}
 }
 
@@ -306,6 +363,9 @@ func (emptySource) WantToWatch(context.Context) (catalog.WantList, error) {
 }
 func (emptySource) TagVocabulary(context.Context, int) (catalog.TagVocabulary, error) {
 	return catalog.TagVocabulary{}, nil
+}
+func (emptySource) ActressTags(context.Context, string) (catalog.ActressTags, error) {
+	return catalog.ActressTags{}, nil
 }
 
 // truncatedSource 总是报告截断。它复用 emptySource 的空实现，只覆盖需要的一条。

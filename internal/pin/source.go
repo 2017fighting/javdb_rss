@@ -82,6 +82,11 @@ func (s *Source) ActressName(ctx context.Context, id string) (string, error) {
 	return s.inner.ActressName(ctx, id)
 }
 
+// ActressTags 直接透传 —— 它是词表/标签，不是 feed 内容，没有磁链可选。
+func (s *Source) ActressTags(ctx context.Context, id string) (catalog.ActressTags, error) {
+	return s.inner.ActressTags(ctx, id)
+}
+
 // CollectedActresses 直接透传 —— 收藏列表不产生 guid。
 func (s *Source) CollectedActresses(ctx context.Context) (catalog.Collection, error) {
 	return s.inner.CollectedActresses(ctx)

@@ -75,6 +75,26 @@ func (s *Source) ActressName(ctx context.Context, id string) (string, error) {
 	return name, nil
 }
 
+// ActressTags 实现 catalog.Source。
+//
+// 按 id 合并，理由与 ActressName 相同：页面切女优时会问一次，
+// 而这个页面两个标签区可能同时请求同一位女优。它**不**与 ActressName 共享 key ——
+// 两者返回的东西不同（singleflight 只存一个值），但底层打的是同一个上游端点
+// （见 appapi 的 fetchActress）。
+func (s *Source) ActressTags(ctx context.Context, id string) (catalog.ActressTags, error) {
+	v, err, sharedCall := s.group.Do("actress_tags:"+id, func() (any, error) {
+		return s.inner.ActressTags(ctx, id)
+	})
+	if sharedCall {
+		s.shared.Add(1)
+	}
+	if err != nil {
+		return catalog.ActressTags{}, err
+	}
+	got, _ := v.(catalog.ActressTags)
+	return got, nil
+}
+
 // CollectedActresses 实现 catalog.Source。
 //
 // 它没有参数，因此所有并发调用合并成一次 —— 这是最划算的一处合并：
