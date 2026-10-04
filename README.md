@@ -50,7 +50,7 @@ pin 就是一个可读的 JSON 文件，可以直接看、直接改、直接备�
 | 中文字幕优先 | ✅ 可用（服务端直接给 `cnsub` 字段） |
 | 女优订阅 + 参数透传 + 只追新 | ✅ 可用（分页与缓存未做，见 ticket 09） |
 | 读取 App 里收藏的女优 | ⚠️ 已实现为 `GET /collected`，但**尚未对着真实 API 验证过**（需要 token） |
-| 「想看」清单订阅 | ✅ 可用（`GET /rss/want.xml`，2026-10-04 用真实 token 与真实 qBittorrent 验收） |
+| 「想看」feed | ✅ 可用（`GET /rss/want.xml`，2026-10-04 用真实 token 与真实 qBittorrent 验收） |
 | 主动推送（推给 qBittorrent + 回写「看过」） | ⛔ 本次不做（2026-10-04 用户决定）；已定的形状与 qbt/App API 契约留在 [`notes/want-push-deferred.md`](.scratch/javdb-rss/notes/want-push-deferred.md) |
 
 数据源是**真实的 JavDB App 私有 API**。`provider: stub` 是离线调试通道。
@@ -131,7 +131,7 @@ http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=2026-01-01   只要这个日期
 http://127.0.0.1:8080/rss/want.xml                        你在 App 里标了「想看」的全部作品
 ```
 
-### 「想看」订阅（`/rss/want.xml`）
+### 「想看」feed（`/rss/want.xml`）
 
 这条 feed 的内容来自 **App 里你自己标的「想看」**（我没有 URL 参数，也没有白名单）：
 在 App 里给一部片点「想看」，下一轮轮询它就会出现在这里。
@@ -140,14 +140,22 @@ http://127.0.0.1:8080/rss/want.xml                        你在 App 里标了�
 
 1. **有磁链才发条目。** 「标了想看但还没有种」是这份清单的常态（很多片要等一段
    时间才出种），因此这类作品**不会**在 feed 里发条目 —— qBittorrent 用不了
-   没有 `enclosure` 的条目。它们会在**channel 描述**里被计数：
+   没有 `enclosure` 的条目。但它们不会静默消失：两个计数写进 **channel 标题**
+   （qBittorrent 里看得见的就是它）：
 
    ```xml
-   <description>App 里「想看」的作品，共 12 部；其中 3 部尚无磁链，未列入本 feed</description>
+   <title>JavDB · 想看（234 部 · 12 部待磁链）</title>
+   <description>App 里「想看」的作品，共 234 部；其中 12 部尚无磁链，未列入本 feed</description>
    ```
 
-   把它写进描述是为了让你看得见 —— 否则「少了几条」与「服务没读到这张清单」
-   在订阅界面上长得一模一样。
+   **为什么要写两处：** 实测 qBittorrent 的 RSS API 响应里 feed 对象只有
+   `articles` / `hasError` / `isLoading` / `lastBuildDate` / `title` / `uid` / `url`
+   —— **根本没有 `description`**，所以描述在 qbt 里看不见，只有标题会被呈现。
+   描述则留给会读它的 RSS 阅读器与肉眼看 XML 的人（完整句子更适合那里）。
+   两处由同一个构造产出，不会一边说 12 部、一边说 13 部。
+
+   清单读不完（上游还有数据）时，标题里还会多一段「列表可能不完整」。
+   不这么写的话，「少了几条」与「服务没读到这张清单」在 qbt 里长得一模一样。
 2. **磁链的选择与别的 feed 完全一样**（中文字幕优先 + 钉住），因此 `guid` =
    infohash，与番号/女优订阅**跨 feed 自动去重**。
 

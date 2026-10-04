@@ -67,6 +67,10 @@ DELETE /api/v1/movies/{id}/reviews/{reviewId}      取消标记
 - **每 feed 只保留 50 篇文章**（`RSS\MaxArticlesPerFeed` 默认 50）。
   对本次的实测数据（222 条条目）意味着 **qbt 只看得到其中 50 条**；
   要用 RSS 方式消化整张清单，得在 qbt 设置里调大这个值。
+- **qbt 拿不到 channel description。** 它的 `GET /api/v2/rss/items` 响应里
+  feed 对象的键是 `articles / hasError / isLoading / lastBuildDate / title / uid / url`
+  —— **没有 description**。因此任何要写给 qbt 看的信号只能放**标题**
+  （这也是 `/rss/want.xml` 把「待磁链」计数写进标题的原因）。
 - `POST /api/v2/torrents/add`（`urls=<magnet>&stopped=true`）接受本服务生成的磁链：
   `success_count: 1`，infohash 与 feed 的 guid 逐位一致。
 

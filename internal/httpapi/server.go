@@ -270,7 +270,7 @@ func writeListError(w http.ResponseWriter, err error, subject string) {
 // 「想看」 feed
 // ---------------------------------------------------------------------------
 
-// handleWant 服务 GET /rss/want.xml：把 App 里「想看」的作品渲染成订阅源。
+// handleWant 服务 GET /rss/want.xml：把 App 里「想看」的作品渲染成 feed。
 //
 // # 为什么它是一条 feed，而不是像 /collected 那样的发现端点
 //
@@ -279,14 +279,19 @@ func writeListError(w http.ResponseWriter, err error, subject string) {
 // 「这部片一有磁链就交给我」。它随上游出现磁链而自动变得可用，因此
 // 天然适合交给 qBittorrent 周期轮询。两者形态不同是刻意的。
 //
-// # 尚无磁链的作品为什么要「说出来」
+// # 尚无磁链的作品为什么要「说出来」，以及为什么写在**标题**里
 //
 // 「标了想看但还没有种」是这份清单的常态（领域定义如此），所以这类作品
 // **不发条目** —— qBittorrent 用不了没有 enclosure 的条目。
 // 但它们也不能静默消失：那会让你以为服务没读到这张清单，或是列表丢了。
-// 因此把两个计数写进 channel 描述，让它在订阅界面上直接看得见。
-// （对照 /collected 用 JSON 字段报截断 —— feed 里没有 JSON 字段可用，
-// 描述就是它唯一的可见通道。）
+//
+// 写法上刻意不只放在 channel 描述里：实测 qBittorrent 的
+// `GET /api/v2/rss/items` 响应里 feed 对象只有
+// articles/hasError/isLoading/lastBuildDate/title/uid/url —— **根本没有 description**，
+// 也就是说描述在 qBittorrent 里看不见，而 qBittorrent 正是这条 feed 的
+// 主要消费者。计数因此写进**标题**（qbt 会呈现它），描述里同时给一句完整的话
+// 给会读它的 RSS 阅读器。两处由 wantSummary 一处构造，不会各说各话。
+// （对照 /collected 用 JSON 字段报截断 —— feed 里没有 JSON 字段可用。）
 func (s *Server) handleWant(w http.ResponseWriter, r *http.Request) {
 	list, err := s.src.WantToWatch(r.Context())
 	if err != nil {
@@ -295,52 +300,83 @@ func (s *Server) handleWant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 尚无磁链的作品选不出任何一条（catalog.Select 返回 false），
-	// feed.Build 会把它们跳过。这里先数一遍，好把「有几部在等磁力」说出来。
+	// 先 build 再写 meta：那个「待磁链」数就是 build 跳过的条数，
+	// 而它必须进标题。
 	//
-	// 用 catalog.Select 而不是 len(Magnets)==0 来判：前者就是 feed.Build
-	// 用的同一个判据，两者分头写的话，「跳过」与「计数」会在上游出现怪数据时
-	// （比如候选全带空 infohash）对不上。
-	pending := 0
-	for _, wk := range list.Works {
-		if _, ok := catalog.Select(wk.Magnets); !ok {
-			pending++
-		}
-	}
+	// 刻意**不**另跑一遍 catalog.Select 去数：那会让「跳过」与「计数」
+	// 各有一个执行点，而它们必须永远一致。
+	items := feed.Build(list.Works)
+	summary := wantSummary{List: list, Items: len(items)}
+
 	if list.Truncated {
 		// 与 /collected 一样：它不只是文案问题，运维也该在日志里看到
 		// 「清单已经多到读不完了」—— 那意味着要上调上限。
 		s.log.WarnContext(r.Context(), "想看清单超过翻页上限，本 feed 可能不完整",
 			"已读页数", list.PagesFetched, "上限", list.MaxPages, "已读条数", len(list.Works))
 	}
-	if pending > 0 {
+	if pending := summary.pending(); pending > 0 {
 		// debug 级：等磁链是常态而不是故障，因此不占 warn/error。
-		// 用户看的信号在 channel 描述里（见下）。
+		// 用户看的信号在标题与描述里（见下）。
 		s.log.DebugContext(r.Context(), "想看清单里有尚无磁链的作品，未列入 feed",
-			"想看", len(list.Works), "待磁力", pending)
+			"想看", summary.total(), "待磁力", pending)
 	}
 
-	s.renderFeed(w, r, feed.Meta{
-		Title:       "JavDB · 想看",
+	s.renderItems(w, r, feed.Meta{
+		Title:       summary.title(),
 		Link:        s.feedURL(r),
-		Description: wantDescription(len(list.Works), pending, list.Truncated, list.MaxPages),
+		Description: summary.description(),
 		Language:    s.cfg.Current().Feed.Language,
-	}, list.Works)
+	}, items)
 }
 
-// wantDescription 构造 channel 描述：它同时承担「这份清单有多少条」与
-// 「有多少条还没法下发」两件事。
+// wantSummary 是这条 feed 对外要说的那句话，两个去处（标题 / 描述）共用一份构造。
+//
+// # 为什么同一件事要写两处
+//
+// qBittorrent **只呈现 channel 标题**（它的 RSS API 响应里根本没有 description
+// 字段，见 handleWant 的注释），而完整的句子更适合 description（RSS 阅读器、
+// 肉眼看 XML 的人）。两处来自同一个值，因此不会一边说 12 部、一边说 13 部。
+//
+// 它持着整份 WantList 而不是接过几个 int：那些数字本来就从清单上算出来，
+// 提前拆成参数只会让「谁负责算」变得含糊（也就多一处能算错的地方）。
+type wantSummary struct {
+	List catalog.WantList
+	// Items 是最终进了 feed 的条数（feed.Build 的产物长度）。
+	Items int
+}
+
+// total 是「想看」清单里的作品数。
+func (w wantSummary) total() int { return len(w.List.Works) }
+
+// pending 是尚无磁链候选、因而不会出现在 feed 里的作品数。
+//
+// 它就是 feed.Build 跳过的那些 —— 不另外判定一遍。
+func (w wantSummary) pending() int { return w.total() - w.Items }
+
+// title 是 channel 标题：简短，适合 qBittorrent 的订阅列表。
+func (w wantSummary) title() string {
+	parts := []string{fmt.Sprintf("%d 部", w.total())}
+	if p := w.pending(); p > 0 {
+		parts = append(parts, fmt.Sprintf("%d 部待磁链", p))
+	}
+	if w.List.Truncated {
+		parts = append(parts, "列表可能不完整")
+	}
+	return "JavDB · 想看（" + strings.Join(parts, " · ") + "）"
+}
+
+// description 是 channel 描述：完整句子，给会读它的人。
 //
 // 措辞刻意不用「失败」「错误」—— 尚无磁链是正常状态。必须说清楚的是
 // **它为何没出现在下面**（未列入本 feed），否则用户只会发现条目少了。
-func wantDescription(total, pending int, truncated bool, maxPages int) string {
+func (w wantSummary) description() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "App 里「想看」的作品，共 %d 部", total)
-	if pending > 0 {
-		fmt.Fprintf(&b, "；其中 %d 部尚无磁链，未列入本 feed", pending)
+	fmt.Fprintf(&b, "App 里「想看」的作品，共 %d 部", w.total())
+	if p := w.pending(); p > 0 {
+		fmt.Fprintf(&b, "；其中 %d 部尚无磁链，未列入本 feed", p)
 	}
-	if truncated {
-		fmt.Fprintf(&b, "；清单在读取第 %d 页时触顶，可能不完整", maxPages)
+	if w.List.Truncated {
+		fmt.Fprintf(&b, "；清单在读取第 %d 页时触顶，可能不完整", w.List.MaxPages)
 	}
 	return b.String()
 }
@@ -373,12 +409,12 @@ func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.renderFeed(w, r, feed.Meta{
+	s.renderItems(w, r, feed.Meta{
 		Title:       "JavDB · " + code,
 		Link:        s.feedURL(r),
 		Description: "番号 " + code + " 的订阅源",
 		Language:    s.cfg.Current().Feed.Language,
-	}, works)
+	}, feed.Build(works))
 }
 
 // handleActress 服务 GET /rss/actress/{id}.xml?<透传参数>&since=<日期>。
@@ -466,12 +502,12 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 		works = filterSince(s.log, works, since)
 	}
 
-	s.renderFeed(w, r, feed.Meta{
+	s.renderItems(w, r, feed.Meta{
 		Title:       <-nameCh,
 		Link:        s.feedURL(r),
 		Description: "女优 " + id + " 的订阅源",
 		Language:    s.cfg.Current().Feed.Language,
-	}, works)
+	}, feed.Build(works))
 }
 
 // actressTitle 拼女优 feed 的标题，能用真名字就用。
@@ -488,14 +524,18 @@ func (s *Server) actressTitle(ctx context.Context, id string) string {
 	return "JavDB · " + name
 }
 
-// renderFeed 是两条路由共用的收尾：选磁链、渲染 RSS。
+// renderItems 是所有 feed 路由共用的收尾：把**已经选好的条目**写成 RSS。
+//
+// 选磁链（feed.Build）刻意留给调用方自己做，而不是在这里顺手做掉：
+// 「想看」那条路由要拿 build 的**产物**算一个数字（有几部作品被跳过了），
+// 而那个数字必须写进 channel 标题 —— 也就是必须在 meta 之前就算出来。
+// 在这里再 build 一次的话，同一道判据就有了两个执行点，而它们必须永远一致。
 //
 // feed 是**请求时现算**的。这不是最终形态 —— ticket 09 会决定要不要在
 // catalog.Source 外面包一层缓存或后台刷新。之所以现在不提前决定，
 // 是因为成本量级还没量出来；而选择「现算 + Source 作为唯一端口」的好处是，
 // 将来加缓存只需要包一层装饰器，这里一行都不用改。
-func (s *Server) renderFeed(w http.ResponseWriter, r *http.Request, meta feed.Meta, works []catalog.Work) {
-	items := feed.Build(works)
+func (s *Server) renderItems(w http.ResponseWriter, r *http.Request, meta feed.Meta, items []feed.Item) {
 
 	// 曾经这里有一段「上游已知损坏时把警告写进 channel 描述」，已删除：
 	//

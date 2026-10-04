@@ -44,79 +44,39 @@ type collectedEnvelope struct {
 
 // CollectedActresses 实现 catalog.Source：读取用户在 App 里收藏的女优。
 //
-// 三个刻意的行为：
+// 两个刻意的行为：
 //
 //  1. **没有 token 时直接返回 ErrNoToken，不发请求。** 发了也必然被拒
 //     （实测返回 JWTVerificationError），而且返回空列表会被用户理解成
 //     「我没收藏任何人」—— 那是最难排查的一种错。
-//  2. **翻页到底，不去猜总数。** 上游不返回总数，只能靠空页判断。
-//  3. **按 id 去重。** 上游分页在数据变动时可能重叠。
-//  4. **触顶时报 Truncated。** 前 maxCollectedPages 页都非空时，再问一页：
-//     那页为空说明收藏恰好落在上限附近（完整），非空则说明上游还有数据没读完
-//     —— 后者才置 Collection.Truncated 为 true。
-//     这一次探针只在到达上限时发生，用来把信号精确到「确实还有更多」，
-//     而不是「我们踩到了上限」。后者会让一个恰好收藏了上限位数的用户
-//     永远看到一条假的截断警告。
+//  2. **翻页到底、按 id 去重、触顶时报 Truncated。** 这三件事与「想看」清单
+//     完全同形（同一套上游翻页行为、同一套触顶语义），因此由 readAllPages
+//     一处实现 —— 包括那次「多探一页」的探针，以及它为什么必须存在。
 func (c *Client) CollectedActresses(ctx context.Context) (catalog.Collection, error) {
 	if strings.TrimSpace(c.Token) == "" {
 		return catalog.Collection{}, fmt.Errorf("取收藏女优: %w", catalog.ErrNoToken)
 	}
 
-	var out []catalog.Actress
-	seen := make(map[string]bool)
-	appendPage := func(actors []collectedActress) {
-		for _, a := range actors {
-			id := strings.TrimSpace(a.ID)
-			if id == "" || seen[id] {
-				continue
-			}
-			seen[id] = true
-			out = append(out, catalog.Actress{
-				ID:          id,
-				Name:        strings.TrimSpace(a.Name),
-				VideosCount: a.VideosCount,
-			})
-		}
-	}
-
-	for page := 1; page <= maxCollectedPages; page++ {
-		actors, err := c.collectedPage(ctx, page)
-		if err != nil {
-			return catalog.Collection{}, err
-		}
-		if len(actors) == 0 {
-			// 空页 = 到底。这是一份**完整**的清单。
-			return catalog.Collection{
-				Actresses:    out,
-				PagesFetched: page,
-				MaxPages:     maxCollectedPages,
-			}, nil
-		}
-		appendPage(actors)
-	}
-
-	// 到达上限仍未遇空页。但「满页」不等于「还有更多」：收藏数恰好落在上限
-	// 或它所在页的中间时，下一页同样是空的。再探一页才能分清。
-	// 探针的内容**不入列表** —— 触顶时我们刻意只给到上限为止。
-	probe, err := c.collectedPage(ctx, maxCollectedPages+1)
+	actors, pg, err := readAllPages(maxCollectedPages,
+		func(a collectedActress) string { return strings.TrimSpace(a.ID) },
+		func(page int) ([]collectedActress, error) { return c.collectedPage(ctx, page) })
 	if err != nil {
 		return catalog.Collection{}, err
 	}
-	if len(probe) == 0 {
-		return catalog.Collection{
-			Actresses:    out,
-			PagesFetched: maxCollectedPages + 1,
-			MaxPages:     maxCollectedPages,
-		}, nil
+
+	out := make([]catalog.Actress, 0, len(actors))
+	for _, a := range actors {
+		out = append(out, catalog.Actress{
+			ID:          strings.TrimSpace(a.ID),
+			Name:        strings.TrimSpace(a.Name),
+			VideosCount: a.VideosCount,
+		})
 	}
-	// 上限之外确实还有数据。这份清单**已知不完整**，必须带上 Truncated，
-	// 而不是照常返回 —— 这是本服务唯一会少给数据的地方，让它静默就是把
-	// 用户无法分辨的失败埋在数据里。
 	return catalog.Collection{
 		Actresses:    out,
-		Truncated:    true,
-		PagesFetched: maxCollectedPages,
-		MaxPages:     maxCollectedPages,
+		Truncated:    pg.truncated,
+		PagesFetched: pg.pagesFetched,
+		MaxPages:     pg.maxPages,
 	}, nil
 }
 

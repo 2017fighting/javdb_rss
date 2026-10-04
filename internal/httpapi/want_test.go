@@ -77,8 +77,14 @@ func TestWantFeedRendersItemsAndCountsPendingOnes(t *testing.T) {
 	}
 
 	got := parseWantFeed(t, rec.Body.String())
-	if got.Channel.Title != "JavDB · 想看" {
-		t.Errorf("channel 标题 = %q", got.Channel.Title)
+	// ⭐ 标题里必须带上那两个数字。
+	//
+	// 这不是「好看」的问题：实测 qBittorrent 的 RSS API 响应里 feed 对象
+	// **根本没有 description 字段**（它的键是 articles/hasError/isLoading/
+	// lastBuildDate/title/uid/url），而 qbt 正是这条 feed 的主要消费者 ——
+	// 信号只写在描述里就等于在 qbt 里不存在。这条断言是那次修正的钉子。
+	if got.Channel.Title != "JavDB · 想看（2 部 · 1 部待磁链）" {
+		t.Errorf("channel 标题 = %q，待磁链的数目必须出现在标题里", got.Channel.Title)
 	}
 	if len(got.Channel.Items) != 1 {
 		t.Fatalf("得到 %d 条条目，尚无磁链的那部不该有条目", len(got.Channel.Items))
@@ -114,6 +120,9 @@ func TestWantFeedDescriptionStaysCleanWhenNothingIsPending(t *testing.T) {
 	if got.Channel.Description != "App 里「想看」的作品，共 1 部" {
 		t.Errorf("描述 = %q，不该带上「0 部尚无磁链」这样的噪音", got.Channel.Description)
 	}
+	if got.Channel.Title != "JavDB · 想看（1 部）" {
+		t.Errorf("标题 = %q，没有待磁链时不该挂一个恒为 0 的计数", got.Channel.Title)
+	}
 }
 
 // TestWantFeedReportsTruncation 确认触顶时 feed 自己说得出来。
@@ -132,6 +141,10 @@ func TestWantFeedReportsTruncation(t *testing.T) {
 	got := parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
 	if !strings.Contains(got.Channel.Description, "触顶") {
 		t.Errorf("描述里应当说明清单可能不完整，实际是 %q", got.Channel.Description)
+	}
+	// 截断也必须出现在标题里 —— 理由同 TestWantFeedRendersItemsAndCountsPendingOnes。
+	if !strings.Contains(got.Channel.Title, "列表可能不完整") {
+		t.Errorf("标题 = %q，截断信号在 qbt 里只能靠标题看到", got.Channel.Title)
 	}
 }
 
@@ -205,6 +218,11 @@ func TestWantFeedEmptyListIsStillAFeed(t *testing.T) {
 	}
 	if !strings.Contains(got.Channel.Description, "共 0 部") {
 		t.Errorf("描述 = %q，它要说清楚「你还没标过任何想看」", got.Channel.Description)
+	}
+	// 空的想看清单在 qbt 里就是「0 条」—— 标题必须把「共 0 部」说出来，
+	// 否则它与「列表丢了/没读到」长得一模一样。
+	if got.Channel.Title != "JavDB · 想看（0 部）" {
+		t.Errorf("标题 = %q", got.Channel.Title)
 	}
 }
 
