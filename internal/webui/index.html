@@ -236,6 +236,180 @@
           class="hidden rounded-lg border border-dashed border-border px-4 py-10 text-center"
         ></p>
       </section>
+
+      <!-- ══════════════════ 某位女优的标签 ══════════════════ -->
+      <!-- 这一区的数据是两次**匿名**读取：上游词表（/tags?type=0）与她自己的
+           标签（/actress_tags/{id}）。两者都不需要 token，所以「收藏读不到」
+           不该把它连坐 —— 没配 token 时这里照旧可用。 -->
+      <section id="panel-tags" aria-labelledby="tags-heading" class="mt-10">
+        <h2 id="tags-heading" class="text-sm font-semibold tracking-tight">
+          某位女优的标签
+        </h2>
+        <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+          选一位女优（或直接手输她的 id），把她<strong
+            class="font-medium text-foreground"
+            >自己的标签</strong
+          >按上游分组挑出来，落到一条订阅链接上。标签词表与女优标签都是匿名可读的。
+        </p>
+
+        <div class="mt-4">
+          <label
+            for="tag-picker"
+            class="text-xs font-medium text-muted-foreground"
+            >女优</label
+          >
+          <input
+            id="tag-picker"
+            class="field mt-1.5 md:max-w-xs"
+            list="actress-options"
+            placeholder="名字或 id，也可从下拉里选"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <datalist id="actress-options"></datalist>
+          <p
+            id="tag-picker-status"
+            class="mt-1.5 text-xs text-muted-foreground"
+            role="status"
+          ></p>
+        </div>
+
+        <fieldset class="mt-5">
+          <legend class="text-xs font-medium text-muted-foreground">
+            基本 <span class="font-mono">main</span> —— 这组走
+            <code class="font-mono">filter_by</code>，不走
+            <code class="font-mono">filter_by_tags</code>
+          </legend>
+          <div id="main-flags" class="mt-2 flex flex-wrap gap-2"></div>
+          <p id="main-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+        </fieldset>
+
+        <fieldset class="mt-5">
+          <legend class="text-xs font-medium text-muted-foreground">
+            链接范围
+          </legend>
+          <div
+            id="tag-mode-group"
+            role="radiogroup"
+            aria-label="链接范围"
+            class="segmented mt-2"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked="true"
+              data-tagmode="new"
+            >
+              追新
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked="false"
+              data-tagmode="all"
+            >
+              全量
+            </button>
+          </div>
+          <p id="tag-mode-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+        </fieldset>
+
+        <div class="mt-6">
+          <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h3 class="text-xs font-medium text-muted-foreground">标签</h3>
+            <p class="text-xs text-muted-foreground">
+              最多选 <span class="tnum">5</span> 个 · 已选
+              <span id="tag-count" class="tnum font-medium text-foreground"
+                >0</span
+              >/5
+            </p>
+          </div>
+
+          <!-- 标签搜索的字段：标签文字常驻在字段**上方**（不用 placeholder
+               当标签）。它是个过滤器，不是主输入，所以比正文矮一档（h-9）。 -->
+          <div class="mt-3 flex flex-wrap items-end gap-3">
+            <div class="min-w-0 flex-1 md:max-w-48">
+              <label
+                for="tag-search"
+                class="text-xs font-medium text-muted-foreground"
+                >筛选标签</label
+              >
+              <input
+                id="tag-search"
+                class="field mt-1.5 h-9"
+                type="search"
+                placeholder="名字或 id"
+                autocomplete="off"
+              />
+            </div>
+            <button
+              id="tag-expand"
+              class="btn btn-sm btn-ghost shrink-0"
+              type="button"
+            >
+              全部展开
+            </button>
+          </div>
+
+          <p class="note mt-2">
+            分组名、分组顺序、组内标签都取自上游词表
+            <code class="font-mono">/tags?type=0</code>（女优订阅用的就是有码那个库），
+            但<strong class="font-medium text-foreground"
+              >只保留她自己 <code class="font-mono">tags[]</code> 里有的那几个</strong
+            >。最多 5 个不是我们的约定 —— 实测第
+            <strong class="font-medium text-foreground"
+              >6 个 id 会被上游静默丢弃</strong
+            >（同一个 id 挪到前 5 位就生效），所以上限只能是 5。多个标签之间是<strong
+              class="font-medium text-foreground"
+              >交集</strong
+            >。
+          </p>
+
+          <div id="tag-selected" class="mt-3"></div>
+          <div id="tag-groups" class="mt-4 space-y-2"></div>
+          <p
+            id="tag-empty"
+            class="mt-3 hidden rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground"
+          ></p>
+        </div>
+
+        <div class="mt-6 rounded-lg border border-border p-4">
+          <h3 class="text-xs font-medium text-foreground">年份</h3>
+          <div class="mt-3">
+            <label
+              for="year-select"
+              class="text-xs font-medium text-muted-foreground"
+              >发行年份</label
+            >
+            <!-- 年份是**精确的整年**（掩码第 5 段，实测 `::2021` 返回的 19 部全在
+                 2021 内），所以选项文字里没有、也不能有「起」—— 那是只有下界
+                 （`since=`）时的说法。26 个年份铺成一排 chip 会淹没这一屏，
+                 用原生 select：它有键盘跳转，手机上是系统滚轮。 -->
+            <select id="year-select" class="field mt-1.5 md:max-w-40"></select>
+            <p id="year-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+          </div>
+        </div>
+
+        <div class="mt-6 rounded-lg border border-border bg-card p-4">
+          <h3 class="text-xs font-medium text-muted-foreground">
+            这条链接长这样
+          </h3>
+          <p
+            id="tag-url"
+            class="mt-2 rounded-md bg-muted px-3 py-2 font-mono text-xs break-all text-foreground"
+            aria-live="polite"
+          ></p>
+          <p id="tag-url-hint" class="mt-2 text-xs text-muted-foreground"></p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button id="tag-add" class="btn btn-lg btn-outline" type="button" disabled>
+              加入待复制
+            </button>
+            <button id="tag-copy" class="btn btn-lg btn-ghost" type="button" disabled>
+              复制这条
+            </button>
+          </div>
+        </div>
+      </section>
     </main>
 
     <!-- ─────────────────── 待复制：唯一的输出台 ─────────────────── -->

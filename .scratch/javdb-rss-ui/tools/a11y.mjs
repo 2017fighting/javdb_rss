@@ -10,7 +10,8 @@
  * 结果算在代码里，不靠「看起来不错」。
  *
  * 它打的是 **provider=stub 的真服务**。票 03 只有「收藏女优」一个分区，
- * 因此这里只跑这一屏；标签（04/05）、清单与想看（06）的分区在各自的票里补回来。
+ * 票 04 补回了「某位女优的标签」分区（展开分组 + 选中一颗标签也算进"有内容"态）。
+ * 清单与想看（06）的分区在各自的票里补。
  */
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
@@ -40,6 +41,8 @@ for (const width of [375, 768, 1440]) {
     const page = await ctx.newPage();
     await page.goto(origin, { waitUntil: "load" });
     await page.waitForSelector("#actress-list [data-actress]");
+    // 标签区（票 04）：等她的标签落位 —— 否则 axe 量到的是「正在读取」那个态。
+    await page.waitForFunction(() => document.querySelectorAll("#tag-groups details").length > 0);
     if (theme === "dark") {
       await page.evaluate(() => document.documentElement.classList.add("dark"));
     }
@@ -65,8 +68,11 @@ for (const width of [375, 768, 1440]) {
     };
     await axeRun("initial");
 
-    // 先造出「有内容」的状态：选中的行 + 展开的待复制面板。
+    // 先造出「有内容」的状态：选中的行 + 展开的标签分组与选中的标签
+    // + 展开的待复制面板。空页面过闸门、填满后不过，是这种页面最容易漏的一种。
     for (const id of ["EvkJ", "D2EdJ"]) await page.check(`[data-actress="${id}"]`);
+    await page.click("#tag-expand");
+    await page.click('#tag-groups [data-tag="3"]');
     await page.click("#tray-toggle");
     await axeRun("populated");
 
@@ -98,7 +104,8 @@ for (const width of [375, 768, 1440]) {
 
     // ── 3. 焦点可见性：真的用 Tab 走一圈（:focus-visible 只在键盘触发下成立）──
     const focus = [];
-    for (let i = 0; i < 12; i++) {
+    // 够走到待复制工具条：标签区的牌（chip）不少，8 步已经不购了。
+    for (let i = 0; i < 60; i++) {
       await page.keyboard.press("Tab");
       const info = await page.evaluate(() => {
         const e = document.activeElement;

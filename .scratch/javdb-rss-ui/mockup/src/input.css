@@ -15,6 +15,10 @@
 @source "../index.html";
 @source "../src/data.js";
 @source "../app.js";
+/* promote 之后页面本身在 internal/webui。产物（internal/webui/assets/app.css）
+   是从**真正使用它的那个页面**扫出来的，否则新加的 utility 不会进产物。 */
+@source "../../../../internal/webui/index.html";
+@source "../../../../internal/webui/assets/app.js";
 
 /* ── shadcn 默认主题（neutral），HSL 三元组形式 ───────────────────────── */
 :root {
