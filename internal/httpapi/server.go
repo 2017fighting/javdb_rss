@@ -329,7 +329,8 @@ func (s *Server) handleCollectedLists(w http.ResponseWriter, r *http.Request) {
 // 女优那条会说「女优」，这条会说「清单」，而把差异做成参数会让两个 handler
 // 的调用点都变得难读。共用的是更下面那一层（appapi 的 entityWorks）。
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	if rejectBrowseOnlyParams(w, r) {
+	sel, ok := splitOwnSelectors(w, r, routeList)
+	if !ok {
 		return
 	}
 	id, ok := pathParam(r.URL.Path, "/rss/list/")
@@ -353,6 +354,12 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		params[k] = vs[0]
+	}
+	// 语义参数（main / tags→filter_by_tags）随后写入，覆盖同名透传项。
+	for k, vs := range sel {
+		if len(vs) > 0 {
+			params[k] = vs[0]
+		}
 	}
 
 	since := strings.TrimSpace(query.Get("since"))
@@ -588,7 +595,8 @@ func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
 
 // handleActress 服务 GET /rss/actress/{id}.xml?<透传参数>&since=<日期>。
 func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
-	if rejectBrowseOnlyParams(w, r) {
+	sel, ok := splitOwnSelectors(w, r, routeActress)
+	if !ok {
 		return
 	}
 	id, ok := pathParam(r.URL.Path, "/rss/actress/")
@@ -624,6 +632,13 @@ func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		params[k] = vs[0]
+	}
+	// 语义参数（main / year / tags→filter_by_tags）随后写入，
+	// 因此 URL 上的值覆盖白名单里的同名项 —— 与别的参数同一套优先级。
+	for k, vs := range sel {
+		if len(vs) > 0 {
+			params[k] = vs[0]
+		}
 	}
 
 	since := sub.Since

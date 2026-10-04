@@ -273,7 +273,34 @@ guid 跨轮询逐条不变；磁链能被它的引擎接受（`success_count: 1`
 | 类别 | 参数 | 谁在用 |
 |---|---|---|
 | **本服务自有** | `since` `pages` `page` `limit` | 我们消费，**不会**发给上游 |
+| **语义参数** | `main` `year` `tags` | 我们消费：拼进掩码 / 翻译成 `filter_by_tags` |
 | **原样透传** | `filter_by` `filter_by_tags` `sort_by` `order_by` | 原封不动转发给上游女优页 |
+
+#### 语义参数（女优订阅与清单订阅）
+
+抓包验过之后加的：这几个维度不该让用户自己拼掩码。
+
+```bash
+/rss/actress/EvkJ.xml?year=2021              掩码 → 0:a:EvkJ::2021（实测整年：19 部全在 2021）
+/rss/actress/EvkJ.xml?year=2021&main=c       掩码 → 0:a:EvkJ:c:2021（8 部，cnsub 8/8）
+/rss/actress/EvkJ.xml?year=2021&tags=48      + filter_by_tags=48（年份与标签能组合）
+/rss/list/k4EVE4.xml?tags=68&main=c          标签走 filter_by_tags，主属性走掩码
+```
+
+⚠️ **掩码的段数是有讲究的，所以别自己拼**：年份只能落在掩码的**第 5 段**，
+后面不能再有东西。实测 `0:a:EvkJ:c:2021:`（第 6 段是空的）会让上游
+**丢掉年份**而 main 仍然生效 —— feed 看起来筛了 2021、实际跨到 2026。
+`0:a:EvkJ::2021:gt-120` 更糟：整条被丢弃，直接回到未筛选。
+
+因此：
+
+- 服务自己构造的掩码只写到第 5 段，**不留尾段**；
+- 你手写 `filter_by` 时，第 5 段非空而后面还有段 → **400**；
+- `0:a:EvkJ:c::`（尾部空段）实测无害，继续放行。
+
+**清单订阅不支持 `year`**（实测槽位被忽略：`0:l:p36Eww::2025` 返回整份清单），
+`month` / `duration` 在女优与清单上都不支持（只有全站形态有）——
+这两类一律 **400**：静默忽略会造出一条看着筛过、其实没筛的 feed。
 
 完整参数表（**每条都对着真实上游实测过**）见
 [`.scratch/javdb-rss/notes/actress-params.md`](.scratch/javdb-rss/notes/actress-params.md)。

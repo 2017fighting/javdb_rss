@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -222,28 +223,95 @@ func filterSummary(sel catalog.BrowseSelector) string {
 	return strings.Join(parts, "；")
 }
 
-// rejectBrowseOnlyParams 把「只在全站路由上有意义的参数」在别的路由上判成用户写错。
+// splitOwnSelectors 把「筛选维度」这几个自有参数从 query 里读出来，
+// 并按**这条路由支不支持**分别处理。
 //
-// 为什么不能只是忽略：这些参数在女优/清单路由上会被当作自有参数剔除，
-// 而上游也本来就不认它们 —— 两条路都通向**同一条没筛过的 feed**，
-// 而用户以为自己筛了。那是本项目最不能接受的一类失败。
+// 为什么必须逐条判，而不是一律忽略或一律拒绝：
 //
-// ⚠️ 这里是**临时**的严格：女优页掩码的尾部语法（有没有 tags/年份/时长槽）
-// 还没从抓包里验出来。验出来之后这里应当改成「拼进掩码」而不是「报 400」。
-func rejectBrowseOnlyParams(w http.ResponseWriter, r *http.Request) bool {
-	var bad []string
-	for _, k := range browseOwnParams {
-		if strings.TrimSpace(r.URL.Query().Get(k)) != "" {
-			bad = append(bad, k)
+//	year      女优订阅支持（掩码第 5 段，实测整年）；清单**不支持**（实测被忽略）
+//	main      女优与清单都支持（掩码的主属性段）
+//	tags      女优与清单都支持 —— 但它们走的是**独立参数 filter_by_tags**，
+//	          而不是掩码里的槽位（那是全站形态用的）
+//	month/duration  只有全站形态支持；女优/清单上加了会静默失效
+//
+// 所以「不支持」的那些必须返回 400：静默忽略会造出一条**看着筛过、其实没筛**
+// 的 feed，而那是本项目最不能接受的一类失败。
+func splitOwnSelectors(w http.ResponseWriter, r *http.Request, route routeKind) (url.Values, bool) {
+	q := r.URL.Query()
+	out := url.Values{}
+
+	tags := strings.TrimSpace(q.Get("tags"))
+	year := strings.TrimSpace(q.Get("year"))
+	month := strings.TrimSpace(q.Get("month"))
+	duration := strings.TrimSpace(q.Get("duration"))
+	main := strings.TrimSpace(q.Get("main"))
+
+	switch route {
+	case routeBrowse:
+		// 全站形态：五样都走掩码，由 handleBrowse 自己处理。
+		return nil, true
+	case routeList:
+		var unsupported []string
+		if year != "" {
+			unsupported = append(unsupported, "year")
+		}
+		if month != "" {
+			unsupported = append(unsupported, "month")
+		}
+		if duration != "" {
+			unsupported = append(unsupported, "duration")
+		}
+		if len(unsupported) > 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"清单订阅不支持 %s。实测清单掩码里的年份槽被上游**忽略**"+
+					"（`0:l:p36Eww::2025` 返回的是整份清单），月份/时长更是只有全站形态才有。"+
+					"加了不会报错，只会让你以为筛了", strings.Join(unsupported, "、")))
+			return nil, false
+		}
+	case routeActress:
+		var unsupported []string
+		if month != "" {
+			unsupported = append(unsupported, "month")
+		}
+		if duration != "" {
+			unsupported = append(unsupported, "duration")
+		}
+		if len(unsupported) > 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"女优订阅不支持 %s —— App 的女优筛选面板里也没有这两项，"+
+					"而且掩码里多写一段会让整条掩码的解析变样（实测 main 仍生效、年份被丢掉）。"+
+					"这两个维度请用全站订阅 /rss/tags/{片库号}.xml",
+				strings.Join(unsupported, "、")))
+			return nil, false
 		}
 	}
-	if len(bad) == 0 {
-		return false
+
+	if main != "" {
+		out.Set("main", main)
 	}
-	writeError(w, http.StatusBadRequest, fmt.Sprintf(
-		"参数 %s 只在本服务的全站订阅 /rss/tags/{片库号}.xml 上支持。"+
-			"女优订阅的标签请用 filter_by_tags（它实测只对女优实体生效）；"+
-			"清单订阅的标签目前不支持（上游会静默忽略）",
-		strings.Join(bad, "、")))
-	return true
+	if year != "" {
+		out.Set("year", year)
+	}
+	if tags != "" {
+		// 标签在实体路由上走**独立参数**（那是 App 女优页发的形态），
+		// 而不是掩码里的槽位。已经给了 filter_by_tags 就不要再给 tags ——
+		// 两个都写会让人不知道以哪个为准。
+		if strings.TrimSpace(q.Get("filter_by_tags")) != "" {
+			writeError(w, http.StatusBadRequest,
+				"tags 与 filter_by_tags 是同一件事的两种写法，只能给一个："+
+					"tags 是本服务的语义参数（会被翻译成 filter_by_tags）")
+			return nil, false
+		}
+		out.Set("filter_by_tags", tags)
+	}
+	return out, true
 }
+
+// routeKind 是「这条路由是哪种订阅」。三种形态的掩码语法不同。
+type routeKind int
+
+const (
+	routeActress routeKind = iota
+	routeList
+	routeBrowse
+)

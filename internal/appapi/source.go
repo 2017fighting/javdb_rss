@@ -188,6 +188,10 @@ func (c *Client) entityWorks(ctx context.Context, e entity, params url.Values, n
 // 校验规则是**按路由不同**的（实体掩码要 id 与 URL 一致，全站掩码压根没有 id），
 // 混进这一层只会让两套规则互相打架。
 func (c *Client) worksByMask(ctx context.Context, filterBy string, params url.Values) ([]catalog.Work, error) {
+	if err := validateFilterByTags(params.Get("filter_by_tags")); err != nil {
+		return nil, err
+	}
+
 	pages := pageCount(params)
 
 	base := url.Values{"filter_by": {filterBy}}
@@ -253,6 +257,26 @@ func (c *Client) worksByMask(ctx context.Context, filterBy string, params url.Va
 	return all, nil
 }
 
+// validateFilterByTags 拦住「标签超过 MaxTags 个」。
+//
+// 实测把 6 个 id 交给上游时，第 6 个被**静默丢弃**（把同一个 id 挪到前 5 位就生效）。
+// 也就是说发 6 个不会报错，只会少筛一个 —— 用户以为筛了 6 个。
+// 这个上限出现在两条通道上（独立参数 filter_by_tags 与全站掩码的标签槽），
+// 两处都必须拦。
+func validateFilterByTags(csv string) error {
+	csv = strings.TrimSpace(csv)
+	if csv == "" {
+		return nil
+	}
+	n := len(strings.Split(csv, ","))
+	if n > catalog.MaxTags {
+		return fmt.Errorf("%w：filter_by_tags 给了 %d 个 id，但上游**只认前 %d 个**"+
+			"（第 %d 个会被静默丢弃）。请只给 %d 个，或拆成多条订阅",
+			catalog.ErrBadRequest, n, catalog.MaxTags, catalog.MaxTags+1, catalog.MaxTags)
+	}
+	return nil
+}
+
 // limitPerPage 是每页条数。实测服务端上限就是 50（传 100/200/500 都只给 50）。
 const limitPerPage = 50
 
@@ -306,13 +330,56 @@ func buildFilter(e entity, params url.Values, n entityNouns) (string, error) {
 		return "", fmt.Errorf("%s", n.empty)
 	}
 	raw := strings.TrimSpace(params.Get("filter_by"))
-	if raw == "" {
-		return e.filter(), nil
+	if raw != "" {
+		if err := validateEntityMask(raw, e, n); err != nil {
+			return "", err
+		}
+		return raw, nil
 	}
-	if err := validateEntityMask(raw, e, n); err != nil {
-		return "", err
+	return buildEntityMask(e, params, n)
+}
+
+// buildEntityMask 按**语义参数**构造实体掩码（`main` / `year`）。
+//
+// 形态实测确认（2026-10-04，真机抓包 + 逐槽位对照，见 notes/tag-vocabulary.md 第 8 节）：
+//
+//	{zone}:{letter}:{id}[:{main}[:{year}]]        ← 3 / 4 / 5 段
+//
+// 三处刻意的地方，每一处都对应一种**静默失败**：
+//
+//  1. **不写多余的尾段。** 6 段及更多时，上游的解析变成「main 仍生效、year 被丢掉」
+//     （实测 `0:a:EvkJ:c:2021:` → cnsub 50/50 但跨 2022–2026，年份没了）。
+//     所以年份只能落在第 5 段，且后面不能有东西。
+//  2. **year 只给女优（letter=a）。** 同一个位置在清单上被**忽略**
+//     （实测 `0:l:p36Eww::2025` 返回整份清单 9 条）—— 加了等于没加。
+//  3. **main 为空但 year 有值时，第 4 段也必须写出来**（`0:a:EvkJ::2021`）——
+//     省掉它会让年份落到第 4 段上，变成 main="2021"。
+func buildEntityMask(e entity, params url.Values, n entityNouns) (string, error) {
+	main := strings.TrimSpace(params.Get("main"))
+	year := strings.TrimSpace(params.Get("year"))
+
+	if year != "" {
+		if !isDigits(year) || len(year) != 4 {
+			return "", fmt.Errorf("%w：年份 %q 应当是四位数字（如 2020）", catalog.ErrBadRequest, year)
+		}
+		if e.letter != "a" {
+			return "", fmt.Errorf("%w：年份只在**女优订阅**上生效。"+
+				"实测 %s 形式的掩码里这一槽被上游忽略（`0:l:p36Eww::2025` 返回的是整份清单）——"+
+				"加了不会报错，只会让你以为筛了", catalog.ErrBadRequest, n.route)
+		}
 	}
-	return raw, nil
+
+	parts := []string{strconv.Itoa(e.zone), e.letter, e.id}
+	if main != "" || year != "" {
+		if err := validateMainFlags(main); err != nil {
+			return "", err
+		}
+		parts = append(parts, main)
+	}
+	if year != "" {
+		parts = append(parts, year)
+	}
+	return strings.Join(parts, ":"), nil
 }
 
 // validateMask 拦住女优页上那些会让上游**静默返回错误内容**的 `filter_by`。
@@ -379,7 +446,16 @@ func validateEntityMask(mask string, e entity, n entityNouns) error {
 			"第三段的实体 id 是 %q，但 URL 里的%s是 %q。"+
 				"不相同会让 feed 标题写着 %s 却展示 %s 的作品", id, n.what, e.id, e.id, id))
 	}
-	// 5. 主属性（可缺省）
+	// 5. **年份只能在第 5 段，且后面不能再有东西。**
+	//    实测 `0:a:EvkJ:c:2021:`（6 段）里 main 仍然生效、而 year 被静默丢弃 ——
+	//    于是 feed 看起来筛了年份、实际跨了好几年。这类「看着筛了其实没筛」
+	//    是本项目最不能接受的失败，因此本地拦下。
+	if len(parts) > 5 && strings.TrimSpace(parts[4]) != "" {
+		return badMask(mask, "第 5 段是年份，但它后面还有东西 —— 实测这会让年份被**静默丢弃**"+
+			"（main 仍然生效，于是 feed 看起来筛了年份、实际跨了好几年）。"+
+			"年份只能出现在最后一段："+fmt.Sprintf("%s:<年份>", e.filter()))
+	}
+	// 6. 主属性（可缺省）
 	if len(parts) > 3 {
 		for _, seg := range strings.Split(parts[3], ",") {
 			if strings.TrimSpace(seg) == "" {

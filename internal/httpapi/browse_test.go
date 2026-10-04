@@ -163,33 +163,76 @@ func TestBrowseRouteRejectsRawMask(t *testing.T) {
 	}
 }
 
-// TestActressRouteRejectsBrowseOnlyParams 是本轮新增里最要紧的一条防御。
+// TestActressRouteAcceptsYearAndTags 是抓包验完之后的落点。
 //
-// `tags`/`year`/`month`/`duration`/`main` 只在全站路由上有意义。要是它们在
-// 女优路由上被**静默忽略**，用户会拿到一条「看上去筛了、实际没筛」的 feed ——
-// 而那是本项目最不能接受的一类失败。所以判成 400。
-//
-// ⚠️ 这是临时的严格：女优页掩码的尾部语法还没从抓包里验出来。
-// 验出来之后这里应当改成「拼进掩码」。
-func TestActressRouteRejectsBrowseOnlyParams(t *testing.T) {
-	h := newTestServer(t, "provider: stub\n", &stub.Source{})
-	for _, q := range []string{"tags=68", "year=2020", "month=3", "duration=gt-120", "main=c"} {
-		rec := do(t, h, "/rss/actress/EvkJ.xml?"+q)
-		if rec.Code != 400 {
-			t.Errorf("?%s = %d, want 400（静默忽略会让 feed 看着筛过其实没筛）", q, rec.Code)
-		}
+// 女优掩码的尾部（掩码第 5 段 = 年份）实测有效（`0:a:EvkJ::2021` → 19 条全 2021），
+// 而标签走**独立参数** filter_by_tags（App 女优页就是这么发的）。
+// 所以这两样在女优路由上要能用，而不是被拒。
+func TestActressRouteAcceptsYearAndTags(t *testing.T) {
+	src := &recordingSource{works: []catalog.Work{
+		{Number: "A-1", ReleaseDate: "2021-06-01", Magnets: []catalog.Magnet{{Infohash: "h1"}}}}}
+	h := newTestServer(t, "provider: stub\n", src)
+
+	if rec := do(t, h, "/rss/actress/EvkJ.xml?year=2021&tags=48"); rec.Code != 200 {
+		t.Fatalf("状态码 = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	// 不影响本来就能用的参数。
-	if rec := do(t, h, "/rss/actress/EvkJ.xml?filter_by_tags=68&since=2026-01-01"); rec.Code != 200 {
-		t.Errorf("filter_by_tags/since 应当照常可用，得到 %d", rec.Code)
+	got := src.gotActressCur
+	if got.Get("year") != "2021" {
+		t.Errorf("year 应当流到 appapi（它要拼进掩码），得到 %q", got.Get("year"))
+	}
+	if got.Get("filter_by_tags") != "48" {
+		t.Errorf("tags 应当被翻译成 filter_by_tags，得到 %q", got.Get("filter_by_tags"))
+	}
+	if _, ok := got["tags"]; ok {
+		t.Error("tags 是本服务的语义参数，不该原样流到下游")
 	}
 }
 
-// TestListRouteRejectsBrowseOnlyParams 同上，清单路由也拦。
-func TestListRouteRejectsBrowseOnlyParams(t *testing.T) {
+// TestActressRouteRejectsMonthAndDuration 是本轮新增里最要紧的一条防御。
+//
+// 女优筛选面板里没有这两项（用户确认），而掩码里**多写一段**会让解析变样：
+// 实测 `0:a:EvkJ:c:2021:` 里 main 仍然生效、**年份被静默丢弃** ——
+// 于是 feed 看起来筛了 2021、实际跨到 2026。这类「看着筛了其实没筛」
+// 是本项目最不能接受的一类失败，所以判成 400。
+func TestActressRouteRejectsMonthAndDuration(t *testing.T) {
 	h := newTestServer(t, "provider: stub\n", &stub.Source{})
-	if rec := do(t, h, "/rss/list/k4EVE4.xml?tags=68"); rec.Code != 400 {
-		t.Errorf("清单路由上的 tags = %d, want 400", rec.Code)
+	for _, q := range []string{"month=3", "duration=gt-120"} {
+		rec := do(t, h, "/rss/actress/EvkJ.xml?"+q)
+		if rec.Code != 400 {
+			t.Errorf("?%s = %d, want 400（静默失效会让 feed 看着筛过其实没筛）", q, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "/rss/tags/") {
+			t.Errorf("文案应当指出该用哪条路由: %s", rec.Body.String())
+		}
+	}
+}
+
+// TestListRouteRejectsTimeDimensions 确认清单路由上 year/month/duration 都被拦。
+//
+// 实测清单掩码里的年份槽被上游**忽略**（`0:l:p36Eww::2025` 返回整份清单 9 条），
+// 所以这里不能默默接受。
+func TestListRouteRejectsTimeDimensions(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+	for _, q := range []string{"year=2020", "month=3", "duration=gt-120"} {
+		if rec := do(t, h, "/rss/list/k4EVE4.xml?"+q); rec.Code != 400 {
+			t.Errorf("清单路由上的 ?%s = %d, want 400", q, rec.Code)
+		}
+	}
+	// 标签与主属性在清单上能用（走独立参数与掩码的主属性段）。
+	if rec := do(t, h, "/rss/list/k4EVE4.xml?tags=68&main=c"); rec.Code != 200 {
+		t.Errorf("清单上的 tags/main 应当可用，得到 %d", rec.Code)
+	}
+}
+
+// TestTagsAndFilterByTagsAreMutuallyExclusive 确认两写时不猜。
+func TestTagsAndFilterByTagsAreMutuallyExclusive(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &stub.Source{})
+	rec := do(t, h, "/rss/actress/EvkJ.xml?tags=68&filter_by_tags=46")
+	if rec.Code != 400 {
+		t.Fatalf("状态码 = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "只能给一个") {
+		t.Errorf("文案要说明原因: %s", rec.Body.String())
 	}
 }
 

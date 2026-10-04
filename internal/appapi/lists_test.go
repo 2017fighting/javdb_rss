@@ -230,3 +230,97 @@ func TestListNameReadsDetailEndpoint(t *testing.T) {
 		t.Errorf("名字 = %q", name)
 	}
 }
+
+// TestEntityMaskUsesYearSlotExactly 钉住「年份只能落在第 5 段」这条实测规则。
+//
+// 三处都是**静默失败**的入口，所以每一处都值得一条断言：
+//
+//	6 段以上且第 5 段非空  → 上游把年份丢掉，main 仍然生效
+//	清单实体               → 年份槽被完全忽略（返回整份清单）
+//	main 空但 year 有值    → 第 4 段必须写出来，否则年份落到第 4 段上
+func TestEntityMaskUsesYearSlotExactly(t *testing.T) {
+	cases := []struct {
+		name   string
+		letter string
+		id     string
+		params url.Values
+		want   string
+	}{
+		{"只有实体", "a", "EvkJ", url.Values{}, "0:a:EvkJ"},
+		{"主属性", "a", "EvkJ", url.Values{"main": {"c"}}, "0:a:EvkJ:c"},
+		{"只看年份（第 4 段必须留出来）", "a", "EvkJ", url.Values{"year": {"2021"}}, "0:a:EvkJ::2021"},
+		{"主属性+年份", "a", "EvkJ", url.Values{"main": {"c"}, "year": {"2021"}}, "0:a:EvkJ:c:2021"},
+		{"清单的主属性", "l", "k4EVE4", url.Values{"main": {"c"}}, "0:l:k4EVE4:c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildEntityMask(entityOf(tc.letter, tc.id), tc.params,
+				entityNouns{route: "女优页", what: "女优", empty: "空"})
+			if err != nil {
+				t.Fatalf("不该报错: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("掩码 = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestListEntityRejectsYear 确认清单上的年份被拦而不是被静默忽略。
+func TestListEntityRejectsYear(t *testing.T) {
+	_, err := buildEntityMask(entityOf("l", "k4EVE4"), url.Values{"year": {"2025"}},
+		entityNouns{route: "清单 feed", what: "清单", empty: "空"})
+	if err == nil {
+		t.Fatal("清单上的 year 应当被拦下 —— 实测上游忽略它，等于没筛")
+	}
+	if !strings.Contains(err.Error(), catalog.ErrBadRequest.Error()) {
+		t.Errorf("应当可判定为 ErrBadRequest: %v", err)
+	}
+}
+
+// TestMaskRejectsYearFollowedByMore 确认「年份后面还有东西」被拦。
+//
+// 实测 `0:a:EvkJ:c:2021:` 里 main 仍然生效、年份被丢掉 ——
+// feed 会看起来筛了 2021、实际跨到 2026。这条正是为此而拦。
+func TestMaskRejectsYearFollowedByMore(t *testing.T) {
+	for _, bad := range []string{"0:a:EvkJ:c:2021:", "0:a:EvkJ::2021:gt-120", "0:a:EvkJ:c:2021:x"} {
+		_, err := buildEntityFilter("EvkJ", url.Values{"filter_by": {bad}})
+		if err == nil {
+			t.Errorf("%q 应当被拦下（年份后面不能再有东西）", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), catalog.ErrBadRequest.Error()) {
+			t.Errorf("%q 的错误应当可判定: %v", bad, err)
+		}
+	}
+	// 尾部的**空**段是历史形态，实测无害，继续放行（README 里就写着它）。
+	if _, err := buildEntityFilter("EvkJ", url.Values{"filter_by": {"0:a:EvkJ:c::"}}); err != nil {
+		t.Errorf("0:a:EvkJ:c:: 实测能筛，不该被误杀: %v", err)
+	}
+	// 恰好 5 段的年份形态要放行。
+	if _, err := buildEntityFilter("EvkJ", url.Values{"filter_by": {"0:a:EvkJ:c:2021"}}); err != nil {
+		t.Errorf("0:a:EvkJ:c:2021 实测能筛，不该被误杀: %v", err)
+	}
+}
+
+// TestFilterByTagsRejectsOverFive 确认独立标签参数也受 5 个上限约束。
+func TestFilterByTagsRejectsOverFive(t *testing.T) {
+	called := false
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(envBody(`{"movies":[]}`)))
+	})
+
+	_, err := c.Actress(context.Background(), "EvkJ",
+		url.Values{"filter_by_tags": {"1,2,3,4,5,6"}})
+	if err == nil {
+		t.Fatal("6 个标签应当被拦下 —— 上游只认前 5 个，第 6 个静默丢弃")
+	}
+	if called {
+		t.Error("超限的请求不该发到上游")
+	}
+	if _, err := c.Actress(context.Background(), "EvkJ",
+		url.Values{"filter_by_tags": {"1,2,3,4,5"}}); err != nil {
+		t.Errorf("5 个标签应当放行: %v", err)
+	}
+}
