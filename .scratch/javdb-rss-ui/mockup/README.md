@@ -15,6 +15,11 @@ npm run build             # mockup/src/input.css -> mockup/assets/app.css
 node tools/gen-data.mjs   # evidence/ -> mockup/src/data.js（要重抓上游时才需要）
 ```
 
+⚠️ promote 之后 `input.css` 同时扫 `internal/webui/{index.html,assets/app.js}`
+（`@source` 那两行）—— 因为**产物** `internal/webui/assets/app.css` 是给那个页面用的，
+只扫 mockup 就会漏掉新加的 utility。改完页面后重跑 `npm run build`，
+再把 `mockup/assets/app.css` 拷成 `internal/webui/assets/app.css`（两份当前逐字节相同）。
+
 然后用 `serve_mockup` 把 `mockup/` 服务出来，浏览器打开 local + LAN 地址。
 评审脚本需要一个能解析到的 playwright（本仓库把外面那份软链进 `node_modules/`）。
 
