@@ -43,7 +43,15 @@
 - **同 effort 内的 08/09 边界引用没动**（followups 08 里的「与 ticket 09 的边界」、
   09 里的「与初次交付地图 ticket 09 的关系」）。它们不是 since 语义的引用，
   且在那两份票里能就地解析 —— 本票的三条验收也只要求唯一解析 since 的。
-- **followups 的 map 叫 `README.md`，而 `docs/agents/issue-tracker.md` 写的是
-  `.scratch/<effort>/map.md`。** 这是本 effort 的**既有结构**（不是本票引入的），
-  且 `internal/appapi/pagination.go` 有一段注释指这个路径 —— 改名要连代码注释一起动。
-  已向用户报过，**留给下一个决定**，记在这里以免这个发现丢掉。
+
+### 当时没做、同日又按要求补做的（2026-10-05）
+
+本票提交后用户要求把下面两件也做掉（它们是本票审查时暴露、当时判为出界的两件）：
+
+1. **followups 的 map 从 `README.md` 改名为 `map.md`** —— 合乎
+   [`docs/agents/issue-tracker.md`](../../../docs/agents/issue-tracker.md) 的
+   `.scratch/<effort>/map.md`。连带改了 `internal/appapi/pagination.go` 里指向它的注释
+   （那是当时判为「改名要动代码」的那处）。
+2. **初次交付地图里那两句旧「服务无状态」订正**（Destination 与 Notes 各一句）：
+   都补上了「唯一例外是钉住」并指向 `CONTEXT.md` 的权威定义 —— 定义早已跟着 08 修过，
+   是那张地图漏跟。同一条「未指定」也跟着从 followups 的 `## Not yet specified` 里拿掉。

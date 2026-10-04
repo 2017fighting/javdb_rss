@@ -129,9 +129,14 @@ qBittorrent 多下一份文件，而没有任何告警。
   欠账为何没有归属、收口在哪张票，并明确「错误在 map 里纠正、不回头改票 09」。
   同时把**指向 since 或成本模型**的裸编号引用唯一化（map 两处、`notes/api-recon.md` §10.6），
   顺带把 §10.6 里当时那句「缓存很可能有必要」标成**后来被实测推翻**。
-  两件有意没做的也记在票里：同 effort 内的 08/09 边界引用（就地可解析，不是 since 引用），
-  以及 followups 的 map 叫 `README.md` 而非 `map.md` 这个既有结构偏差（改名要连
-  `internal/appapi/pagination.go` 的注释一起动）—— **留给下一个决定**。
+  两件当时有意没做、**同日又按要求补做的**：
+  （a）同 effort 内的 08/09 边界引用仍不动 —— 它们就地能解析，不是 since 引用；
+  （b）followups 的 map 从 `README.md` 改名为 `map.md`（合乎
+  [`docs/agents/issue-tracker.md`](../../docs/agents/issue-tracker.md) 的 `.scratch/<effort>/map.md`），
+  连带改了 `internal/appapi/pagination.go` 里指向它的注释；
+  （c）初次交付地图里那两句旧「服务无状态」也订正为「唯一例外是钉住」，
+  并指向 `CONTEXT.md` 的权威定义（原先那句「剩下可能还要收拾」已从本图的
+  `## Not yet specified` 里拿掉）。
   另：原注释写「删掉 6 条」而名单只列 5 条，第 6 条无法复原，如实标注不猜。
 
 ## Not yet specified
@@ -143,10 +148,6 @@ qBittorrent 多下一份文件，而没有任何告警。
   `javdb-rss` 导致 8 MB 构建上下文（不影响最终镜像）；`checkout@v4` / `setup-go@v5`
   的 Node 20 弃用警告（最新是 v7，跨大版本）；`ubuntu-latest` 2026-11 迁 Ubuntu 26.04。
   三条都不阻塞任何东西，因此不开票。
-- **领域与部署文档的一致性**：CONTEXT.md 里「订阅／无状态」的定义已跟着 08 修（pin 是
-  唯一的有意例外，已写明）；deploy 清单与 k8s 已补可写状态卷。剩下可能还要收拾的是
-  地图 `.scratch/javdb-rss/map.md` 里那句旧「状态模型 = 无状态」。（09 已定：pin 只存
-  被选中那条磁链的快照，**不**顺便缓存候选列表。）
 - **ticket 03 复勘暴露的两条口径未知**（都记在 notes 里，未开票）：
   `tags[].videos_count` 与 `filter_by_tags` 实得条数口径不同（80 个标签里 15 个
   对不上，两个方向都有）；`i`/`v` 的含义是从字段反推的，没有上游文案佐证。

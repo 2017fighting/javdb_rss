@@ -29,7 +29,7 @@ type paging struct {
 // # 与 `internal/dedupe` 那处「刻意不抽」的区别
 //
 // dedupe 包里三个逐行重复的方法**故意**没抽成泛型 helper
-// （见 .scratch/javdb-rss-followups/README.md）：那里的重复是**模板**，
+// （见 .scratch/javdb-rss-followups/map.md）：那里的重复是**模板**，
 // 抽出来要付 `any` 断言的代价。这里抽出的是**一条语义**，用类型参数表达，
 // 不需要任何断言；而且两者写歪的代价不对等 —— 模板写歪了编译期或测试立刻知道，
 // 截断语义写歪了只会安静地给出错误答案。
