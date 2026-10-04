@@ -18,6 +18,10 @@ node tools/gen-data.mjs   # evidence/ -> mockup/src/data.js（要重抓上游时
 然后用 `serve_mockup` 把 `mockup/` 服务出来，浏览器打开 local + LAN 地址。
 评审脚本需要一个能解析到的 playwright（本仓库把外面那份软链进 `node_modules/`）。
 
+**不想跑浏览器也能看图**：`shots/` 里是 14 张断点截图（375/768/1440 × 明暗 ×
+空态/填满态），**已经入库**。它们是 1x 的（不是 2x）—— 浏览器里 1:1 就这么大，
+而 2x 会让这 14 张从 4MB 涨到 10MB。要更清楚就改 `tools/shots.mjs` 重跑。
+
 ```bash
 MOCKUP_ORIGIN=http://localhost:62100 ./tools/verify.sh
 ```
@@ -133,6 +137,6 @@ tools/verify.sh                  全部验证
 tools/gen-data.mjs               evidence/ -> mockup/src/data.js
 tools/a11y.mjs                   axe / 触摸目标 / 焦点 / 溢出 / 主操作
 tools/flows.mjs                  四个需求的行为断言（40 项）
-tools/shots.mjs                  断点截图
+tools/shots.mjs                  断点截图（生成物**入库**）
 tools/rubric.json + rubric.mjs   L4 的 7 条布尔答案与算分
 ```

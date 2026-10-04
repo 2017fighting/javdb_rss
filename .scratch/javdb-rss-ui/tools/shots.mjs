@@ -39,7 +39,9 @@ const shots = [
 for (const s of shots) {
   const ctx = await browser.newContext({
     viewport: { width: s.width, height: s.height },
-    deviceScaleFactor: 2,
+    // 1x 而不是 2x：这些图是**给人看的**（浏览器里 1:1 就这么大），
+    // 而它们要进仓库 —— 2x 会让 14 张图占 10MB。要更清楚就改这里重跑。
+    deviceScaleFactor: 1,
     colorScheme: s.theme,
   });
   const page = await ctx.newPage();

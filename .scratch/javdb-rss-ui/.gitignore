@@ -1,3 +1,5 @@
 node_modules/
-# 截图是生成物，可重跑 tools/shots.mjs 得到
-shots/
+
+# 截图**入库**（上面那个 deviceScaleFactor 就是为它降到 1x 的）：
+# 跑不起浏览器时它们是人唯一能看到样子、又不依赖 serve_mockup 的东西。
+# 重跑：node tools/shots.mjs <origin> ./shots
