@@ -488,6 +488,63 @@
           </div>
         </div>
       </section>
+
+      <!-- ══════════════════ 清单 ══════════════════ -->
+      <!-- 清单是用户在 App 里**自己建的**（对象是作品，不是女优）：发现端点
+           /collected_lists 需要 token，订阅本身（/rss/list/{id}.xml）不需要。
+           私有清单的**名字**在匿名读取时可能拿不到，feed 标题会退回 id ——
+           所以这一区要照实说出这件事，而不是给一张看起来一切正常的卡片。 -->
+      <section id="panel-lists" aria-labelledby="lists-heading" class="mt-10">
+        <h2 id="lists-heading" class="text-sm font-semibold tracking-tight">
+          清单
+        </h2>
+        <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+          你在 App 里建的清单，一份一条链接 —— 发现端点
+          <code class="font-mono">GET /collected_lists</code> 给出清单，订阅走
+          <code class="font-mono">GET /rss/list/{id}.xml</code>。列清单需要 token；
+          feed 本身不需要。
+        </p>
+
+        <p id="lists-note" class="note mt-3 hidden"></p>
+        <ul
+          id="list-cards"
+          class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+        ></ul>
+      </section>
+
+      <!-- ══════════════════ 想看 ══════════════════ -->
+      <section id="panel-want" aria-labelledby="want-heading" class="mt-10">
+        <h2 id="want-heading" class="text-sm font-semibold tracking-tight">
+          想看
+        </h2>
+        <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+          App 里标的「想看」全在这一条里，URL 里没有任何参数 —— 在 App 里标一部，
+          qBittorrent 下一轮轮询就会看到它。
+        </p>
+
+        <div class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+          <code
+            id="want-url"
+            class="min-w-0 flex-1 rounded-md bg-muted px-3 py-2 font-mono text-xs break-all text-foreground"
+          ></code>
+          <button
+            id="want-copy"
+            class="btn btn-lg btn-primary shrink-0"
+            type="button"
+          >
+            复制链接
+          </button>
+        </div>
+        <p
+          id="want-hint"
+          class="mt-2 text-xs leading-relaxed text-muted-foreground"
+        ></p>
+        <div class="mt-3">
+          <button id="want-add" class="btn btn-md btn-outline" type="button">
+            加入待复制
+          </button>
+        </div>
+      </section>
     </main>
 
     <!-- ─────────────────── 待复制：唯一的输出台 ─────────────────── -->

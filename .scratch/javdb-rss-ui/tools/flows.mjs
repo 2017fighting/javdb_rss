@@ -13,7 +13,10 @@
  * 折叠与搜索 / 整年 / 逐字符 URL / 加载态与失败态 / 手输 id）。
  * 票 05 补上：全站标签模式（片库四选一 / 词表按片库取 / m 总在 main 里 /
  * 月份与时长只在此模式可用 / 模式切换清状态 / 逐字符地不含 filter_by）。
- * 清单与想看（06）、状态可见性（07）的断言在各自的票里补。
+ * 票 06 补上：清单与想看（一清单一链接 / 默认与私有标记 / 私有名字读不到
+ * 退回 id / 想看一个显眼的复制按钮 / 两者都能进待复制 / 没 token 时禁用并
+ * 说明 token_file，标签区不受连坐）。
+ * 状态可见性（07）的断言在那一票里补。
  */
 import { chromium } from "playwright";
 
@@ -873,6 +876,215 @@ check(
   true,
 );
 await blocked.ctx.close();
+
+// ══════════════════════════════════════════════════════════════════════
+// 需求 4：清单与想看（票 06）
+//
+// 两者读的都是 App 里的标记，所以没 token 时一定 503 —— 那时**不给链接**，
+// 而是禁用按钮并说明缺什么（token_file）。这一节同时守「一清单一链接」与
+// 「私有清单的名字可能读不到、退回 id」这两条。
+// ══════════════════════════════════════════════════════════════════════
+const lists = await newPage();
+await lists.page.goto(origin, { waitUntil: "load" });
+await lists.page.waitForSelector("#list-cards [data-list-copy]");
+
+const listCards = await lists.page.$$eval("#list-cards li", (ns) =>
+  ns.map((n) => n.textContent.replace(/\s+/g, " ").trim()),
+);
+check("清单来自 /collected_lists（stub fixture 2 份）", listCards.length, 2);
+check(
+  "一清单一链接：名字/条数/链接都在",
+  listCards[0].includes("遥控跳弹") &&
+    listCards[0].includes("1 部") &&
+    listCards[0].includes(`${origin}/rss/list/k4EVE4.xml`),
+  true,
+);
+check("清单标出默认", listCards[1].includes("默认"), true);
+check("清单标出私有", listCards[1].includes("私有"), true);
+check(
+  "私有清单说清名字可能读不到、退回 id、链接仍可用",
+  listCards[1].includes("名字可能读不到") &&
+    listCards[1].includes("id") &&
+    listCards[1].includes("可用"),
+  true,
+);
+
+await lists.page.click("#list-cards [data-list-copy]");
+await lists.page.waitForTimeout(120);
+check(
+  "清单链接能复制",
+  await lists.page.evaluate(() => navigator.clipboard.readText()),
+  `${origin}/rss/list/k4EVE4.xml`,
+);
+check(
+  "清单复制后有反馈",
+  (await lists.page.textContent("#list-cards [data-list-copy]")).includes("已复制"),
+  true,
+);
+
+// 「想看」：单独一个显眼的复制按钮（内容区的主操作）。
+// 两个发现端点都落地之后才给链接。
+await lists.page.waitForSelector("#want-copy:not([disabled])");
+check("想看是固定的 /rss/want.xml", await lists.page.textContent("#want-url"), `${origin}/rss/want.xml`);
+check(
+  "想看的复制按钮是内容区的主操作",
+  await lists.page.$eval("#want-copy", (e) => e.classList.contains("btn-primary")),
+  true,
+);
+await lists.page.click("#want-copy");
+await lists.page.waitForTimeout(120);
+check(
+  "想看链接能复制",
+  await lists.page.evaluate(() => navigator.clipboard.readText()),
+  `${origin}/rss/want.xml`,
+);
+check(
+  "想看复制后有反馈",
+  (await lists.page.textContent("#want-copy")).includes("已复制"),
+  true,
+);
+
+// 清单与想看都能加入待复制；待复制仍然只有一份 URL 列表，重复加不堆条目。
+await lists.page.click("#list-cards [data-list-add]");
+await collapseTray(lists.page);
+await lists.page.click("#list-cards [data-list-add]"); // 同一份再点一次
+await collapseTray(lists.page);
+await lists.page.click("#want-add");
+await collapseTray(lists.page);
+await lists.page.click("#want-add"); // 想看再点一次
+const listTray = await lists.page.$$eval("#tray-list li code", (ns) => ns.map((n) => n.textContent));
+check("清单 + 想看重复加不堆条目", listTray.length, 2);
+check(
+  "待复制里逐条只有一份 URL",
+  new Set(listTray).size === listTray.length &&
+    listTray.includes(`${origin}/rss/list/k4EVE4.xml`) &&
+    listTray.includes(`${origin}/rss/want.xml`),
+  true,
+);
+check(
+  "清单/想看的 URL 里没有掩码",
+  listTray.every((u) => !u.includes("filter_by")),
+  true,
+);
+await lists.ctx.close();
+
+// ── 确认 token 期间不给链接：一条能手拷的 URL 与一个能点的按钮一样坏 ──
+const confirming = await newPage();
+await confirming.page.route("**/collected_lists", async (route) => {
+  await new Promise((r) => setTimeout(r, 500));
+  await route.continue();
+});
+await confirming.page.goto(origin, { waitUntil: "load" });
+check(
+  "确认 token 期间不给想看链接",
+  (await confirming.page.textContent("#want-url")).includes("/rss/want.xml"),
+  false,
+);
+check(
+  "确认 token 期间想看按钮禁用",
+  await confirming.page.$eval("#want-copy", (e) => e.disabled),
+  true,
+);
+await confirming.page.waitForSelector("#want-copy:not([disabled])");
+check(
+  "确认完成后才给出想看链接",
+  await confirming.page.textContent("#want-url"),
+  `${origin}/rss/want.xml`,
+);
+await confirming.ctx.close();
+
+// ── 私有清单的名字读不到时：退回 id 当标题，链接仍然可用 ──
+const nameless = await newPage();
+await nameless.page.route("**/collected_lists", (route) =>
+  route.fulfill({
+    status: 200,
+    contentType: "application/json; charset=utf-8",
+    body: JSON.stringify({
+      lists: [
+        { id: "ZZ999", name: "", movies_count: 0, privacy: "own", feed: "/rss/list/ZZ999.xml" },
+      ],
+    }),
+  }),
+);
+await nameless.page.goto(origin, { waitUntil: "load" });
+await nameless.page.waitForSelector("#list-cards [data-list-copy]");
+check(
+  "名字读不到时退回 id 当标题",
+  await nameless.page.$eval("#list-cards li", (e) => e.textContent.includes("ZZ999")),
+  true,
+);
+check(
+  "名字读不到时页面说清这件事",
+  (await nameless.page.textContent("#list-cards")).includes("退回"),
+  true,
+);
+check(
+  "私有清单即使名字为空也标出私有",
+  (await nameless.page.textContent("#list-cards")).includes("私有清单"),
+  true,
+);
+check(
+  "名字读不到时链接仍然可用",
+  await nameless.page.$eval("#list-cards [data-list-copy]", (e) => !e.disabled),
+  true,
+);
+await nameless.ctx.close();
+
+// ── 没 token：清单与想看禁用 + 说明缺什么；标签区不受连坐 ──
+const noTokenOut = await newPage();
+for (const pattern of ["**/collected", "**/collected_lists"]) {
+  await noTokenOut.page.route(pattern, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify(notokenBody),
+    }),
+  );
+}
+await noTokenOut.page.goto(origin, { waitUntil: "load" });
+await noTokenOut.page.waitForFunction(() =>
+  document.getElementById("lists-note").textContent.includes("token_file"),
+);
+check(
+  "没 token 时清单区说明缺 token_file",
+  (await noTokenOut.page.textContent("#lists-note")).includes("token_file"),
+  true,
+);
+check(
+  "没 token 时清单不给任何可点的输出",
+  await noTokenOut.page.$$eval("#list-cards [data-list-copy]:not([disabled])", (ns) => ns.length),
+  0,
+);
+check("没 token 时想看按钮禁用", await noTokenOut.page.$eval("#want-copy", (e) => e.disabled), true);
+check(
+  "没 token 时想看加入待复制也禁用",
+  await noTokenOut.page.$eval("#want-add", (e) => e.disabled),
+  true,
+);
+check(
+  "没 token 时不给一条会 503 的想看链接",
+  (await noTokenOut.page.textContent("#want-url")).includes("/rss/want.xml"),
+  false,
+);
+check(
+  "没 token 时想看说明缺 token_file",
+  (await noTokenOut.page.textContent("#want-hint")).includes("token_file"),
+  true,
+);
+// 标签区不受连坐：词表与女优标签匿名可读，手输 id 照样能用。
+await noTokenOut.page.fill("#tag-picker", "EvkJ");
+await noTokenOut.page.press("#tag-picker", "Enter");
+await noTokenOut.page.waitForFunction(() =>
+  document.getElementById("tag-picker-status").textContent.includes("上游给了她"),
+);
+check(
+  "没 token 时标签区照旧可用（不被清单/想看连坐）",
+  (await noTokenOut.page.textContent("#tag-url")).startsWith(
+    `${origin}/rss/actress/EvkJ.xml?since=${today}`,
+  ),
+  true,
+);
+await noTokenOut.ctx.close();
 
 await browser.close();
 

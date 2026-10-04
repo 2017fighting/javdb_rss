@@ -11,7 +11,7 @@
  *
  * 它打的是 **provider=stub 的真服务**。票 03 只有「收藏女优」一个分区，
  * 票 04 补回了「某位女优的标签」分区（展开分组 + 选中一颗标签也算进"有内容"态）。
- * 清单与想看（06）的分区在各自的票里补。
+ * 票 06 补上「清单」与「想看」：卡片与它们在待复制里的行也进 axe。
  */
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
@@ -43,6 +43,8 @@ for (const width of [375, 768, 1440]) {
     await page.waitForSelector("#actress-list [data-actress]");
     // 标签区（票 04）：等她的标签落位 —— 否则 axe 量到的是「正在读取」那个态。
     await page.waitForFunction(() => document.querySelectorAll("#tag-groups details").length > 0);
+    // 清单区（票 06）：卡片来自 /collected_lists，等它落位再跑 axe。
+    await page.waitForSelector("#list-cards [data-list-copy]");
     if (theme === "dark") {
       await page.evaluate(() => document.documentElement.classList.add("dark"));
     }
@@ -69,7 +71,13 @@ for (const width of [375, 768, 1440]) {
     await axeRun("initial");
 
     // 先造出「有内容」的状态：选中的行 + 展开的标签分组与选中的标签
-    // + 展开的待复制面板。空页面过闸门、填满后不过，是这种页面最容易漏的一种。
+    // + 清单与想看各一条 + 展开的待复制面板。空页面过闸门、填满后不过，
+    // 是这种页面最容易漏的一种。
+    await page.waitForSelector("#want-add:not([disabled])");
+    await page.click("#list-cards [data-list-add]");
+    await page.click("#tray-toggle"); // 加一条会展开工具条，先收起
+    await page.click("#want-add");
+    await page.click("#tray-toggle");
     for (const id of ["EvkJ", "D2EdJ"]) await page.check(`[data-actress="${id}"]`);
     await page.click("#tag-expand");
     await page.click('#tag-groups [data-tag="3"]');

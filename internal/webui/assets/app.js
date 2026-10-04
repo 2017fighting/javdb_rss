@@ -16,6 +16,9 @@
  *   4. 「全站标签」是**另一种掩码形态**：不挂实体，片库在 URL 路径里，
  *      标签/年/月/时长各占 filter_by 掩码的一个槽位。它是匿名可读的，
  *      而且主属性里**总是**带 m（含磁鏈）—— 不发它的全站 feed 会没有磁链。
+ *   5. 「清单」与「想看」读的是 App 里的**标记**，没 token 一定 503 ——
+ *      所以拿不到 token 时这两个区禁用并说明缺什么（token_file），
+ *      而不是给一条点了就坏的链接。标签区不受影响（匿名可读）。
  */
 (() => {
   "use strict";
@@ -30,6 +33,9 @@
   // 女优订阅的片库号。掩码是 `0:a:{id}:{main}:{year}`（实测），
   // 所以她的标签词表取 type=0 —— 换个片库就是另一份 id 空间。
   const ACTRESS_ZONE = 0;
+
+  // 「想看」是一条**固定路径**：内容跟着 App 里的标记走，URL 里没有任何参数。
+  const WANT_PATH = "/rss/want.xml";
 
   // 全站订阅的四个片库（filter_by 的第一段，也是 /rss/tags/{zone}.xml 的路径段）。
   // 与 catalog.ZoneName 同一份取值：写错片库上游不报错，只会给另一个库的作品，
@@ -112,6 +118,13 @@
     tagUrlHint: $("tag-url-hint"),
     tagAdd: $("tag-add"),
     tagCopy: $("tag-copy"),
+    // ── 清单 / 想看 ──
+    listsNote: $("lists-note"),
+    listCards: $("list-cards"),
+    wantUrl: $("want-url"),
+    wantCopy: $("want-copy"),
+    wantHint: $("want-hint"),
+    wantAdd: $("want-add"),
     // ── 待复制 ──
     trayCount: $("tray-count"),
     trayNote: $("tray-note"),
@@ -178,6 +191,13 @@
     // 标签组的展开状态。只记用户**显式点过**的那些，其余按「有已选」推定。
     groupOpen: new Map(),
 
+    // ── 清单与想看 ──
+    // /collected_lists 的结果。列清单要 token，所以它（以及 /collected）的
+    // 503 同时也是「想看」会不会 503 的信号 —— 两者读的是同一份 App 标记。
+    lists: [],
+    listsState: "loading", // loading | loaded | error
+    listsError: null, // {status, message}
+
     // 待复制。只存「怎么生成」，URL 每次现算 —— 换服务地址要立刻跟上。
     links: [],
   };
@@ -239,6 +259,14 @@
   function actressUrl(id, mode) {
     const path = `${base()}/rss/actress/${encodeURIComponent(id)}.xml`;
     return mode === "all" ? `${path}?pages=20` : `${path}?since=${todayISO()}`;
+  }
+
+  /**
+   * 清单的 feed 路径。优先用服务给的 `feed` —— 那是 /collected_lists 明确
+   * 交出来的、可以直接拿去用的路径；自己拼只在它缺席时兜底。
+   */
+  function listFeed(list) {
+    return list.feed || `/rss/list/${encodeURIComponent(list.id)}.xml`;
   }
 
   /** 标签 id 的排序键：数字 id 按数值，非数字排在后面（词表里只有数字）。 */
@@ -364,6 +392,8 @@
         tagQueryPairs(link),
       )}`;
     }
+    if (link.kind === "list") return `${base()}${link.feed}`;
+    if (link.kind === "want") return `${base()}${WANT_PATH}`;
     return actressUrl(link.id, link.mode);
   }
 
@@ -517,6 +547,61 @@
     }
   }
 
+  /**
+   * 读 /collected_lists。与 /collected 同一套规矩：失败时**照实保留**服务给的
+   * 那句话（503 里就写着要配 token_file），而不是编一句「加载失败」。
+   *
+   * 它同时决定「想看」能不能给链接：两者读的是同一份 App 标记，
+   * 没 token 时都会 503。
+   */
+  async function loadLists() {
+    state.listsState = "loading";
+    state.listsError = null;
+    renderLists();
+    renderWant();
+    try {
+      const res = await fetch("/collected_lists", {
+        headers: { accept: "application/json" },
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        state.lists = [];
+        state.listsState = "error";
+        state.listsError = { status: res.status, message: serverMessage(body, res.status) };
+      } else {
+        state.lists = Array.isArray(body?.lists) ? body.lists : [];
+        state.listsState = "loaded";
+      }
+    } catch (e) {
+      state.lists = [];
+      state.listsState = "error";
+      state.listsError = { status: 0, message: `读不到服务：${e.message}` };
+    }
+    renderLists();
+    renderWant();
+  }
+
+  /**
+   * 没配 token：/collected 与 /collected_lists 都会 503。页面据此把「清单」与
+   * 「想看」的**输出**禁用并说明缺什么 —— 它们读的都是 App 里的标记。
+   * 标签区不受影响：词表与女优标签匿名可读。
+   */
+  function tokenMissing() {
+    return state.listsError?.status === 503 || state.error?.status === 503;
+  }
+
+  /**
+   * 服务在 503 里给的原话（它已经点出 token_file），两个端点谁先到用谁；
+   * 一句都没有时才用同一套措辞兜底。
+   */
+  function tokenMessage() {
+    return (
+      state.listsError?.message ||
+      state.error?.message ||
+      "尚未配置 token，读不到 App 里的标记。请从 App 导出后配置 app_api.token_file（见 README）。"
+    );
+  }
+
   /** 当前模式需要哪个片库的词表：女优订阅固定 type=0，全站模式就是选的片库。 */
   function neededVocabZone() {
     return state.tagSource === "site" ? state.zone : ACTRESS_ZONE;
@@ -664,7 +749,7 @@
          <p class="mt-2 text-xs leading-relaxed text-muted-foreground">
            标签这一区不受影响：词表与女优标签都是匿名可读的，可以直接手输她的 id。
          </p>
-         <button class="btn btn-md btn-primary mt-4" type="button" data-retry>重新读取</button>`,
+         <button class="btn btn-md btn-outline mt-4" type="button" data-retry>重新读取</button>`,
         "rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-6 text-left",
       );
       // 服务的原话原样显示（含它给的下一步动作），不在这里改写。
@@ -683,7 +768,7 @@
            服务读到了你的账号，但收藏列表是空的 —— 还没在 JavDB App 里点过「收藏」。
            收藏之后刷新这一页就行；标签区也可以直接手输 id。
          </p>
-         <button class="btn btn-md btn-primary mt-4" type="button" data-retry>重新读取</button>`,
+         <button class="btn btn-md btn-outline mt-4" type="button" data-retry>重新读取</button>`,
         "rounded-lg border border-dashed border-border px-4 py-10 text-center",
       );
       el.actressEmpty
@@ -1421,6 +1506,134 @@
     el.tagExpand.disabled = el.tagGroups.querySelectorAll("details").length === 0;
   }
 
+  // ─────────────────────────── 清单与想看 ───────────────────────────
+
+  function showListsNote(html) {
+    el.listsNote.innerHTML = html;
+    el.listsNote.classList.remove("hidden");
+  }
+
+  function hideListsNote() {
+    el.listsNote.classList.add("hidden");
+    el.listsNote.innerHTML = "";
+  }
+
+  /**
+   * 清单区：一清单一链接，名字/条数/默认/私有都在卡片上。
+   *
+   * 私有清单的名字**可能读不到**（匿名读取私有清单会 NoPermission，feed 标题
+   * 退回 id）—— 卡片上照实写这一句，链接仍然给，因为订阅本身是好的。
+   */
+  function renderLists() {
+    if (state.listsState === "loading") {
+      el.listCards.innerHTML = "";
+      showListsNote(
+        `<p class="text-sm font-medium">正在读取清单…</p>
+         <p class="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-muted-foreground">从服务的 <code class="font-mono">/collected_lists</code> 读。</p>`,
+      );
+      return;
+    }
+
+    if (state.listsError) {
+      const err = state.listsError;
+      const title =
+        err.status === 503
+          ? "读不到清单：还没配置 token"
+          : err.status >= 500
+            ? "读不到清单：上游出错了"
+            : "读不到清单";
+      el.listCards.innerHTML = "";
+      showListsNote(
+        `<p class="flex items-start gap-2 text-sm font-medium">
+           <span aria-hidden="true">⛔</span>${esc(title)}
+         </p>
+         <p class="mt-2 text-xs leading-relaxed text-muted-foreground" data-server-message></p>
+         <p class="mt-2 text-xs leading-relaxed text-muted-foreground">
+           列清单读的是 App 里的数据，需要 token；「想看」读的也是它，所以那一区同样没有链接可给。标签区不受影响。
+         </p>
+         <button class="btn btn-md btn-outline mt-3" type="button" data-lists-retry>重新读取</button>`,
+      );
+      // 服务的原话原样显示（含它给的下一步动作），不在这里改写。
+      el.listsNote.querySelector("[data-server-message]").textContent = err.message;
+      el.listsNote.querySelector("[data-lists-retry]").addEventListener("click", () => {
+        loadLists();
+        loadCollected();
+      });
+      return;
+    }
+
+    if (!state.lists.length) {
+      el.listCards.innerHTML = "";
+      showListsNote(
+        `<p class="text-sm font-medium">一份清单也没有</p>
+         <p class="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-muted-foreground">
+           服务读到了你的账号，但还没有任何清单 —— 去 JavDB App 里建一份，然后刷新这一页。
+         </p>`,
+      );
+      return;
+    }
+
+    hideListsNote();
+    el.listCards.innerHTML = state.lists
+      .map((l, i) => {
+        const isPrivate = l.privacy === "own";
+        const title = l.name || l.id;
+        // 私有与「读不到名字」这两件事都要说出来（feed 标题会退回 id，
+        // 而「为什么标题不是名字」正是用户会自己诊断不出来的那类问题）。
+        // 私有优先：它解释了名字为什么会读不到 —— 即使这一次名字是空的、
+        // 上面那个分支也能把两件事一并说清。
+        const note = isPrivate
+          ? "私有清单：名字可能读不到（匿名读取会退回用 id 当 feed 标题），但链接本身照常可用。"
+          : !l.name
+            ? "上游没给出这份清单的名字 —— feed 的标题会退回用它的 id，链接本身照常可用。"
+            : "";
+        return `
+      <li class="flex flex-col rounded-lg border border-border bg-card p-4">
+        <p class="flex flex-wrap items-baseline gap-1.5">
+          <span class="text-sm font-medium">${esc(title)}</span>
+          ${l.is_default ? '<span class="rounded-sm border border-border px-1 text-2xs text-muted-foreground">默认</span>' : ""}
+          ${isPrivate ? '<span class="rounded-sm border border-border px-1 text-2xs text-muted-foreground">私有</span>' : ""}
+        </p>
+        <p class="mt-1 font-mono text-xs text-muted-foreground">
+          ${esc(l.id)} · <span class="tnum">${Number(l.movies_count) || 0}</span> 部
+        </p>
+        <code class="mt-3 block rounded-md bg-muted px-2 py-1.5 font-mono text-xs break-all text-muted-foreground select-all">${esc(`${base()}${listFeed(l)}`)}</code>
+        ${note ? `<p class="mt-2 text-xs leading-relaxed text-muted-foreground">${esc(note)}</p>` : ""}
+        <div class="mt-3 flex flex-wrap gap-2">
+          <button class="btn btn-md btn-outline" type="button" data-list-copy="${i}">复制</button>
+          <button class="btn btn-md btn-ghost" type="button" data-list-add="${i}">加入待复制</button>
+        </div>
+      </li>`;
+      })
+      .join("");
+  }
+
+  /**
+   * 想看区。没有发现端点能直接说「token 在不在」，所以用 /collected 与
+   * /collected_lists 的 503 当信号 —— 三条路读的是同一份 App 标记。
+   * 拿不到就不给链接：一条点了就 503 的 URL 比灰掉的按钮更坏。
+   */
+  function renderWant() {
+    const blocked = tokenMissing();
+    // 两个发现端点（/collected 与 /collected_lists）都还没说话之前，token 在不在
+    // 还没定 —— 这时也**不填 URL**：一条能手拷走的链接与一个能点的按钮一样坏。
+    const discoveryLoading = (state.loading && !state.error) || state.listsState === "loading";
+    if (blocked) {
+      el.wantUrl.textContent = "需要 token —— 配好 token_file 之后，这里会给出链接。";
+      el.wantHint.textContent = `读不到「想看」：它读的是你在 App 里的标记，需要 token。请配置 app_api.token_file（见 README）。服务说：${tokenMessage()}`;
+    } else if (discoveryLoading) {
+      el.wantUrl.textContent = "正在确认 token…";
+      el.wantHint.textContent =
+        "token 在不在定下来之前不给链接 —— 免得给出一条一订就 503 的 URL。";
+    } else {
+      el.wantUrl.textContent = `${base()}${WANT_PATH}`;
+      el.wantHint.textContent =
+        "内容跟着你在 App 里的标记走，URL 里没有参数。还没有磁链的作品不发条目，数量写在 feed 标题里。";
+    }
+    el.wantCopy.disabled = blocked || discoveryLoading;
+    el.wantAdd.disabled = blocked || discoveryLoading;
+  }
+
   // ─────────────────────────── 待复制 ───────────────────────────
 
   /**
@@ -1461,24 +1674,32 @@
         <li class="px-1 py-6 text-center">
           <p class="text-sm font-medium">还没有链接</p>
           <p class="mx-auto mt-1.5 max-w-sm text-xs leading-relaxed text-muted-foreground">
-            去上面的「收藏女优」里勾几位，或者在「某位女优的标签」里做一条 ——
-            生成的链接都会落到这里。
+            去上面的「收藏女优」里勾几位、在「标签筛选」里做一条，
+            或者在「清单」「想看」里各挑一条 —— 生成的链接都会落到这里。
           </p>
         </li>`;
       return;
     }
 
     el.trayList.innerHTML = state.links
-      .map(
-        (l, i) => `
+      .map((l, i) => {
+        const badge =
+          l.kind === "want"
+            ? "App 标记"
+            : l.kind === "list"
+              ? "清单"
+              : l.mode === "all"
+                ? "全量"
+                : "追新";
+        return `
       <li class="flex items-start gap-3 py-3">
         <div class="min-w-0 flex-1">
           <p class="flex flex-wrap items-center gap-1.5">
             <span class="text-sm font-medium">${esc(l.label)}</span>
             <span class="rounded-sm border border-border px-1 font-mono text-2xs text-muted-foreground">
-              ${l.mode === "all" ? "全量" : "追新"}
+              ${badge}
             </span>
-            <span class="text-xs text-muted-foreground">${esc(l.sub)}</span>
+            <span class="text-xs text-muted-foreground">${esc(l.sub || "")}</span>
           </p>
           <code class="mt-1 block font-mono text-xs break-all text-muted-foreground select-all">${esc(linkUrl(l))}</code>
         </div>
@@ -1487,8 +1708,8 @@
           <button class="btn btn-sm btn-ghost" type="button" data-remove-row="${i}"
             aria-label="移除 ${esc(l.label)}">移除</button>
         </div>
-      </li>`,
-      )
+      </li>`;
+      })
       .join("");
   }
 
@@ -1853,6 +2074,53 @@
     doCopy(el.tagCopy, tagUrl(), state.tagSource === "site" ? "这条全站链接" : "这条标签链接");
   });
 
+  // ── 清单与想看 ──
+
+  el.listCards.addEventListener("click", (e) => {
+    const copy = e.target.closest("[data-list-copy]");
+    if (copy) {
+      const l = state.lists[Number(copy.dataset.listCopy)];
+      if (l) doCopy(copy, `${base()}${listFeed(l)}`, `清单「${l.name || l.id}」的链接`);
+      return;
+    }
+    const add = e.target.closest("[data-list-add]");
+    if (!add) return;
+    const l = state.lists[Number(add.dataset.listAdd)];
+    if (!l) return;
+    // 同一份清单只留一条：链接跟着 id 走，重复点就是同一条的新版本。
+    state.links = state.links.filter((x) => !(x.kind === "list" && x.id === l.id));
+    state.links.push({
+      key: `list:${l.id}`,
+      kind: "list",
+      id: l.id,
+      feed: listFeed(l),
+      label: l.name || l.id,
+      sub: `${Number(l.movies_count) || 0} 部`,
+    });
+    renderTray();
+    setTrayOpen(true);
+    announce("已加入待复制");
+  });
+
+  el.wantCopy.addEventListener("click", () => {
+    if (el.wantCopy.disabled) return;
+    doCopy(el.wantCopy, `${base()}${WANT_PATH}`, "「想看」链接");
+  });
+
+  el.wantAdd.addEventListener("click", () => {
+    if (el.wantAdd.disabled) return;
+    // 它是一条固定路径：已经在待复制里就不再堆第二条。
+    if (state.links.some((l) => l.kind === "want")) {
+      setTrayOpen(true);
+      announce("「想看」已经在待复制里了");
+      return;
+    }
+    state.links.push({ key: "want", kind: "want", label: "想看" });
+    renderTray();
+    setTrayOpen(true);
+    announce("已加入待复制");
+  });
+
   // ── 待复制 ──
 
   el.trayToggle.addEventListener("click", () => {
@@ -1912,6 +2180,9 @@
     } catch (e) {}
     renderTray();
     renderTagUrl();
+    // 清单卡片与「想看」也把服务地址写进它们显示的 URL 里，一起重画。
+    renderLists();
+    renderWant();
   });
 
   // 主题：跟随系统，可手动覆盖，只有这一项进 localStorage。
@@ -1936,6 +2207,8 @@
     syncTrayFromSelection();
     renderTagArea();
     renderOptions();
+    // 收藏的 503 也是「想看」能不能给链接的信号，所以这里跟着重画。
+    renderWant();
     // 收藏里到底有几位男优 —— 不然「只看女优 / 全部收藏」这个开关看上去没由来。
     const males = state.actresses.filter((a) => a.gender !== 0).length;
     el.genderLabel.textContent = males ? `收藏里有 ${males} 位男优` : "只看女优";
@@ -1961,6 +2234,9 @@
   renderTray();
   renderTagArea();
   renderTagModeHint();
+  renderLists();
+  renderWant();
   loadVocabulary();
+  loadLists();
   loadCollected();
 })();
