@@ -38,14 +38,17 @@ GET /api/v2/users/review_movies?status=want_watch|watched&page=N
 
 ✅ 2026-10-04 用真 token 实测过（见 `internal/appapi/want.go`）。
 
-写「看过」（**本仓库未实测**，契约来自先例
-[`FlanChanXwO/javdb-cli`](https://github.com/FlanChanXwO/javdb-cli)
-的 `internal/javdb/appapi/endpoint/user/user.go`）：
+写「看过」——**2026-10-04 已实测**（真 token、真实账号、221 部批量零失败）：
 
 ```
 POST /api/v1/movies/{id}/reviews     表单：status=watched|want_watch&score=<int>&content=<string>
-DELETE /api/v1/movies/{id}/reviews/{reviewId}      取消标记
+DELETE /api/v1/movies/{id}/reviews/{reviewId}      取消标记（仍未实测）
 ```
+
+⭐ 实测得到的最要紧一条：这个 POST **移动**标记而不是新增一条。把一部作品的
+`want_watch` 改成 `watched` 后，它从 `status=want_watch` 里消失、出现在 `status=watched` 里
+（一部作品对一个人只有一条标记）。因此推送模式的写回只需这一个调用，
+不需要「先删旧的再写新的」。
 
 ⚠️ 三个坑：① 写的是 **movie id**（不是番号）；② `reviewId` 是大整数，用
 `float64` 解出来再格式化会变成科学计数法（先例为此专门写了 `reviewID()`）；

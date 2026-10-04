@@ -151,8 +151,14 @@ T _Z15byteToHexStringPhiPc
 > **每页 10 条** + `current_page`；空页 = 到底。
 > 同一天该账号的实时数据：**想看共 234 部**（23 页满页 + 第 24 页 4 条，第 25 页空）。
 >
-> ⚠️ **仍未经本仓库实测的是写的那一条**（`POST .../reviews` 标成「看过」，
-> 以及 `DELETE .../reviews/{id}`）—— 那是已停做的主动推送模式要用的，
+> ✅ **2026-10-04：写的那一条也实测了**（真 token、真实账号、批量）：
+> `POST /api/v1/movies/{id}/reviews`，表单 `status=watched|want_watch&score=<int>&content=<string>`。
+> 关键结论：它**移动**标记而不是新增一条 —— 把一部作品的 `want_watch` 改成
+> `watched` 后，它从 `/review_movies?status=want_watch` 里消失并出现在 watched 里
+> （实测：234 部 → 12 部，写入 221 部零失败、3 分 14 秒）。`score` 与 `content`
+> 可以留空（`0` 与空串）。
+>
+> ⚠️ **仍未实测**：`DELETE /api/v1/movies/{id}/reviews/{reviewId}`（取消标记）。
 > 形状与坑记在 [`want-push-deferred.md`](want-push-deferred.md)。
 
 注意：App 里的「订阅」语义有两处 —— **收藏女优**（`/users/collected_actors`）和 **关注标签**（`/following_tags`）。用户第 4 条需求指的是前者，需在 ticket 06 用真实响应确认。

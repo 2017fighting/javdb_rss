@@ -41,6 +41,9 @@ token.txt
 pin.json
 pin.json.lock
 pin.json.tmp
+# `cmd/markwatched` 的记录文件（它记的是把哪些作品标成了「看过」，
+# 既是撤销凭据也含你的观影列表）。默认就在配置文件旁边。
+markwatched-record.json
 # 本地配置文件：README 让用户 cp config.example.yaml config.yaml，
 # 而它可能带上 token 路径或（若启用自动续期）凭据
 config.yaml
