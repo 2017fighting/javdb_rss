@@ -15,7 +15,7 @@
 - [x] 三件事写进 notes 与 README：闭区间及其理由、`pubDate` 可能早于 `since`、`since` 只在取到的页里生效
 - [x] 留一句给后人的注释：为什么比发行日期（`since.go` 的 `filter` / `catalog.Work.ReleaseDate` / `config.ActressSub.Since` 三处）
 
-## 落地（2026-10-05）
+## Answer（落地 2026-10-05）
 
 **唯一实现：`internal/httpapi/since.go`** —— `parseSince`（校验 + 归一化）+ `sinceBound.filter`
 （过滤 + 日志 + 两条告警），三条路由（女优 / 清单 / 全站）共用。校验放在取数**之前**。
@@ -54,7 +54,7 @@
   `toValues(params)` 不再每请求转两遍。
 - `parseSince` 不再每请求造一个 `map[string]string` 来装 year/month，改成显式参数。
 
-## 落地后修订：两条告警改成「每个订阅只报一次」（2026-10-05）
+### 落地后修订：两条告警改成「每个订阅只报一次」（2026-10-05）
 
 **起因**：落地后看真实日志发现，窗口那条 WARN 对某个 URL 会**永远为真**
 （它是配置的性质，不是故障）—— `/rss/tags/0.xml` 这类订阅每轮轮询都会命中。

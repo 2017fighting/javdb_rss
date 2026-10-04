@@ -25,10 +25,10 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 09 | pin 的切换语义 | 无（04 决策新开） |
 | 10 | `since` 的语义定稿 | ~~无~~ 已 resolved（2026-10-05，grilling with user） |
 | 11 | 按定稿语义落地 `since` | ~~10~~ 已 resolved（2026-10-05） |
-| 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | 无 |
+| 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | ~~无~~ 已 resolved（2026-10-05） |
 
-（01/02/03/04/05/07/08/09/10/11 已 resolved，见下 Decisions so far；
-07 为机械验收项，已随 push 关闭。**开着的还有 06、12。**）
+（01/02/03/04/05/07/08/09/10/11/12 已 resolved，见下 Decisions so far；
+07 为机械验收项，已随 push 关闭。**开着的只剩 06。**）
 
 10–12 的来源与前九张不同：不是 code-review 的「未修」，而是清账时发现的
 **一笔孤儿欠账** —— `since` 的比较语义在初次交付的票 09 里被标成已解决，
@@ -123,6 +123,16 @@ qBittorrent 多下一份文件，而没有任何告警。
   每轮都真），并补上 `订阅=<path>`；窗口条件从 `>= since` 收紧为 `> since`。
   依据是实测：`/rss/tags/0.xml?since=<今天>&pages=1` 给 50 部，`pages=2` 给 100 部
   **且全部满足 since** —— 这是真警报，所以是保留告警而不是降级。
+- [订正决策记录：「ticket 09」歧义与 map 的假解决](issues/12-record-integrity.md)
+  — **记录层不再骗人。** 初次交付地图的 `## Not yet specified` 曾把「since 比较字段」
+  当作已解决删掉（无决策文本支撑，与三处 live code 矛盾）：现已在 map 里写明它是**假解决**、
+  欠账为何没有归属、收口在哪张票，并明确「错误在 map 里纠正、不回头改票 09」。
+  同时把**指向 since 或成本模型**的裸编号引用唯一化（map 两处、`notes/api-recon.md` §10.6），
+  顺带把 §10.6 里当时那句「缓存很可能有必要」标成**后来被实测推翻**。
+  两件有意没做的也记在票里：同 effort 内的 08/09 边界引用（就地可解析，不是 since 引用），
+  以及 followups 的 map 叫 `README.md` 而非 `map.md` 这个既有结构偏差（改名要连
+  `internal/appapi/pagination.go` 的注释一起动）—— **留给下一个决定**。
+  另：原注释写「删掉 6 条」而名单只列 5 条，第 6 条无法复原，如实标注不猜。
 
 ## Not yet specified
 

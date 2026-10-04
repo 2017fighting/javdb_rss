@@ -120,7 +120,9 @@ internal/stub/        固定数据的假数据源
   — 交付一个能跑、有离线测试的 Go 骨架。**唯一外部边界是 `catalog.Source`**；
   签名与番号解析各留一个接口接缝；监听默认 `127.0.0.1`；`provider: appapi` 直接启动失败。
   实测确认：guid 跨请求逐字节稳定、SIGHUP 重载失败保留旧配置。
-  顺带修订了 08（标题基名）与 09（`since` 临时按 `release_date` 实现并打 WARN）。
+  顺带修订了 08（标题基名）与 09（那里把 `since` 临时按 `release_date` 实现并打了 WARN ——
+  这笔欠账当时被记成了已解决，实情与收口见
+  [`../javdb-rss-followups/issues/10-since-semantics.md`](../javdb-rss-followups/issues/10-since-semantics.md)）。
   新暴露缺口：需求 4 在地图终点里没有落脚点 → 已开 ticket 10。
 - [恢复 `jdsignature` 并在 Go 里复现](issues/02-recover-jdsignature.md)
   — **拷贝而非依赖**（依赖 javdb-cli SDK 实测要 37 个模块、二进制涨到 17.25MB）。
@@ -137,7 +139,7 @@ internal/stub/        固定数据的假数据源
   ② `filter_by` 是**复合掩码** `{zone}:{letter}:{id}[:{main}:]:`，
   写成 `a` 会静默返回**全站最新作品**而不是该女优的。
   另确定 `limit` 上限 **50**、feed 必须走 `/movies/{id}/magnets`（只有它给 `cnsub`），
-  并量出成本：番号 feed ~1.2s、女优 feed（50 部）**~6.1s**（→ ticket 09 输入）。
+  并量出成本：番号 feed ~1.2s、女优 feed（50 部）**~6.1s**（→ 本图的票 09「请求成本模型」的输入）。
 - [请求成本模型：缓存、并发与限流](issues/09-cost-cache-throttle.md)
   — **实测推翻了原推荐。** 响应头显示上游只需 218ms（`X-Runtime` 仅 5ms），
   那 6.1s 是我们自己串行发 N+1 造成的。**并行化（默认并发 8）把女优 feed
@@ -156,9 +158,21 @@ internal/stub/        固定数据的假数据源
 ## Not yet specified
 
 <!-- 看得出方向、但还捏不成 ticket 的东西。
-     2026-09-30 清理：删掉 6 条在 02/06/09 落地后已解决的（番号链路端点、
-     since 比较字段、Prefix 失效检测、女优 feed 成本量级、番号消歧），
-     以及 2 条其实已是 live ticket 的（token 成本 → 05，需求 4 形态 → 10）。 -->
+     2026-09-30 清理：删掉在 02/06/09 落地后已解决的（番号链路端点、
+     Prefix 失效检测、女优 feed 成本量级、番号消歧），
+     以及 2 条其实已是 live ticket 的（token 成本 → 05，需求 4 形态 → 10）。
+
+     ⚠️ 2026-10-05 订正（followups 票 12）：上面这份原名单里还有一条「since 比较字段」，
+     那是**假解决**。本图的票 09 票面自己写着「本票仍需回答的是：这个临时语义对不对」，
+     但它的 ## Answer 只答了缓存 / 并发 / 限流 / 翻页 —— 这条从未被回答，票却标了 resolved。
+     于是 since 的比较语义成了**没有归属的欠账**：三处 live code 一直写着「尚未定稿」，
+     而这份地图却记成已解决（正是本项目反复禁止的那类静默失真）。
+     它已由 .scratch/javdb-rss-followups/issues/10-since-semantics.md 收口（2026-10-05），
+     落地见同目录 11。错误在这里纠正，**不回头改本图的票 09** —— 它「标了 resolved 却没回答」
+     本身就是要留下来的证据。
+
+     （另：原话写「6 条」而名单只列了 5 条。第 6 条是什么无法复原，如实留在这里，
+     不猜一个凑数。） -->
 
 - **磁链数组顺序的稳定性（已部分验证）**：用户选了「信任 App 顺序」。
   2026-09-30 实测：4 部作品 × 每部 4 次请求，顺序**完全一致** ——
