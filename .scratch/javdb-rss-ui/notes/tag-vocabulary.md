@@ -166,7 +166,7 @@ year=2020  month=3  duration=lt-45  movie_filter_by=year:2020  movie_filter_by=2
 
 ---
 
-## 5. 顺带发现：`/collected` 丢掉了 `gender`
+## 5. 顺带发现：`/collected` 丢掉了 `gender`（✅ 已修复）
 
 `/api/v1/users/collected_actors` 的每一项带 `gender` 与 `type`：
 
@@ -180,6 +180,9 @@ year=2020  month=3  duration=lt-45  movie_filter_by=year:2020  movie_filter_by=2
 而服务的 `/collected` 只透出 `{id, name, videos_count, feed}` ——
 **前端无法区分男女**，而用户要的是「女优」。设计稿里因此加了一个
 「只看女优 / 全部演员」开关，并把这个缺口标出来。
+
+> ✅ **已修复**：`/collected` 现在透出 `gender`（且**不带 `omitempty`** —— `0` 是最常见取值，
+> 用 omitempty 会让它从 JSON 里消失）。页面默认只看女优（实测 144 位里 138 女 + 6 男）。
 
 `/api/v1/actors/{id}`（详情）**没有** gender 字段，所以这个信息只能在收藏列表里拿。
 
@@ -224,28 +227,34 @@ go run ./cmd/contractprobe -out $OUT raw /api/v1/users/collected_actors page=1
 
 ---
 
-## 这些结论对代码意味着什么
+## 这些结论对代码意味着什么（promote 后已全部落地）
 
-**设计稿（本 effort）已经按上面实现**：分组、名称、顺序全部取自上游；撞号按名字消歧；
-年份/月份/时长**不显示为可点 chip**，而是单独一段说明 + 实测证据；标签 id 按词表顺序
-排序后拼进 `filter_by_tags`（同样选择永远得到同样 URL）；上限 5 个是 UI 约定
-（**上游没有实测过上限**，App 的 5 是它自己的规矩）。
+**这一 effort 已经按上面实现，且已 promote 成服务自己的页面**（`internal/webui/`）：
+分组、名称、顺序全部取自上游；撞号按名字消歧；年/月/時長**不显示为可点 chip**，
+而是语义参数由**服务**拼进掩码（契约硬规则 8）；标签 id 按词表顺序排序后拼进 `tags=`
+（同样选择永远得到同样 URL）；上限 5 个作为**上游硬限制**（见 [`lists.md`](lists.md) 第 1 节）。
 
-**要真做，后端缺三条**：
+**曾经列在这里的「后端缺三条」现在长这样：**
 
-1. `GET /tags?zone=N` —— 转发分组词表（匿名，无状态，纯转发）。
-2. 女优的 `tags[]` 得能被前端拿到（现在 `/collected` 给的是收藏列表，
-   不含标签）。要么加 `GET /tags/actress/{id}`，要么让 feed 路由带出来。
-3. `gender` 要进 `/collected`（否则前端分不出男女）。
-4. 可选：`/rss/tags/{zone}/{ids}.xml` —— 全站标签订阅。形状是提议，**未定**。
+1. ✅ `GET /tags?type={片库号}` —— 转发分组词表（匿名、无状态、纯转发；0–3 之外判 400）。
+2. ✅ `GET /actress_tags/{id}` —— 返回 `{id, name, videos_count, main, tags}`
+   （`main` = 她自己的 `filter_tags`；与 `ActressName` 合并为一次读取）。
+3. ✅ `gender` 已进 `/collected`。
+4. ✅ 全站标签订阅已实现 —— 形状与当初的提议不同：不是
+   `/rss/tags/{zone}/{ids}.xml`，而是 `/rss/tags/{zone}.xml?main=&tags=&year=&month=&duration=`
+   （标签上限 5 个，掩码由服务拼）。
 
-**仍然未知（已登记，不是遗留）**：`year`/`month`/`duration` 的正确通道；
-`type` 与 zone 的对应；`filter_by_tags` 有没有上限；
-词表里不在该女优 `tags[]` 里的标签能不能筛（ticket 03 只测过她自己的 80 个）。
+**仍然未知（已登记，不是遗留）**：女优掩码的**尾部槽位**（月份/时长，页面因此禁用）；
+`type` 与 zone 的对应（仍只有旁证）；词表里不在该女优 `tags[]` 里的标签能不能筛。
+（`filter_by_tags` 的上限已在 [`lists.md`](lists.md) 第 1 节实测为 5，不再是未知。）
 
 ---
 
 ## 6. `filter_by_tags` 的**生效范围**：只有女优实体（2026-10-04 第三批）
+
+> ⚠️ **本节的结论「全站标签做不成」已被第 7 节推翻**（漏掉了 `filter_by` 掩码槽位这条通道）。
+> 仍然成立的是「`filter_by_tags` 作为**独立参数**只对女优实体生效」以及下面那张对照表。
+> 已实现的全站入口是 `GET /rss/tags/{片库号}.xml`。
 
 起因：用户要一个「全站标签入口」。结论是**做不成** —— 不是缺一条服务路由，
 是上游只在女优实体上认这个参数。

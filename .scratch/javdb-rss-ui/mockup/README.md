@@ -1,5 +1,10 @@
 # javdb-rss 订阅链接生成器 — 设计稿
 
+> **promote 已完成（2026-10-05）。** 这份 mockup 现在只是**设计记录**：真正的页面在
+> `internal/webui/`（资产 embed 进单二进制），行为断言（171 项）打的是
+> `provider=stub` 的**真服务**，不是这里的静态页。下面凡是与 promote 结果不同的描述
+> 都已就地更正并标注。
+
 给这个单人自用服务的**前端**：把「我要订什么」变成一串能直接粘进 qBittorrent 的 RSS URL。
 
 > **数据全是真的，链接也全是真的。** 演员、标签词表、每位女优的标签、清单都来自
@@ -27,9 +32,19 @@ node tools/gen-data.mjs   # evidence/ -> mockup/src/data.js（要重抓上游时
 空态/填满态），**已经入库**。它们是 1x 的（不是 2x）—— 浏览器里 1:1 就这么大，
 而 2x 会让这 14 张从 4MB 涨到 10MB。要更清楚就改 `tools/shots.mjs` 重跑。
 
+### 验证现在打的是真服务（promote 后的变化）
+
+`tools/verify.sh` 不再指向 mockup 的静态页，而是指向一份 `provider=stub` 的**真服务**
+（于是那 171 项断言守的是上线的东西）。跑法：
+
 ```bash
-MOCKUP_ORIGIN=http://localhost:62100 ./tools/verify.sh
+# 另开一个终端先起服务（配置里 provider: stub，见 verify.sh 头部注释）
+cd <repo> && go run ./cmd/javdb-rss -config /tmp/javdb-rss-verify-stub/config.yaml
+# 再跑全套守卫
+cd .scratch/javdb-rss-ui && ./tools/verify.sh http://127.0.0.1:8080
 ```
+
+mockup 的 `index.html`/`app.js` 直接从浏览器打开已经不再是验证对象（设计记录而已）。
 
 ## 四个需求落在哪
 
@@ -37,7 +52,7 @@ MOCKUP_ORIGIN=http://localhost:62100 ./tools/verify.sh
 |---|---|---|
 | 1. 收藏演员，挑几位，追新 / 全量，一人一条 | 「收藏女优」 | `/rss/actress/{id}.xml?since=<今天>` · `?pages=20` |
 | 2. 想看，单独一个复制按钮 | 「想看」 | `/rss/want.xml` |
-| 3. 分类选择器，**按 App 的 11 个分组**，最多 5 个标签 | 「标签筛选」· 女优模式 | `/rss/actress/{id}.xml?since=…&filter_by=0:a:{id}:c::&filter_by_tags=46,68` |
+| 3. 分类选择器，**按 App 的 11 个分组**，最多 5 个标签 | 「标签筛选」· 女优模式 | `/rss/actress/{id}.xml?since=…&main=c&tags=46,68` |
 | 3b. 同上，**全站**（不挂实体） | 「标签筛选」· 全站模式 | `/rss/tags/{片库}.xml?main=c,m&tags=46,68&year=2020&month=3&duration=gt-120` |
 | 4. 我关注的清单，一清单一链接 | 「清单」 | `/rss/list/{id}.xml` ✅ 后端已实现 |
 
@@ -64,10 +79,11 @@ MOCKUP_ORIGIN=http://localhost:62100 ./tools/verify.sh
   （`3` = 服裝:眼鏡），時長 的 id 形如 `lt-45`。实测 `filter_by_tags=45-90` 与
   `=45` 返回**逐条相同**的 6 部，而那 6 部的时长**全部 > 90 分钟**。
 - 独立参数 `year=` / `month=` / `duration=` / `movie_filter_by=` 在 4 个端点上
-  试了 30 个名字，**全部被静默忽略**。
-- 但数据本地就有：`release_date` 与 `duration` 在列表响应里 **100% 出现**。
-  所以正确做法是**本服务自己过滤**，而不是继续找通道 —— 而且本地过滤能表达
-  上游根本表达不了的（区间、与其它条件组合）。
+  试了 30 个名字，**全部被上游静默忽略**。
+- ⚠️ **更正：** 由此推出的「所以正确做法是本服务自己按 `release_date` / `duration`
+  本地过滤」**是错的、也从未实现**。真机抓包找到了掩码槽位这条通道，现在页面发语义参数、
+  **掩码由服务拼**（契约硬规则 8）。完整更正见
+  [`notes/tag-vocabulary.md`](notes/tag-vocabulary.md) 第 7 节与 [`notes/lists.md`](notes/lists.md) 第 2 节。
 
 完整结论与复跑命令：[`notes/tag-vocabulary.md`](notes/tag-vocabulary.md)（分组与上限）、
 [`notes/lists.md`](notes/lists.md)（上限、日期通道、清单契约）。
@@ -86,8 +102,9 @@ L2 对比度（硬闸门）           PASS
 axe × 375/768/1440 × 亮/暗   PASS   4 分区 × 空态/填满态，0 违规
 触摸目标 ≥24px / 焦点可见 / 溢出 PASS
 主操作 ≤1 / 区域              PASS
-行为断言 40 项                PASS   含「分组名取自上游」「第 6 个标签被禁用」
-                                    「清单链接可复制」「选年份 → since= + pages=20」
+行为断言 171 项（真服务）   PASS   含「分组名取自上游」「第 6 个标签被禁用」
+                                    「清单链接可复制」「选年份 → since 让位」
+                                    「URL 里不含 filter_by / filter_by_tags」
 L4 rubric                    7/7
 ```
 
@@ -111,20 +128,18 @@ L4 rubric                    7/7
    后端已经实现 `GET /rss/tags/{片库号}.xml`。
 5. **「加入待复制」的主次**（上一轮那条还开着）：现在主操作是「复制」，标签区的加入是次要按钮。
 
-## 与真实实现的距离（promote 时要补的）
+## promote 已经完成（原「与真实实现的距离」）
 
-- **服务地址默认值**：mockup 写死 `http://127.0.0.1:8080`。真页面由服务自己提供时
-  默认应当是 `location.origin`，并持久化到 localStorage。
-- **数据来源**：`GET /collected`（+ `gender`，见下）、`GET /collected_lists`、
-  上游 `GET /api/v2/tags`、以及一条「取某女优 `tags[]`」的读取。
-  除女优标签外都是匿名可读的，所以标签筛选在没配 token 时也能用。
-- **`/collected` 的 `gender`**：已经补上了（服务透出 `gender`：0=女优 138 / 1=男优 6）。
-  设计稿里「只看女优 / 全部演员」开关接的就是它，默认只看女优（138 位）。
-- **`/collected` 的截断信号**（`truncated` / `pages_fetched` / `max_pages`）还没进 UI ——
-  它必须进：清单已知不完整时不能长得像完整的。
-- **示例数据只带了 21 位女优的标签**（一次一位的上游请求，不能 144 位全抓）。
-  真实实现里点了哪位取哪位，并给它一个加载态。
-- **空态/错误态**目前靠 URL hash（`#state=notoken` 等）演示。
+下面的缺口现在都已补齐，留在这里当**已核对**的清单（每一条都指向实现处）：
+
+- **服务地址默认值**：✅ 默认 `location.origin`，可改并持久化到 localStorage。
+- **数据来源**：✅ `/collected`（含 `gender`）、`/collected_lists`、`/tags?type=`、`/actress_tags/{id}`；
+  除 `/collected*` 外都匿名可读，所以标签筛选在没配 token 时也能用。
+- **`/collected` 的 `gender`**：✅ 服务透出（0=女优 138 / 1=男优 6，实测 144 位）。
+- **`/collected` 的截断信号**：✅ 已进 UI（票 07）：清单已知不完整时明说「已知不完整」，
+  未截断时这条提示不出现。
+- **女优标签按需取 + 加载态**：✅ 点了哪位取哪位，有加载态与失败态。
+- **空态/错误态**：✅ 真状态（`/collected` 的 503、上游 502…），不再靠 URL hash 演示。
 
 ## 目录
 
@@ -134,14 +149,14 @@ mockup/app.js                    交互 + URL 构造 + 分组消歧 + 折叠
 mockup/src/data.js               生成物：真实上游数据
 mockup/src/input.css             Tailwind v4 入口：shadcn 令牌 + 组件类
 mockup/assets/app.css            编译产物（提交进库，评审时不用装 node）
-ui-contract.md                   跨屏一致性的事实来源（含两处令牌偏离 + 五条硬规则）
+ui-contract.md                   跨屏一致性的事实来源（含两处令牌偏离 + 15 条硬规则）
 notes/tag-vocabulary.md          ⭐ 分组词表 / 撞号 / 交集语义
 notes/lists.md                   ⭐ 5 个 id 上限 / 日期通道 / 清单契约
 evidence/                        contractprobe 的原始响应，笔记里每条结论的证据
 tools/verify.sh                  全部验证
 tools/gen-data.mjs               evidence/ -> mockup/src/data.js
 tools/a11y.mjs                   axe / 触摸目标 / 焦点 / 溢出 / 主操作
-tools/flows.mjs                  四个需求的行为断言（40 项）
+tools/flows.mjs                  行为断言（171 项，打的是 provider=stub 的真服务）
 tools/shots.mjs                  断点截图（生成物**入库**）
 tools/rubric.json + rubric.mjs   L4 的 7 条布尔答案与算分
 ```

@@ -3,7 +3,7 @@
 **Status:** ready-for-agent
 **Effort:** `.scratch/javdb-rss-ui/`（设计稿、ui-contract、证据、笔记都在这里）
 **取代:** `.scratch/javdb-rss-followups/issues/06-collected-bulk-picking.md` 的验收清单
-**设计权威:** [`ui-contract.md`](ui-contract.md)（令牌 + 11 条硬规则）；本 spec 不得与它冲突
+**设计权威:** [`ui-contract.md`](ui-contract.md)（令牌 + 15 条硬规则）；本 spec 不得与它冲突
 
 ---
 
@@ -21,7 +21,7 @@
 - 标签超过 5 个、有时长没年份，上游都不吭声。
 
 也就是说：我不知道哪些参数是真的、哪些是「看着筛了、其实没筛」。设计稿（可点 mockup +
-`ui-contract.md` + 40 项行为断言）已经把这件事设计完了，但它是**静态页面 + 冻结数据**：
+`ui-contract.md` + 40 项行为断言（promote 后扩到 171 项并改打真服务））已经把这件事设计完了，但它是**静态页面 + 冻结数据**：
 144 位女优是一次快照、标签词表根本没接、页面也不在服务里，打不开也算不出我真实的清单。
 
 ## Solution
@@ -115,7 +115,7 @@ Node），数据来自服务自己的发现端点 —— 所以我看到的永�
   同时把「想看」「清单」的输出禁用并说明（它们读的是 App 里的标记，没 token 一定 503），
   标签区保持可用（词表与女优标签匿名可读），女优 id 可以手输。
 - 折叠状态、搜索、模式切换等交互不变量 1:1 复现 `ui-contract.md` 第「这个页面的交互不变量」一节
-  （11 条硬规则全部照做，含复制回退链、1.8s 反馈、`aria-live`、`prefers-reduced-motion`）。
+  （15 条硬规则全部照做，含复制回退链、1.8s 反馈、`aria-live`、`prefers-reduced-motion`）。
 
 ### 两个新的只读发现端点
 
@@ -187,7 +187,8 @@ Node），数据来自服务自己的发现端点 —— 所以我看到的永�
 ### 接缝 2（改造现有）：把 `tools/flows.mjs` 指向真服务
 
 现在它打的是静态 mockup（`mockup/src/data.js` 的冻结数据）。改成打
-`http://127.0.0.1:8080` 上一个 `provider=stub` 的真服务 —— 于是那 40 项断言守的不再是设计稿，
+`http://127.0.0.1:8080` 上一个 `provider=stub` 的真服务 —— 于是那些断言（promote 结束时
+是 171 项）守的不再是设计稿，
 而是**上线的东西**；mockup 目录降级为设计记录（连同 `shots/` 一起保留）。
 
 保留并更新原有断言（URL 逐字符、上限 5、折叠、键盘、复制回退、空态/无 token 文案），并新增：
