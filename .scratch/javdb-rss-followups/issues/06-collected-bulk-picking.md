@@ -8,6 +8,11 @@
 
 **Status:** ready-for-agent
 
+**Spec:** [`../../javdb-rss-ui/spec.md`](../../javdb-rss-ui/spec.md) —— 完整规格、实现决定与验收标准都在
+那里，下面这四个框由它取代（设计稿、ui-contract、证据与 40 项行为断言也都在 `.scratch/javdb-rss-ui/`）。
+做法是：服务自己把那张页面端出来（资产内嵌、单二进制），数据来自服务自己的发现端点；
+为此补两个只读端点（标签词表 `/tags?type=`、单个女优的标签 `/actress_tags/{id}`）—— 仍然无状态。
+
 - [ ] 能按某种可指定的条件筛出子集（按名字、按作品数、或直接列举）
 - [ ] 输出可直接粘贴进 qBittorrent 的 feed URL 列表
 - [ ] **不引入服务端状态** —— 与已定的「URL 即订阅、无状态」一致
