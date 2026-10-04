@@ -355,3 +355,15 @@ func (truncatedSource) List(context.Context, string, url.Values) ([]catalog.Work
 	return nil, nil
 }
 func (truncatedSource) ListName(context.Context, string) (string, error) { return "", nil }
+
+func (c *countingSource) Browse(context.Context, int, catalog.BrowseSelector, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}
+
+func (emptySource) Browse(context.Context, int, catalog.BrowseSelector, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}
+
+func (truncatedSource) Browse(context.Context, int, catalog.BrowseSelector, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}

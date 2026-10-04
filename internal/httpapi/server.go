@@ -67,6 +67,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /rss/code/", s.handleCode)
 	mux.HandleFunc("GET /rss/actress/", s.handleActress)
 	mux.HandleFunc("GET /rss/list/", s.handleList)
+	// 全站订阅（不挂实体的浏览）。它的 filter_by 形态与实体订阅**不同**：
+	// letter `t` 没有实体 id，标签/年份/月份/时长各占一个槽位。
+	mux.HandleFunc("GET /rss/tags/", s.handleBrowse)
 
 	// 「想看」 feed。它是一张**固定路径**的列表 feed（清单内容由 App 里的标记
 	// 决定，不在 URL 里），因此用精确路径注册而不是前缀剥尾。
@@ -326,6 +329,9 @@ func (s *Server) handleCollectedLists(w http.ResponseWriter, r *http.Request) {
 // 女优那条会说「女优」，这条会说「清单」，而把差异做成参数会让两个 handler
 // 的调用点都变得难读。共用的是更下面那一层（appapi 的 entityWorks）。
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	if rejectBrowseOnlyParams(w, r) {
+		return
+	}
 	id, ok := pathParam(r.URL.Path, "/rss/list/")
 	if !ok {
 		writeError(w, http.StatusNotFound, "需要形如 /rss/list/{清单 id}.xml 的路径")
@@ -582,6 +588,9 @@ func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
 
 // handleActress 服务 GET /rss/actress/{id}.xml?<透传参数>&since=<日期>。
 func (s *Server) handleActress(w http.ResponseWriter, r *http.Request) {
+	if rejectBrowseOnlyParams(w, r) {
+		return
+	}
 	id, ok := pathParam(r.URL.Path, "/rss/actress/")
 	if !ok {
 		writeError(w, http.StatusNotFound, "需要形如 /rss/actress/{id}.xml 的路径")

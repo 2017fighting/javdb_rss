@@ -120,6 +120,11 @@ app_api:
 #   # 清单 id 从 /collected_lists 取（它是发现端点，不是 feed）。
 #   lists:
 #     - k4EVE4
+#   # 全站订阅（/rss/tags/{片库号}.xml）允许的片库号。
+#   # 白名单在这里的单位是「片库」而不是「订阅」：全站订阅的组合空间
+#   # （4 个 zone × 任意标签/年份）枚举不出来。
+#   zones:
+#     - "0"
 #   actresses:
 #     - id: EvkJ
 #       # 原样透传给 App 女优页的查询参数，本服务不解释这些键值。

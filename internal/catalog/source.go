@@ -134,6 +134,66 @@ type ListCollection struct {
 	MaxPages     int
 }
 
+// 区域号（filter_by 的第一段）。
+//
+// 它同时是全站浏览的「片库」选择：实测 0/1/2/3 返回**四个不同的集合**
+// （0 有码 NMSL/FAYS…、1 无码 HEYZO…、2 欧美 Wifey/Blackedraw…、3 FC2-xxx）。
+const (
+	ZoneCensored   = 0 // 有码
+	ZoneUncensored = 1 // 无码
+	ZoneWestern    = 2 // 欧美
+	ZoneFC2        = 3 // FC2
+)
+
+// ZoneName 返回区域号的人读名字（feed 标题用）。未知区域号返回空串。
+func ZoneName(zone int) string {
+	switch zone {
+	case ZoneCensored:
+		return "有码"
+	case ZoneUncensored:
+		return "无码"
+	case ZoneWestern:
+		return "欧美"
+	case ZoneFC2:
+		return "FC2"
+	}
+	return ""
+}
+
+// MaxTags 是标签筛选的上限，**上游的硬限制**，不是 UI 约定。
+//
+// 实测（2026-10-04）：把 6 个 id 交给上游时，第 6 个会被**静默丢弃** ——
+// 同一个 id 挪到前 5 位就立刻生效（同一批请求的结果从 1 条变成 0 条）。
+// 所以上层必须自己拦住「超过 5 个」，否则用户会以为筛了 6 个。
+const MaxTags = 5
+
+// BrowseSelector 是「全站浏览」的几个筛选维度。
+//
+// 它们最终拼成上游的 filter_by 掩码：
+//
+//	{zone}:t:{Main}:{Tags}:{Year}:{Duration}:{Month}
+//
+// 各字段的空串表示不限。
+//
+// ⚠️ 它与实体掩码（女优/清单）在 letter 之后**整体错开一位**：实体掩码是
+// {zone}:{letter}:{id}:{main}:…，而全站形式的 letter `t` 没有实体 id，
+// 因此 main 落在实体掩码里 id 的位置。这不是猜测：是从 App 的真实抓包反推、
+// 再逐槽位实测确认的（见 notes/tag-vocabulary.md 第 7 节）。
+type BrowseSelector struct {
+	// Main 是主属性字母的逗号列表（如 "c,m"）。空串为不限。
+	Main string
+	// Tags 是标签 id 的逗号列表，**最多 MaxTags 个**。空串为不限。
+	Tags string
+	// Year 是四位年份（如 "2020"）。空串为不限。
+	Year string
+	// Duration 是时长档位 id（lt-45 / 45-90 / 90-120 / gt-120）。空串为不限。
+	//
+	// ⚠️ 它**必须与 Year 一起给**：实测单独给时长会被上游静默忽略。
+	Duration string
+	// Month 是月份（1–12）。空串为不限。单独给也生效（实测）。
+	Month string
+}
+
 // ErrNoToken 表示这次操作需要用户从 App 导出的 token，但当前没有配置它。
 //
 // 单独成一个可判定的错误，是因为它的处置方式与别的失败都不同：
@@ -168,6 +228,17 @@ var ownParams = map[string]bool{
 	"pages": true,
 	"page":  true,
 	"limit": true,
+	// 以下五个由 httpapi 消费，拼进**全站掩码**（见 BrowseSelector）。
+	//
+	// 它们列在这里的另一个作用是：女优/清单路由上如果有人传了它们，
+	// 会被剔除而**不会**透传给上游 —— 而那只会上游忽略。
+	// “被剔掉”与“被忽略”都会得到同一条未被筛的 feed，所以路由层还会额外
+	// 把这种用法当作**用户写错**返回 400（见 handleActress 的注释）。
+	"tags":     true,
+	"year":     true,
+	"month":    true,
+	"duration": true,
+	"main":     true,
 }
 
 // IsOwnParam 报告某个 query 参数是否由本服务自有（**不透传**给上游）。
@@ -256,4 +327,18 @@ type Source interface {
 	// 匿名只能读 `privacy: open` 的清单（实测），`privacy: own` 的会返回
 	// NoPermission —— 那种情况下退回 id 就行。
 	ListName(ctx context.Context, id string) (string, error)
+
+	// Browse 返回**全站**（不挂任何实体）的作品列表，按 zone 分片库。
+	//
+	// 它对应 App 「浏览」页那条：掩码是
+	// `{zone}:t:{main}:{tags}:{year}:{duration}:{month}` —— letter `t` 没有
+	// 实体 id，因此标签、年份、月份、时长全都能直接用（详见 BrowseSelector）。
+	//
+	// 这是本服务里**唯一**能把「标签 + 时间」组合起来的通道：实测
+	// `filter_by_tags` 作为独立参数只对女优实体生效，在清单/搜索/latest/top 上
+	// 全被静默忽略（见 notes/tag-vocabulary.md 第 6 节）。
+	//
+	// 实现方必须自己拦住「标签超过 MaxTags 个」与「有时长无年份」——
+	// 这两件事上游都不报错，只会静默少筛。
+	Browse(ctx context.Context, zone int, sel BrowseSelector, params url.Values) ([]Work, error)
 }

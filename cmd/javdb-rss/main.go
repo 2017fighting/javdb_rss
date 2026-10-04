@@ -332,6 +332,16 @@ func (s *appapiSource) List(ctx context.Context, id string, params url.Values) (
 	return out, err
 }
 
+func (s *appapiSource) Browse(ctx context.Context, zone int, sel catalog.BrowseSelector, params url.Values) ([]catalog.Work, error) {
+	var out []catalog.Work
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.Browse(ctx, zone, sel, params)
+		return e
+	})
+	return out, err
+}
+
 func (s *appapiSource) ListName(ctx context.Context, id string) (string, error) {
 	var out string
 	err := s.withRelogin(ctx, func(c *appapi.Client) error {

@@ -54,6 +54,12 @@ type recordingSource struct {
 	listErr    error
 	listID     string
 	listParams url.Values
+	// browseWorks 是 Browse 的返回值；browse* 记录收到的输入。
+	browseWorks  []catalog.Work
+	browseErr    error
+	browseZone   int
+	browseSel    catalog.BrowseSelector
+	browseParams url.Values
 }
 
 func (r *recordingSource) Code(_ context.Context, code string) ([]catalog.Work, error) {
@@ -124,6 +130,16 @@ func (r *recordingSource) List(_ context.Context, id string, params url.Values) 
 	return r.listWorks, nil
 }
 
+func (r *recordingSource) Browse(_ context.Context, zone int, sel catalog.BrowseSelector, params url.Values) ([]catalog.Work, error) {
+	r.browseZone = zone
+	r.browseSel = sel
+	r.browseParams = params
+	if r.browseErr != nil {
+		return nil, r.browseErr
+	}
+	return r.browseWorks, nil
+}
+
 func (r *recordingSource) ListName(_ context.Context, id string) (string, error) {
 	if r.names != nil {
 		if n, ok := r.names[id]; ok {
@@ -151,8 +167,9 @@ func newTestServer(t *testing.T, cfgYAML string, src catalog.Source) http.Handle
 type parsedFeed struct {
 	XMLName xml.Name `xml:"rss"`
 	Channel struct {
-		Title string `xml:"title"`
-		Items []struct {
+		Title       string `xml:"title"`
+		Description string `xml:"description"`
+		Items       []struct {
 			Title     string `xml:"title"`
 			Link      string `xml:"link"`
 			GUID      string `xml:"guid"`

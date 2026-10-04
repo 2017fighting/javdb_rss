@@ -117,6 +117,14 @@ type FeedsConfig struct {
 	// zone **不在配置里**：清单的 filter_by 实测固定为 `0:l:{id}`（写错 zone
 	// 不会报错，只会静默给别的作品），因此不把一个危险的旋钮交给配置。
 	Lists []string `yaml:"lists"`
+	// Zones 是全站标签订阅（/rss/tags/{zone}.xml）允许的片库号。
+	//
+	// 白名单的单位在这里是「片库」而不是「订阅」：全站订阅的组合空间是
+	// 4 个 zone × 任意标签/年份组合，**枚举不出来**。可枚举且有意义的粒度
+	// 是「你愿不愿意把哪个片库作为订阅放出去」。
+	//
+	// 不写这一段= 四个片库全放行；写了就只有列出的会被服务。
+	Zones []string `yaml:"zones"`
 }
 
 // ActressSub 是一条女优订阅。
@@ -228,6 +236,23 @@ func (c *Config) AllowsList(id string) bool {
 	}
 	for _, x := range c.Feeds.Lists {
 		if strings.EqualFold(strings.TrimSpace(x), strings.TrimSpace(id)) {
+			return true
+		}
+	}
+	return false
+}
+
+// AllowsZone 报告白名单是否放行某个片库（全站标签订阅用）。
+//
+// 与 AllowsCode / AllowsList 同一套语义：白名单不存在时全放行。
+// zone 用字符串比较是为了让写错的值（如 "有码"）落在「不在白名单」而不是
+// 被静默转成 0 —— 后者会让一个写错的配置放行**有码**这个片库。
+func (c *Config) AllowsZone(zone string) bool {
+	if c.Feeds == nil {
+		return true
+	}
+	for _, x := range c.Feeds.Zones {
+		if strings.EqualFold(strings.TrimSpace(x), strings.TrimSpace(zone)) {
 			return true
 		}
 	}

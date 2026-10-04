@@ -464,3 +464,29 @@ func TestAllowsList(t *testing.T) {
 		t.Error("白名单外的清单不该放行")
 	}
 }
+
+// TestAllowsZone 钉住全站订阅的白名单语义。
+//
+// 单位是「片库」而不是「订阅」：全站订阅的组合空间（4 个 zone × 任意标签/年份）
+// 枚举不出来，可枚举且有意义的粒度是「愿不愿意把哪个片库放出去」。
+//
+// zone 用**字符串**比较是有意的：写成 "有码" 这种非法值时应当落在
+// 「不在白名单」而不是被静默转成 0 —— 后者会让一个写错的配置放行有码片库。
+func TestAllowsZone(t *testing.T) {
+	open := &Config{}
+	if !open.AllowsZone("0") {
+		t.Error("没有 feeds 段时应当全放行")
+	}
+
+	c := &Config{Feeds: &FeedsConfig{Zones: []string{"0", " 3 "}}}
+	for _, z := range []string{"0", "3"} {
+		if !c.AllowsZone(z) {
+			t.Errorf("片库 %s 在白名单里，应当放行", z)
+		}
+	}
+	for _, z := range []string{"1", "2", "有码", ""} {
+		if c.AllowsZone(z) {
+			t.Errorf("片库 %q 不该放行", z)
+		}
+	}
+}

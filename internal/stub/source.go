@@ -44,6 +44,8 @@ type Source struct {
 	Lists *catalog.ListCollection
 	// ListWorks 是 List 的返回值；为 nil 时用内置样例。
 	ListWorks []catalog.Work
+	// BrowseWorks 是 Browse 的返回值；为 nil 时用内置样例。
+	BrowseWorks []catalog.Work
 }
 
 // 样例数据刻意覆盖三种关键形态，好让端到端跑起来时一眼能看出规则生效：
@@ -200,6 +202,19 @@ func (s *Source) List(_ context.Context, id string, _ url.Values) ([]catalog.Wor
 		return s.ListWorks, nil
 	}
 	return []catalog.Work{sampleWithSub}, nil
+}
+
+// Browse 实现 catalog.Source。
+//
+// 复用同一套样例作品：全站订阅与女优订阅在选磁链、pin 上完全同形。
+func (s *Source) Browse(_ context.Context, _ int, _ catalog.BrowseSelector, _ url.Values) ([]catalog.Work, error) {
+	if s.Err != nil {
+		return nil, s.Err
+	}
+	if s.BrowseWorks != nil {
+		return s.BrowseWorks, nil
+	}
+	return []catalog.Work{sampleNoSub}, nil
 }
 
 // ListName 实现 catalog.Source。

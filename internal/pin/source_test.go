@@ -687,3 +687,7 @@ func (f *fakeSource) List(context.Context, string, url.Values) ([]catalog.Work, 
 	return nil, nil
 }
 func (f *fakeSource) ListName(context.Context, string) (string, error) { return "", nil }
+
+func (f *fakeSource) Browse(context.Context, int, catalog.BrowseSelector, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}

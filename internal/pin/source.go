@@ -108,6 +108,19 @@ func (s *Source) ListName(ctx context.Context, id string) (string, error) {
 	return s.inner.ListName(ctx, id)
 }
 
+// Browse 实现 catalog.Source。
+//
+// 全站浏览也是 feed 数据源，因此同样要钉住：同一部作品可能同时出现在
+// 全站订阅与女优订阅里，而pin 表按作品 id 键，两边会钉到同一条磁链，
+// 跨 feed 自然一致。
+func (s *Source) Browse(ctx context.Context, zone int, sel catalog.BrowseSelector, params url.Values) ([]catalog.Work, error) {
+	works, err := s.inner.Browse(ctx, zone, sel, params)
+	if err != nil {
+		return nil, err
+	}
+	return s.pinAll(works)
+}
+
 // CollectedLists 直接透传 —— 清单列表不产生 guid。
 func (s *Source) CollectedLists(ctx context.Context) (catalog.ListCollection, error) {
 	return s.inner.CollectedLists(ctx)

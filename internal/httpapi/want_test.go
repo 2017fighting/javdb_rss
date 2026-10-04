@@ -270,3 +270,7 @@ func (wantAuthErrSource) List(context.Context, string, url.Values) ([]catalog.Wo
 	return nil, nil
 }
 func (wantAuthErrSource) ListName(context.Context, string) (string, error) { return "", nil }
+
+func (wantAuthErrSource) Browse(context.Context, int, catalog.BrowseSelector, url.Values) ([]catalog.Work, error) {
+	return nil, nil
+}

@@ -11,6 +11,7 @@ package dedupe
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -100,6 +101,18 @@ func (s *Source) List(ctx context.Context, id string, params url.Values) ([]cata
 	key := "list:" + id + "?" + canonicalParams(params)
 	return s.do(key, func() ([]catalog.Work, error) {
 		return s.inner.List(ctx, id, params)
+	})
+}
+
+// Browse 实现 catalog.Source。
+//
+// key 要把 **zone 与五个筛选维度全都算进去**：全站订阅之间只差一个年份或
+// 一个标签，合并错了就是拿别人那份内容给用户。
+func (s *Source) Browse(ctx context.Context, zone int, sel catalog.BrowseSelector, params url.Values) ([]catalog.Work, error) {
+	key := fmt.Sprintf("browse:%d:%s|%s|%s|%s|%s?%s",
+		zone, sel.Main, sel.Tags, sel.Year, sel.Duration, sel.Month, canonicalParams(params))
+	return s.do(key, func() ([]catalog.Work, error) {
+		return s.inner.Browse(ctx, zone, sel, params)
 	})
 }
 

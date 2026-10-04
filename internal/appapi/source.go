@@ -175,7 +175,19 @@ func (c *Client) entityWorks(ctx context.Context, e entity, params url.Values, n
 	if err != nil {
 		return nil, err
 	}
+	return c.worksByMask(ctx, filterBy, params)
+}
 
+// worksByMask 是「拿着一个已经校验过的 filter_by 去取作品」的实现。
+//
+// 女优、清单、全站浏览三条订阅共用它。分开写三份的话，
+// 「逐页去重」「短页即到底」「并发补磁链」「固定 limit」这些**必须一致**的地方
+// 就会变成三份可以各自跑偏的代码。
+//
+// filterBy 必须由调用方校验过：这里只负责搬运，不再解析掩码 ——
+// 校验规则是**按路由不同**的（实体掩码要 id 与 URL 一致，全站掩码压根没有 id），
+// 混进这一层只会让两套规则互相打架。
+func (c *Client) worksByMask(ctx context.Context, filterBy string, params url.Values) ([]catalog.Work, error) {
 	pages := pageCount(params)
 
 	base := url.Values{"filter_by": {filterBy}}
