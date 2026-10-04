@@ -6,10 +6,11 @@
 
 **Status:** ready-for-agent
 
-- [ ] 表驱动单测钉住 10 的结论：边界日（等于 `since` 那天）、缺日期、坏格式，以及 10 认定的核心分歧场景（合集再版，或 10 结论里的等价场景）
-- [ ] 两条路由（`/rss/actress/{id}.xml`、`/rss/list/{id}.xml`）行为一致 —— 若 10 决定对齐 `year`+`since`，那条 400 一并落地
-- [ ] `grep -rn "尚未定稿"` 与 `grep -rn "TODO(ticket-09)"` 在代码与 live 文档里归零（`javdb-rss/issues/` 下的历史票面是**记录**，不改）
-- [ ] `config.yaml` / `config.example.yaml` 的 `since` 注释、`notes/actress-params.md`、`README.md` 的参数表与实现一致
-- [ ] 日志变成定稿形态：正常路径不再每请求 WARN；若 10 保留「坏数据一律保留」，那么**出现坏数据时仍必须 WARN 并计数**（那是可见性问题，不是语义问题）
+- [ ] `since` 必须是严格 `YYYY-MM-DD`，否则 400。现在 `since=2026-1-1` 会静默丢掉 1–9 月、`since=hello` 会静默只剩 1/6、ISO 时间戳会静默丢弃当天发行的作品 —— 三条路由共用一份校验
+- [ ] `year`（女优、全站）或 `month`（全站）与 `since` 同时给 → 400，三条路由规则一致（女优已有；清单靠自己的 `year` 拒绝间接覆盖）
+- [ ] `release_date` 为空或形状不对 → **保留**，并**分开**计数（与「丢弃」不是一回事）
+- [ ] 日志：删掉「语义尚未定稿」那条 WARN；正常路径一条 **Debug**（作品 N / 能成 item M / 保留 K / 丢弃 D / 坏数据 E）；「筛空」（含 `since` 在未来）与「取数窗没走到 `since`」各一条 **WARN**
+- [ ] 表驱动单测：闭区间边界日、四种坏形状的 `since` 各判断为 400、坏 `release_date` 保留、两条 WARN 各被触发一次
+- [ ] 文案与文档：`grep -rn "尚未定稿"` 与 `grep -rn "TODO(ticket-09)"` 在代码与 live 文档里归零（`javdb-rss/issues/` 下的历史票面是**记录**，不改）；`config.yaml` / `config.example.yaml` / `notes/actress-params.md` / `README.md` 与实现一致
+- [ ] 三件事写进 notes 与 README：`since` 比 `release_date` 闭区间（`>=` 是因为订阅链接生成器发 `since=<今天>`，开区间会把当天发行的挡在外面）、`pubDate` 可能早于 `since`（如实转述上游，刻意不改）、`since` 只在取到的页里生效（要更深的历史用 `pages`）
 - [ ] 留一句给后人的注释：为什么是这个比较字段 —— 理由进代码，不只进票面
-- [ ] 若结论是换字段：README / notes 里给一句话说明「同一 `since` 的返回集合会因此变化」

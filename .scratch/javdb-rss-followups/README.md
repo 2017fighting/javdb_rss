@@ -23,13 +23,13 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 07 | CI 首次跑通 | ~~需先 push~~ 已 push（resolved） |
 | 08 | 「钉住」磁链的存储与失效 | 无（04 决策新开） |
 | 09 | pin 的切换语义 | 无（04 决策新开） |
-| 10 | `since` 的语义定稿 | 无（清账新开，见下） |
+| 10 | `since` 的语义定稿 | ~~无~~ 已 resolved（2026-10-05，grilling with user） |
 | 11 | 按定稿语义落地 `since` | 10 |
 | 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | 无 |
 
-维护性工作本来没有天然顺序，只有一处例外：**11 必须等 10 的结论**。
-（01/02/03/04/05/07/08/09 已 resolved，见下 Decisions so far；
-07 为机械验收项，已随 push 关闭。**开着的还有 06、10、11、12。**）
+维护性工作本来没有天然顺序。11 原本要等 10 的结论，**10 已 resolved（2026-10-05）**，
+因此 11 现在就可以开工。（01/02/03/04/05/07/08/09/10 已 resolved，见下 Decisions so far；
+07 为机械验收项，已随 push 关闭。**开着的还有 06、11、12。**）
 
 10–12 的来源与前九张不同：不是 code-review 的「未修」，而是清账时发现的
 **一笔孤儿欠账** —— `since` 的比较语义在初次交付的票 09 里被标成已解决，
@@ -97,6 +97,17 @@ qBittorrent 多下一份文件，而没有任何告警。
   （可能死链）并记 WARN；同日定序用 infohash 字典序；首次选定是纯函数
   `catalog.Select`；不缓存候选列表；每次切换一条 INFO + 落盘的「切换 N」计数。**
   ticket 08 的 `TemporaryPolicy`（钉住即不切）被 `DefaultPolicy` 取代。
+- [`since` 的语义定稿](issues/10-since-semantics.md)
+  — **比作品的 `release_date`，闭区间 `>=`；非法输入一律 400；日志只报异常 + 正常路径一条 Debug。**
+  实测推翻了票面自己写的两处：合集再版不是「旧 `release_date`、新 `created_at`」，
+  而是**新上架复用六年前的磁链**（`OFJE-662` 差 -2198 天）；`since` 在**三条**路由生效，
+  而真正缺 `year`+`since` 那条 400 的是**全站**路由（清单路由早由 `buildEntityMask` 拒绝 `year`）。
+  否掉磁链 `created_at` 与并集的理由：实测最近 30 天窗口内它保留 **0 部**（磁链 `created_at` 普遍早于发售日），
+  而它想救的「旧作品被补上新磁链」结构上不在第 1 页 —— 取数是按 `release_date` 倒序分页的。
+  顺带用**真实现存函数**测出三个静默失败：`since=2026-1-1` 静默丢 1–9 月、`since=hello` 静默只剩 1/6、
+  ISO 时间戳静默丢弃当天发行的作品 —— 因此 `since` 非严格 `YYYY-MM-DD` 一律判 400。
+  `pubDate` 不动（如实转述上游，可能早于 `since`）；`since` 只在取到的页里生效，
+  窗口没走完只 WARN（RSS 没有机读位，也不自动翻页）。证据见 [`notes/api-recon.md` §10.4.2](../javdb-rss/notes/api-recon.md)。
 
 ## Not yet specified
 

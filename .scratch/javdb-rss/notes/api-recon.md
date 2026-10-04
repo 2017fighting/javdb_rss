@@ -358,6 +358,47 @@ infohash。因此上游一旦重排，guid 就变、qBittorrent 会再下一份 
 **这条证据促成的决定**：见 ticket 04 的 `## Answer` —— 改成「按 `created_at` 取最新、
 cnsub 优先」并把每个作品 id 选中的磁链持久化钉住（新票 08/09）。
 
+### 10.4.2 `release_date` 与磁链 `created_at` 的错位（followups ticket 10 取证，2026-10-05）
+
+量法：真实 API，女优 `EvkJ` 第 1 页 50 部 + 清单 `p36Eww` 第 1 页 9 部；每部取
+`catalog.Select` 选中的那条磁链（即 feed 最终呈现、`pubDate` 取自的那条）。
+一次性探针，用完即删（先例：ticket 04 的 `cmd/magnetprobe`）。
+
+**女优 EvkJ**（50 部，`release_date` 2025-10-14 .. 2026-10-27，跨度 378 天）
+
+| 事实 | 数 |
+|---|---|
+| `release_date` 取值形态 | **50/50 严格 `YYYY-MM-DD`**，空 0 条 |
+| `magnets_count = 0`（永远成不了 item，`feed.Build` 跳过） | **33/50** |
+| 选中磁链 `created_at` 解析不了 | 0 |
+| 选中 `created_at` **>** `release_date` | 11 部（最远 **+196 天**） |
+| 同日 | 1 部 |
+| 选中 `created_at` **<** `release_date` | 5 部（最远 **-2198 天**） |
+
+极端样本（这就是两条追新口径的分歧点）：
+
+| 番号 | release_date | 选中磁链 created_at | 差 |
+|---|---|---|---|
+| `OFJE-662` | 2026-09-29 | **2020-09-22** | -2198 天 |
+| `SNOS-377` | 2026-09-23 | 2026-09-18 | -5 天 |
+| `SNOS-371` | 2026-08-26 | 2026-09-09 | +14 天 |
+
+`since` 取「最近 30 天」时的结果：按 `release_date` 保留 **6 部**（其中只有 1 部真有磁链、
+真能成为 item），按磁链 `created_at` 保留 **0 部** —— 新作品的磁链 `created_at` 普遍早于或错位于
+发售日，**拿磁链时间当下界会把新作品本身筛掉**。
+
+**清单 p36Eww**（9 部，跨度 976 天，8 部有磁链）：`created_at` 更新 7（最远 +473 天）、
+更旧 1（-27 天）。最近 30 天：按 `release_date` 留 1 部，按磁链 `created_at` 留 3 部
+（多出的 `MGNL-090`、`DVMM-254` 是旧作品被补上的新磁链）。
+
+**比数字更重要的结构约束**：取作品是**分页**的，第 1 页 = 按 `release_date` 倒序的最新 50 部。
+因此 `since` 无论比哪个字段，都只能在这 50 部里过滤 —— 一部 2020 年的旧作品今天被补上新磁链，
+它根本不在第 1 页，任何规则都看不到。于是「按磁链 `created_at` 追新」既不完整
+（漏掉窗口外的刷新），又会误伤窗口内的新作品。
+
+**副产品**：`notes/actress-params.md` 里那条「过滤后仍能看到 `pubDate` 比 `since` 早的条目
+（合集再版）」得到实例 —— `OFJE-662` 就是（`pubDate` 比发售日早 6 年）。
+
 ## 10.5 `/api/v4/movies/{id}` 详情
 
 比列表形态丰富得多：`number_letter`、`summary`、`score`、`reviews_count`、
