@@ -167,7 +167,12 @@ check("每组带已选计数", (await page.textContent("#tag-groups")).includes(
 // 全站标签：词汇表能列出来，但不给一条会 404 的链接
 await page.click('[data-source="site"]');
 check("全站标签禁用生成", await page.isDisabled("#tag-add"), true);
-check("全站标签不谎报 URL", (await page.textContent("#tag-url")).includes("没有服务端路由"), true);
+check(
+  "全站标签不谎报 URL，且原因指向上游而不是「缺路由」",
+  (await page.textContent("#tag-url")).includes("上游只在女优实体上认") &&
+    (await page.textContent("#tag-url-hint")).includes("上游没有全站形态"),
+  true,
+);
 check(
   "全站词汇表包含 7 个可筛组共 307 个标签（折叠时也在 DOM 里）",
   await page.$$eval("#tag-groups [data-tag]", (n) => n.length),

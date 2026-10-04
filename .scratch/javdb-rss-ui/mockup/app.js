@@ -708,14 +708,18 @@
     const canBuild = !site && !!a;
 
     el.tagUrl.textContent = site
-      ? "—— 全站标签还没有服务端路由，生成不出链接 ——"
+      ? "—— 全站标签做不成：上游只在女优实体上认 filter_by_tags ——"
       : canBuild
         ? tagUrl()
         : "先从上面选一位女优。";
 
     const parts = [];
     if (site) {
-      parts.push("缺一条服务路由：建议形状 /rss/tags/{zone}/{ids}.xml（zone 不能省，词汇表按 zone 分）");
+      parts.push(
+        "上游只在女优实体上认 filter_by_tags；没有实体时 filter_by 本身是必填的 —— " +
+          "所以这不是缺一条路由，是上游没有全站形态（对照实验：不存在的 id 在女优页会变 0 条，" +
+          "在搜索/清单上原样返回）",
+      );
     } else if (canBuild) {
       const since = timeSince();
       if (since) {
@@ -1242,5 +1246,7 @@
   const males = D.actors.filter((a) => a.gender !== 0).length;
   if (males) {
     $("gender-label").textContent = `收藏里有 ${males} 位男优`;
+    // 把数据来源挂在控件上：promote 时这个开关靠的就是这一个字段。
+    el.genderGroup.title = "/collected 的 gender 字段：0 = 女优，1 = 男优（上游直接给，服务透出）";
   }
 })();

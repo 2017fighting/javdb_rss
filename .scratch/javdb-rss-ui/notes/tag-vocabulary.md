@@ -242,3 +242,76 @@ go run ./cmd/contractprobe -out $OUT raw /api/v1/users/collected_actors page=1
 **仍然未知（已登记，不是遗留）**：`year`/`month`/`duration` 的正确通道；
 `type` 与 zone 的对应；`filter_by_tags` 有没有上限；
 词表里不在该女优 `tags[]` 里的标签能不能筛（ticket 03 只测过她自己的 80 个）。
+
+---
+
+## 6. `filter_by_tags` 的**生效范围**：只有女优实体（2026-10-04 第三批）
+
+起因：用户要一个「全站标签入口」。结论是**做不成** —— 不是缺一条服务路由，
+是上游只在女优实体上认这个参数。
+
+### 判据：拿一个不存在的 id 当对照
+
+只在筛就会变成 **0 条**；被忽略就**原样返回**。这个对照能证伪，因此是决定性的：
+
+| 请求 | 结果 | 判定 |
+|---|---|---|
+| `filter_by=0:a:EvkJ` `filter_by_tags=68` | 31 条 | 生效 |
+| `filter_by=0:a:EvkJ` `filter_by_tags=999999` | **0 条** | ✅ 确实在筛 |
+| `filter_by=0:a:83V` `filter_by_tags=8` | 50 条 | 生效（不是 EvkJ 特殊） |
+| `filter_by=0:a:83V` `filter_by_tags=999999` | **0 条** | ✅ 对照组成立 |
+| `filter_by=0:l:p36Eww` `filter_by_tags=68` | 9 条＝整份清单 | ❌ 被忽略 |
+| `filter_by=0:l:p36Eww` `filter_by_tags=999999` | **9 条** | ❌ 被忽略 |
+| `filter_by=0:l:p36Eww` `sort_by=score` | 顺序变了 | （说明**其余**透传参数确实到了上游） |
+| `/api/v2/search?q=巨乳&filter_by_tags=999999` | **20 条** | ❌ 被忽略 |
+| `/api/v1/movies/latest?filter_by_tags=68` | 与基线逐条相同 | ❌ 被忽略 |
+| `/api/v1/movies/top?filter_by_tags=68` | 与基线逐条相同 | ❌ 被忽略 |
+| 不带 `filter_by`（任何参数组合） | `ParameterInvalid: 參數不能爲空: filter_by` | 连发都发不出去 |
+| `filter_by=0`（只有 zone） | 20 条，且加不加 `filter_by_tags` 都一样 | zone 不是有效掩码，整体被忽略 |
+
+> ⚠️ **一个差点被骗到的坑**：`/api/v2/search?q=巨乳&filter_by_tags=68` 与基线**不是**
+> 逐条相同 —— 有两项换了位置。当时差点记成「搜索端点也生效」。换成不存在的 id
+> 才发现它照样返回 20 条：那个差异是**排序噪声**，不是筛选。
+> 教训：判「参数是否生效」必须用**能证伪**的对照（会变成 0 条的那个），
+> 不能用「结果是否不同」—— 排序抖动会让后者恒真。
+
+### 本地也筛不了
+
+列表响应（`movieSlim`，`/api/v2/search`、`/movies/tags`、`/movies/latest` 共用）的字段是：
+
+```
+id number title origin_title thumb_url cover_url duration magnets_count can_play
+play_subtitle has_preview_video has_cnsub has_preview_images new_magnets
+first_magnets preview_images release_date
+```
+
+**没有 `tags[]`**。详情端点 `/api/v4/movies/{id}` 有（实测 `{"id":"58","name":"制服"}`），
+但那意味着「每部候选各打一次详情请求」—— 一页 50 部，代价荒谬。
+
+### 所以
+
+- **标签筛选只与女优订阅绑定。** 这与 App 一致：它的筛选面板挂在实体页上。
+- 用户想要的「全站标签入口」**不做**，而且不是「以后再说」—— 上游没有全站形态，
+  一条 `/rss/tags/…` 路由只会返回**没筛过的**最新作品，那比 404 更坏
+  （一个看起来在筛、实际没筛的 feed 正是本项目最不能接受的东西）。
+- 设计稿里那一节因此保留下来当**说明**：355 个标签是真的，可以浏览，
+  但按钮禁用，并写明为什么（而不是写「缺一条路由」）。
+
+### 复跑
+
+```bash
+OUT=/tmp/scope-probe
+B=/api/v1/movies/tags
+# 对照组：女优实体（会变 0 条 ⇒ 确实在筛）
+go run ./cmd/contractprobe -out $OUT raw $B filter_by=0:a:EvkJ limit=50 filter_by_tags=999999
+# 清单实体（不变 ⇒ 被忽略）
+go run ./cmd/contractprobe -out $OUT raw $B filter_by=0:l:p36Eww limit=50 filter_by_tags=999999
+# 搜索端点（不变 ⇒ 被忽略）
+go run ./cmd/contractprobe -out $OUT raw /api/v2/search q=巨乳 limit=20 filter_by_tags=999999
+# 没实体时 filter_by 是必填
+go run ./cmd/contractprobe -out $OUT raw $B limit=20 filter_by_tags=68
+```
+
+**仍未验证**：`letter=s`（系列）/ `m`（片商）上是否生效 —— 手里没有可用的 series/maker id，
+试过的 `0:s:1` 两种都返回 0 条，区分不了「没有这个系列」与「标签被忽略」。
+不影响结论（女优之外的形态都没有可用通道）。
