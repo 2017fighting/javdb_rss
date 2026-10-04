@@ -53,6 +53,9 @@ coverage.*
 docs/
 *.md
 !README.md
+# 归属声明必须能进构建上下文：最终镜像会把它拷进去（见 Dockerfile 最后一段）。
+# LICENSE 不带扩展名，所以上面那条 `*.md` 不会误伤它。
+!THIRD_PARTY_NOTICES.md
 
 # Python 产物（只在写逆向脚本时会出现，服务本身是纯 Go）
 .venv/

@@ -78,9 +78,11 @@ README 的「发版与拉取镜像」小节。
 
 ### 顺带看见、**没有**就地改的两件
 
-1. 镜像标签里 `org.opencontainers.image.licenses` 是**空串**：metadata-action 去读仓库的
-   LICENSE 文件，而本仓库没有（只有 `THIRD_PARTY_NOTICES.md`）。加不加许可证不是发版
-   链路该决定的事。
+1. 镜像标签里 `org.opencontainers.image.licenses` 是**空串** —— 它取自 GitHub 对仓库
+   LICENSE 的探测结果，而本仓库当时没有 LICENSE。**用户当日决定加 MIT**：见
+   [`LICENSE`](../../../LICENSE) 与 README 的「许可证」一节，声明也随镜像分发
+   （`/usr/share/licenses/javdb-rss/`）。下一次发布时该标签应当变成 `MIT`
+   （**尚未复核**）。
 2. `CONTEXT.md` 的 Language 段**不动**：发布属于实现层，不属于「订阅收敛」那个领域。
    唯一的用词风险是「钉版本」（pin 镜像 tag）与「钉住 (Pin)」（记住上次选中的 infohash）
    撞车 —— README 只写「唯一该被人钉住的形状」，两个 pin 不并排出现。

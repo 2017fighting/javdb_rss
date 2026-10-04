@@ -55,10 +55,22 @@
 
 ## 首跑顺带看见的两件小事（都不是本票引入的）
 
-1. **`org.opencontainers.image.licenses` 是空串。** metadata-action 会去读仓库的
-   LICENSE 文件，而本仓库**没有 LICENSE**（只有 `THIRD_PARTY_NOTICES.md`）——
-   于是它写了一个空值。镜像元数据把一个仓库层面的事实暴露了出来：
-   这个仓库目前没有许可证。**没动它**：加不加许可证不是发版链路该决定的事。
+1. **`org.opencontainers.image.licenses` 是空串。** 查了源码：metadata-action 写的是
+   `org.opencontainers.image.licenses=${this.repo.license?.spdx_id || ''}`
+   （`src/meta.ts`）—— 即**取自 GitHub 对仓库 LICENSE 的探测结果**，不是它自己去读文件。
+   而本仓库当时**没有 LICENSE**（只有 `THIRD_PARTY_NOTICES.md`），于是写上了一个空值。
+   镜像元数据把一个仓库层面的事实暴露了出来：这个仓库没有许可证。
+
+   **2026-10-05 已按用户要求修**：加了 MIT 的 [`LICENSE`](../../../LICENSE)
+   （版权归 `2017fighting`），README 补了「许可证」一节，并把 `LICENSE` 与
+   `THIRD_PARTY_NOTICES.md` **拷进镜像**（`/usr/share/licenses/javdb-rss/`）——
+   MIT 要求分发副本时带上这些声明，而镜像是本服务主要的二进制分发渠道。
+   `.dockerignore` 为此开了 `!THIRD_PARTY_NOTICES.md` 例外（`LICENSE` 不带扩展名，
+   本来就不在 `*.md` 的射程内）。
+
+   **尚未复核**：下一次发布时这个标签应当变成 `MIT`。这条链是「GitHub 探测仓库
+   LICENSE（同步）→ API → 标签」，加文件即生效，但**这是预期而不是实测** ——
+   下次发版时把它一并验掉。
 2. **`docs/adr/` 与「发布」这套词汇第一次进了这个仓库。** `CONTEXT.md` 的
    Language 段没动 —— 发布属于实现层，不是「订阅收敛」那个领域里的词。
    唯一的用词风险是「**钉**版本」（pin 镜像 tag）与「**钉住** (Pin)」（记住上次选中的

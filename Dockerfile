@@ -57,6 +57,13 @@ RUN apk add --no-cache ca-certificates tzdata \
 
 COPY --from=build /out/javdb-rss /usr/local/bin/javdb-rss
 
+# 许可与归属**随镜像一起分发**。MIT 要求分发副本时带上版权与许可声明，
+# 而本服务主要的二进制分发渠道就是这个镜像（README 只提了源码仓库）。
+# 用 alpine 的惯例路径 /usr/share/licenses/<包名>/。
+# THIRD_PARTY_NOTICES 也在这里：镜像里含一段 vendored 的 MIT 代码（签名算法），
+# 它的归属声明同样必须伴随副本。
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/licenses/javdb-rss/
+
 # 配置与 token 从外面挂进来，不烤进镜像。
 #
 # /config  放 config.yaml

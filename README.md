@@ -735,3 +735,12 @@ CI（`.github/workflows/ci.yml`）跑的是同一组命令加容器构建 ——
 签名算法来自 [javdb-cli](https://github.com/FlanChanXwO/javdb-cli)（MIT），
 归属与改动见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 **如果哪天签名失效了，第一件事是去看那个项目是否已跟进。**
+
+## 许可证
+
+本项目以 **MIT** 许可发布，全文见 [LICENSE](LICENSE)。
+
+唯一 vendored 的第三方代码（`internal/appapi/signature.go` 里的签名算法）也是 MIT，
+其归属与我们的改动见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+这两份声明**会随镜像一起分发**（镜像内 `/usr/share/licenses/javdb-rss/`）——
+MIT 要求分发副本时带上它们，而镜像是本服务主要的二进制分发渠道。
