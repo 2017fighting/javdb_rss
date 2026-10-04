@@ -12,7 +12,10 @@
  *   2. 读不到收藏时**照实说出服务给的那句话**，而不是给一个空列表 ——
  *      空列表会被理解成「你没收藏任何人」，而真相是「服务读不到」。
  *   3. 标签区不靠猜：id 撞号时按**名字**消歧，对不上就不显示（宁缺勿错）；
- *      基本组只列她自己支持的字母，不是词表里那一整组。
+ *      女优模式的基本组只列她自己支持的字母，不是词表里那一整组。
+ *   4. 「全站标签」是**另一种掩码形态**：不挂实体，片库在 URL 路径里，
+ *      标签/年/月/时长各占 filter_by 掩码的一个槽位。它是匿名可读的，
+ *      而且主属性里**总是**带 m（含磁鏈）—— 不发它的全站 feed 会没有磁链。
  */
 (() => {
   "use strict";
@@ -28,14 +31,33 @@
   // 所以她的标签词表取 type=0 —— 换个片库就是另一份 id 空间。
   const ACTRESS_ZONE = 0;
 
-  // 词表里**不走她自己 tags[]** 的那几组：
-  //   main      走 filter_by 的字母位，单独一档（她的 filter_tags，见基本组）；
-  //   year      走掩码第 5 段，渲染成 select；
-  //   month / duration  女优订阅不支持（服务那侧遇到它们判 400）。
+  // 全站订阅的四个片库（filter_by 的第一段，也是 /rss/tags/{zone}.xml 的路径段）。
+  // 与 catalog.ZoneName 同一份取值：写错片库上游不报错，只会给另一个库的作品，
+  // 所以它必须看得见、改得动。
+  const SITE_ZONES = [
+    { id: 0, name: "有码" },
+    { id: 1, name: "无码" },
+    { id: 2, name: "欧美" },
+    { id: 3, name: "FC2" },
+  ];
+  const zoneName = (id) => SITE_ZONES.find((z) => z.id === Number(id))?.name ?? `片库 ${id}`;
+
+  // 上游给的四档时长（掩码第 6 槽）。显示名沿用服务端 browse 的 durationName。
+  const DURATION_LABELS = {
+    "lt-45": "45 分钟以内",
+    "45-90": "45–90 分钟",
+    "90-120": "90–120 分钟",
+    "gt-120": "120 分钟以上",
+  };
+
+  // 词表里**不是标签**的那几组（两种模式都是这样）：
+  //   main      走 filter_by 的字母位，单独一档（女优的 filter_tags / 全站词表）；
+  //   year      走掩码第 5 段（女优）/ 槽（全站），渲染成 select；
+  //   month / duration  只有全站形态有对应的槽位；女优订阅遇到它们判 400。
   // 而且年/月/时长的 id **不是标签 id**（月份 1–12 与真标签 id 全撞号），
   // 一旦被当成标签发出去会静默筛出另一批作品 —— 所以它们既不渲染成可点 chip，
   // 也不参与「她的标签 → 分组」的反查。
-  const UNSUPPORTED_GROUPS = new Set(["main", "year", "month", "duration"]);
+  const SPECIAL_GROUPS = new Set(["main", "year", "month", "duration"]);
 
   // 空态/错误态那段说明的样式：虚线框 = 「这里还没有东西」，与有内容的卡片分开。
   const EMPTY_NOTE =
@@ -59,6 +81,13 @@
     modeGroup: $("mode-group"),
     todayEcho: $("today-echo"),
     // ── 标签区 ──
+    tagSourceGroup: $("tag-source-group"),
+    tagSourceHint: $("tag-source-hint"),
+    siteNote: $("site-note"),
+    zoneGroup: $("zone-group"),
+    zoneHint: $("zone-hint"),
+    pickerWrap: $("tag-picker-wrap"),
+    tagNote: $("tag-note"),
     tagPicker: $("tag-picker"),
     actressOptions: $("actress-options"),
     tagPickerStatus: $("tag-picker-status"),
@@ -72,8 +101,13 @@
     tagGroups: $("tag-groups"),
     tagSelected: $("tag-selected"),
     tagEmpty: $("tag-empty"),
+    timeHint: $("time-hint"),
     yearSelect: $("year-select"),
     yearHint: $("year-hint"),
+    monthGroup: $("month-group"),
+    monthHint: $("month-hint"),
+    durationGroup: $("duration-group"),
+    durationHint: $("duration-hint"),
     tagUrl: $("tag-url"),
     tagUrlHint: $("tag-url-hint"),
     tagAdd: $("tag-add"),
@@ -104,7 +138,12 @@
     loading: true,
     error: null, // {status, message}
 
-    // ── 标签区（某位女优的标签）──
+    // ── 标签区 ──
+
+    // 标签从哪儿来：某位女优的 tags[]，还是整个片库的词表。
+    tagSource: "actress", // actress | site
+    // 全站模式的片库号。四个库是**四份不同的 id 空间**，换库时旧选择必须清掉。
+    zone: 0,
 
     // 选中的人。手输的 id 也在这里（known=false），因此不在收藏列表里的 id
     // 同样能出标签与链接 —— 标签筛选本身是匿名的。
@@ -116,10 +155,16 @@
     profileError: null, // {status, message}
     profileGen: 0, // 切人比请求先到的守卫（只认最后一次）
 
-    // 标签词表（/tags?type=0）。分组名、顺序、组内标签一律原样来自上游。
+    // 标签词表（/tags?type={片库}）。分组名、顺序、组内标签一律原样来自上游。
+    // vocabZone 记住这一份是哪個片库的 —— 换库时那份就是另一个 id 空间。
     vocab: null, // {groups:[...]}
+    vocabZone: null,
     vocabState: "loading", // loading | loaded | error
     vocabError: null,
+    vocabGen: 0, // 换库比请求先到的守卫（只认最后一次）
+    // 被 feeds.zones 白名单挡下的片库：/tags?type={zone} 会返回 404。
+    // 记住它，就不给一条订不到的链接（“点了就坏”比不给更坏）。
+    zoneRejected: new Set(),
     groupIndex: new Map(), // category_id -> 词表里的位置（排序用）
     byId: new Map(), // 标签 id -> 候选 [{categoryId, category, name}]
 
@@ -128,6 +173,8 @@
     tags: new Map(), // id -> {id, name, categoryId}
     tagSearch: "",
     year: null,
+    month: null, // 只有全站模式能用（掩码第 7 槽）
+    duration: null, // 只有全站模式能用，且必须与年份同给（掩码第 6 槽）
     // 标签组的展开状态。只记用户**显式点过**的那些，其余按「有已选」推定。
     groupOpen: new Map(),
 
@@ -200,11 +247,15 @@
     return Number.isFinite(n) ? n : Infinity;
   }
 
-  /** 她支持的字母，按**词表 main 组顺序**给（不是点击顺序，也不是她的顺序）。 */
+  /**
+   * 她支持的字母（女优模式）/ 词表基本组全部字母（全站模式），
+   * 按**词表 main 组顺序**给（不是点击顺序）。
+   */
   function orderedMainLetters() {
-    const hers = (state.profile?.main ?? []).map((m) => m.id);
     const mainGroup = vocabGroups().find((g) => g.category_id === "main");
     const vocabOrder = (mainGroup?.tags ?? []).map((t) => t.id);
+    if (state.tagSource === "site") return vocabOrder;
+    const hers = (state.profile?.main ?? []).map((m) => m.id);
     // 词表里没有的字母（上游万一给了新字母）也保留，接在她自己的顺序后面 ——
     // 宁可多列一个，也不能把「她支持」的一个字母藏起来。
     return [
@@ -213,9 +264,17 @@
     ];
   }
 
-  /** 选中的主属性字母，按词表顺序 —— 同样的选择永远得到逐字符相同的链接。 */
+  /**
+   * 选中的主属性字母，按词表顺序 —— 同样的选择永远得到逐字符相同的链接。
+   *
+   * 全站模式里 m（含磁鏈）**总是**在结果里：不发它时上游返回的作品全都没有
+   * 磁链，会得到一条看着坏了的空 feed。补齐位置与服务端 addMagnetsFlag 一致
+   * （没有 m 就补到最后：`c` → `c,m`），这样页面上显示的与服务实际发的是同一条。
+   */
   function sortedFlags() {
-    return orderedMainLetters().filter((id) => state.flags.has(id));
+    const letters = orderedMainLetters().filter((id) => state.flags.has(id));
+    if (state.tagSource === "site" && !letters.includes("m")) letters.push("m");
+    return letters;
   }
 
   /**
@@ -237,11 +296,12 @@
   /**
    * 标签区那条链接。它只发语义参数：
    *
-   *   main=<她支持的字母，逗号分隔>  year=<整年>  tags=<id，逗号分隔>
+   *   女优模式：main=<她支持的字母>  year=<整年>  tags=<id，逗号分隔>
+   *   全站模式：main=<字母，总是含 m>  tags=<id>  year / month / duration
    *   + 链接范围（追新 = since=今天；全量 = pages=20）
    *
-   * ⚠️ 选了年份就**不再发 since**：since 是本服务的本地下界、year 是上游整年，
-   * 同时发必然得到空 feed（服务那侧也会判 400）。年份本身就是范围。
+   * ⚠️ 选了年份（或全站模式选了月份）就**不再发 since**：since 是本服务的
+   * 本地下界，year/month 是上游精确筛选，同时发必然得到空 feed。
    */
   function tagQueryPairs(o) {
     const pairs = [];
@@ -253,7 +313,37 @@
     return pairs;
   }
 
+  /**
+   * 全站订阅的语义参数。形态与女优订阅**不同**：片库在 URL 路径里。
+   *
+   * 掩码是 `{片库}:t:{主属性}:{标签}:{年}:{时长}:{月}`，由服务从这些参数构造；
+   * 这里只发 main / tags / year / month / duration（+ 链接范围）。
+   */
+  function siteQueryPairs(o) {
+    const pairs = [];
+    if (o.mode === "all") pairs.push(["pages", "20"]);
+    else if (!o.year && !o.month) pairs.push(["since", todayISO()]);
+    if (o.flags.length) pairs.push(["main", o.flags.join(",")]);
+    if (o.tags.length) pairs.push(["tags", o.tags.join(",")]);
+    if (o.year) pairs.push(["year", o.year]);
+    if (o.month) pairs.push(["month", o.month]);
+    if (o.duration) pairs.push(["duration", o.duration]);
+    return pairs;
+  }
+
   function tagUrl() {
+    if (state.tagSource === "site") {
+      return `${base()}/rss/tags/${state.zone}.xml${queryString(
+        siteQueryPairs({
+          mode: state.tagMode,
+          year: state.year,
+          month: state.month,
+          duration: state.duration,
+          flags: sortedFlags(),
+          tags: sortedTags().map((t) => t.id),
+        }),
+      )}`;
+    }
     if (!state.picker) return "";
     const pairs = tagQueryPairs({
       mode: state.tagMode,
@@ -266,6 +356,9 @@
 
   /** 待复制里的每条 URL 都在渲染时现算。 */
   function linkUrl(link) {
+    if (link.kind === "site") {
+      return `${base()}/rss/tags/${link.zone}.xml${queryString(siteQueryPairs(link))}`;
+    }
     if (link.kind === "tags") {
       return `${base()}/rss/actress/${encodeURIComponent(link.id)}.xml${queryString(
         tagQueryPairs(link),
@@ -424,28 +517,66 @@
     }
   }
 
-  /** 读标签词表（匿名可读，不需要 token）。分组名/顺序/组内标签一律原样保留。 */
+  /** 当前模式需要哪个片库的词表：女优订阅固定 type=0，全站模式就是选的片库。 */
+  function neededVocabZone() {
+    return state.tagSource === "site" ? state.zone : ACTRESS_ZONE;
+  }
+
+  /**
+   * 读标签词表（匿名可读，不需要 token）。分组名/顺序/组内标签一律原样保留。
+   *
+   * 词表是**按片库**取的（/tags?type={片库}）：女优订阅用 type=0，全站模式用
+   * 用户选的片库 —— 四个库的组数与 id 空间都不同，写成一份快照会让
+   * 「换片库换词表」看上去生效、实际没变。
+   *
+   * 带世代号：换片库比请求先回来是常态，只认最后一次的结果。
+   */
   async function loadVocabulary() {
+    const zone = neededVocabZone();
+    const gen = ++state.vocabGen;
+    // 换片库时**先把旧的那份丢掉**：留着它，renderYear/renderMonth 会拿
+    // 另一个库的年份/月份去校验当前选择（把刚选的 2025 静默清掉），
+    // 页面会在一瞬里显示上一份词表的内容。
+    if (state.vocabZone !== zone) {
+      state.vocab = null;
+      state.vocabZone = null;
+      indexVocabulary();
+    }
     state.vocabState = "loading";
+    state.vocabError = null;
     renderTagArea();
     try {
-      const res = await fetch(`/tags?type=${ACTRESS_ZONE}`, {
+      const res = await fetch(`/tags?type=${zone}`, {
         headers: { accept: "application/json" },
       });
       const body = await res.json().catch(() => null);
+      if (gen !== state.vocabGen) return; // 已经有更新的一次请求了
       if (!res.ok) {
         state.vocabState = "error";
         state.vocabError = { status: res.status, message: serverMessage(body, res.status) };
+        // 404 = 这个片库没被放行（与 /rss/tags/{zone}.xml 同一套白名单语义）。
+        // 其它错误（502/网络）是**暂时**的，链接本身仍然有效，不能因此禁用。
+        if (res.status === 404) state.zoneRejected.add(zone);
+        else state.zoneRejected.delete(zone);
       } else {
         state.vocab = body;
+        state.vocabZone = zone;
         state.vocabState = "loaded";
+        state.zoneRejected.delete(zone);
         indexVocabulary();
       }
     } catch (e) {
+      if (gen !== state.vocabGen) return;
       state.vocabState = "error";
       state.vocabError = { status: 0, message: `读不到服务：${e.message}` };
     }
     renderTagArea();
+  }
+
+  /** 当前模式要的那份词表已经在手就不重复取；否则去取。 */
+  function syncVocabulary() {
+    if (state.vocabZone === neededVocabZone() && state.vocabState !== "error") return;
+    loadVocabulary();
   }
 
   /**
@@ -650,16 +781,34 @@
   function locateTag(id, name) {
     const cands = state.byId.get(String(id)) || [];
     const hit = cands.find((c) => c.name === name) || (cands.length === 1 ? cands[0] : null);
-    if (!hit || UNSUPPORTED_GROUPS.has(hit.categoryId)) return null;
+    if (!hit || SPECIAL_GROUPS.has(hit.categoryId)) return null;
     return hit;
   }
 
   /**
-   * 当前该显示哪些组、每组哪些标签 —— **只来自她自己的 tags[]**，
-   * 分组名与分组顺序来自词表。组按词表顺序、组内按 id 排，好让页面上的
-   * 阅读顺序与 URL 里的参数顺序逐字对应。
+   * 当前该显示哪些组、每组哪些标签。
+   *
+   *   女优模式：**只来自她自己的 tags[]**，分组名与分组顺序来自词表。
+   *   全站模式：直接就是词表里除 main/year/month/duration 之外的每一组 ——
+   *             因为它不挂实体，没有「她自己的标签」这回事。
+   *
+   * 两种都按词表组顺序、组内按 id 排，好让页面上的阅读顺序与 URL 里的
+   * 参数顺序逐字对应。
    */
   function currentTagGroups() {
+    if (state.tagSource === "site") {
+      return vocabGroups()
+        .filter((g) => !SPECIAL_GROUPS.has(g.category_id))
+        .map((g) => ({
+          categoryId: g.category_id,
+          category: g.category,
+          tags: (g.tags ?? [])
+            .map((t) => ({ id: t.id, name: t.name, count: Number(t.videos_count) || 0 }))
+            .sort((a, b) => tagIdKey(a.id) - tagIdKey(b.id) || String(a.id).localeCompare(b.id)),
+        }))
+        .filter((g) => g.tags.length);
+    }
+
     if (!state.profile) return [];
     const buckets = new Map();
     for (const t of state.profile.tags ?? []) {
@@ -746,14 +895,66 @@
       <button class="btn btn-md btn-outline mt-3" type="button" data-tag-retry>重新读取</button>`;
   }
 
+  /**
+   * 片库被白名单挡下时的说明。它与 502 不同：这不是「暂时读不到」，
+   * 而是这个订阅本来就不会被服务 —— 所以不给链接、也说清怎么改配置。
+   */
+  function tagRejectedNote() {
+    return `<p class="flex items-start gap-2 text-sm font-medium">
+        <span aria-hidden="true">⛔</span>这个片库没被放行
+      </p>
+      <p class="mt-2 text-xs leading-relaxed text-muted-foreground">
+        配置里的 feeds.zones 白名单没列这个片库，所以 /rss/tags/${esc(String(state.zone))}.xml 会返回 404。
+        页面因此不渲染它的标签、也不给你一条订不到的链接 —— 换一个片库，或者把它加进白名单。
+      </p>`;
+  }
+
   function renderTagArea() {
+    renderTagSource();
+    renderZones();
     renderPickerStatus();
     renderMainFlags();
     renderTagGroups();
     renderTagSelection();
-    renderYear();
+    renderTime();
+    renderTagModeHint();
     renderTagUrl();
     syncExpandButton();
+  }
+
+  /**
+   * 模式相关的壳与说明：全站模式多一个「片库 + 说明」块、少一个女优选择器。
+   * 说明必须跟着模式换 —— 把「全站标签走掩码槽位」写在女优模式里，
+   * 或者反过来，就是让下一个人照着错的前提去改。
+   */
+  function renderTagSource() {
+    const site = state.tagSource === "site";
+    el.siteNote.hidden = !site;
+    el.pickerWrap.hidden = site;
+    el.tagSourceHint.textContent = site
+      ? "全站标签：不挂任何实体，片库在 URL 路径里，标签/年/月/时长走掩码槽位。"
+      : "某位女优的标签：只列她自己的 tags[]，按上游词表分组。";
+    el.tagNote.innerHTML = site
+      ? `分组名、分组顺序、组内标签全部取自上游词表 <code class="font-mono">/tags?type=${state.zone}</code>（${esc(zoneName(state.zone))}）。全站模式不挂实体，<strong class="font-medium text-foreground">这些就是全部可筛标签</strong>；标签走的是掩码槽位、<strong class="font-medium text-foreground">不是 <code class="font-mono">filter_by_tags</code></strong>。上限 5 个是上游的硬限制，多个标签之间是<strong class="font-medium text-foreground">交集</strong>。`
+      : `分组名、分组顺序、组内标签都取自上游词表 <code class="font-mono">/tags?type=0</code>（女优订阅用的就是有码那个库），但<strong class="font-medium text-foreground">只保留她自己 <code class="font-mono">tags[]</code> 里有的那几个</strong>。最多 5 个不是我们的约定 —— 实测第 <strong class="font-medium text-foreground">6 个 id 会被上游静默丢弃</strong>（同一个 id 挪到前 5 位就生效），所以上限只能是 5。多个标签之间是<strong class="font-medium text-foreground">交集</strong>。`;
+  }
+
+  /** 片库四选一。写错片库不报错、只会给另一个库的作品，所以必须看得见、改得动。 */
+  function renderZones() {
+    // 被挡下的片库不可选；选中那一颗恰好被挡下时，把键盘入口让给第一个可用的
+    // （否则整组都没有 tabindex=0 的按钮，键盘用户进不来）。
+    const usable = SITE_ZONES.find((z) => !state.zoneRejected.has(z.id))?.id;
+    const roving = state.zoneRejected.has(state.zone) ? usable : state.zone;
+    el.zoneGroup.innerHTML = SITE_ZONES.map((z) => {
+      const rejected = state.zoneRejected.has(z.id);
+      return `<button type="button" class="chip" role="radio" data-zone="${z.id}"
+        aria-checked="${z.id === state.zone}" tabindex="${z.id === roving ? 0 : -1}"
+        ${rejected ? 'disabled aria-disabled="true" title="feeds.zones 白名单没放行这个片库：它的订阅会返回 404"' : ""}
+        >${esc(z.name)}</button>`;
+    }).join("");
+    el.zoneHint.textContent = state.zoneRejected.has(state.zone)
+      ? `这个片库（${zoneName(state.zone)}）没被 feeds.zones 白名单放行：/tags?type=${state.zone} 与 /rss/tags/${state.zone}.xml 都会 404，所以不给链接。换一个片库，或者改配置里的白名单。`
+      : "片库就是 filter_by 的第一段。四个库返回的是四个不同的集合，而且标签 id 空间按片库分 —— 写错片库不报错，只会给另一个库的作品。";
   }
 
   function renderPickerStatus() {
@@ -784,6 +985,10 @@
   }
 
   function renderMainFlags() {
+    if (state.tagSource === "site") {
+      renderSiteMainFlags();
+      return;
+    }
     if (state.profileState === "loading") {
       el.mainFlags.innerHTML = "";
       el.mainHint.textContent = "正在读取她支持的主属性…";
@@ -816,6 +1021,46 @@
       : `这 ${letters.length} 个是她自己的 filter_tags（上游给的）。`;
   }
 
+  /**
+   * 全站模式的基本组：就是词表基本组的全部字母（不挂实体，没有「她的 filter_tags」）。
+   * m（含磁鏈）**总是**按下去且不可取消 —— 不发它时上游返回的作品全都没有磁链。
+   */
+  function renderSiteMainFlags() {
+    if (state.vocabState === "loading" && !state.vocab) {
+      el.mainFlags.innerHTML = "";
+      el.mainHint.textContent = "正在读取片库的标签词表…";
+      return;
+    }
+    if (state.vocabState === "error") {
+      el.mainFlags.innerHTML = "";
+      el.mainHint.textContent = "读不到标签词表，基本组暂时不可选。";
+      return;
+    }
+    const letters = orderedMainLetters();
+    const byId = new Map(
+      (vocabGroups().find((g) => g.category_id === "main")?.tags ?? []).map((t) => [t.id, t.name]),
+    );
+    el.mainFlags.innerHTML = letters
+      .map((id) => {
+        const locked = id === "m";
+        return `
+      <button type="button" class="chip" data-flag="${esc(id)}"
+        aria-pressed="${locked || state.flags.has(id)}"
+        ${locked ? 'disabled aria-disabled="true"' : ""}
+        title="${
+          locked
+            ? "全站订阅总是带 m（含磁鏈）：不发它时上游返回的作品全都没有磁链"
+            : `主属性字母 ${esc(id)}`
+        }">
+        ${esc(byId.get(id) || id)} <span class="font-mono text-2xs opacity-70">${esc(id)}</span>
+      </button>`;
+      })
+      .join("");
+    el.mainHint.textContent = letters.length
+      ? `全站模式的基本组就是词表里全部 ${letters.length} 个主属性（不是某位女优的 filter_tags）。其中 m（含磁鏈）总是带上 —— 不发它时上游返回的作品全都没有磁链，会得到一条看着坏了的空 feed。`
+      : "词表里没有基本组，主属性只剩自动带上的 m。";
+  }
+
   function renderTagSelection() {
     const picked = sortedTags();
     el.tagCount.textContent = String(picked.length);
@@ -843,6 +1088,32 @@
 
   function renderTagGroups() {
     const q = state.tagSearch.trim().toLowerCase();
+
+    if (state.tagSource === "site") {
+      if (state.vocabState === "loading" && !state.vocab) {
+        el.tagGroups.innerHTML = "";
+        showTagNote("正在读取片库的标签词表…（一次匿名上游请求，不需要 token）", EMPTY_NOTE);
+        return;
+      }
+      if (state.vocabState === "error") {
+        el.tagGroups.innerHTML = "";
+        showTagNote(
+          state.zoneRejected.has(state.zone)
+            ? tagRejectedNote()
+            : tagErrorNote("读不到标签词表", state.vocabError),
+          EMPTY_NOTE,
+        );
+        return;
+      }
+      const siteGroups = currentTagGroups();
+      if (!siteGroups.length) {
+        el.tagGroups.innerHTML = "";
+        showTagNote("这个片库的词表里没有可筛的标签组。", EMPTY_NOTE);
+        return;
+      }
+      renderTagGroupList(siteGroups, q);
+      return;
+    }
 
     if (!state.picker) {
       el.tagGroups.innerHTML = "";
@@ -878,6 +1149,11 @@
       return;
     }
 
+    renderTagGroupList(groups, q);
+  }
+
+  /** 把已归好组、排好序的标签画成一排可折叠的组。搜索时只留命中的组并全展开。 */
+  function renderTagGroupList(groups, q) {
     const shown = groups
       .map((g) => ({
         ...g,
@@ -935,6 +1211,28 @@
       .join("");
   }
 
+  // ─────────────────── 时间与时长（年/月/时长） ───────────────────
+  //
+  // 年：两种模式都是真上游筛选（女优走掩码第 5 段、全站走第 5 槽），精确整年。
+  // 月：只有全站模式有对应的槽位（第 7 槽）；女优订阅遇到它判 400。
+  // 时长：同样只有全站模式有（第 6 槽），而且**必须与年份同给** ——
+  //       实测单独给会被上游静默忽略，那种「看着筛了其实没筛」正是本项目
+  //       最不能接受的一类失败（服务那侧会把这种写法定成 400）。
+
+  function renderTime() {
+    renderYear();
+    renderMonth();
+    renderDuration();
+    renderTimeHint();
+  }
+
+  function renderTimeHint() {
+    el.timeHint.textContent =
+      state.tagSource === "site"
+        ? "全站模式下年/月/时长各占掩码一个槽位（第 5/7/6 段），三个都能用：年份是整年、月份是整月，时长必须与年份一起给。"
+        : "女优模式下只有年份（掩码第 5 段，实测整年生效）—— App 的女优筛选面板里没有月和时长，掩码里也没有它们的位置（多写一段会让年份被静默丢弃），服务那侧遇到它们直接返回 400。所以这两样在女优模式下被禁用。";
+  }
+
   function renderYear() {
     const yearGroup = vocabGroups().find((g) => g.category_id === "year");
     const options = yearGroup?.tags ?? [];
@@ -954,7 +1252,7 @@
     el.yearSelect.disabled = options.length === 0;
     el.yearSelect.innerHTML =
       '<option value="">不限</option>' +
-      // ⚠️ 选项文字**不带「起」**：年份落在掩码第 5 段，实测是**整年**
+      // ⚠️ 选项文字**不带「起」**：年份落在掩码槽位，实测是**整年**
       // （`::2021` 返回的 19 部全在 2021 内）。带「起」是只有 since=（下界）
       // 时的说法，写错一个字就让人以为自己选了区间。
       options.map((t) => `<option value="${esc(t.id)}">${esc(t.name)} 年</option>`).join("");
@@ -966,34 +1264,127 @@
       el.yearHint.textContent = "上游词表里没有年份组 —— 年份是词表给的，不是这里编的。";
       return;
     }
+    const slot = state.tagSource === "site" ? "掩码第 5 槽" : "掩码第 5 段";
     el.yearHint.textContent = state.year
-      ? `${state.year} 年是整年（掩码第 5 段），不是「${state.year} 年起」—— 所以这时不发 since。`
+      ? `${state.year} 年是整年（${slot}），不是「${state.year} 年起」—— 所以这时不发 since。`
       : "不选就是「不限」，链接用上面的链接范围（追新 / 全量）。";
   }
 
+  function renderMonth() {
+    const site = state.tagSource === "site";
+    // 月份是周期量，按日历升序排才符合直觉（词表的倒序是为了「最近优先」）。
+    const options = (vocabGroups().find((g) => g.category_id === "month")?.tags ?? [])
+      .slice()
+      .sort((a, b) => Number(a.id) - Number(b.id));
+    // 女优模式根本没有月份：状态里留着就是「界面上没有、链接里有」。
+    if (!site) state.month = null;
+
+    if (state.vocabState === "loading" && !state.vocab) {
+      el.monthGroup.innerHTML = "";
+      el.monthHint.textContent = "正在读取月份…";
+      return;
+    }
+    if (state.vocabState === "error") {
+      el.monthGroup.innerHTML = "";
+      el.monthHint.textContent = "读不到标签词表，月份暂时不可选。";
+      return;
+    }
+    if (state.month && !options.some((t) => t.id === state.month)) state.month = null;
+    renderRadioChips(
+      el.monthGroup,
+      "month",
+      options.map((t) => ({ value: t.id, label: `${t.name} 月` })),
+      site ? state.month : null,
+      site ? "" : "女优订阅不支持月份 —— 服务那侧遇到它直接 400",
+    );
+    el.monthHint.textContent = site
+      ? "月份按日历升序。可以单独给（跨年，实测 `0:t:m::::3` 返回各年 3 月）；选中后 since 让位。"
+      : "女优订阅不支持月份：App 的女优筛选面板里没有它，掩码里也没有它的位置（多写一段会让年份被静默丢弃），服务那侧遇到它直接 400。";
+  }
+
+  function renderDuration() {
+    const site = state.tagSource === "site";
+    const options = vocabGroups().find((g) => g.category_id === "duration")?.tags ?? [];
+    // 女优模式没有它；全站模式没有年份它也不生效（上游会静默忽略）。
+    if (!site || !state.year) state.duration = null;
+
+    if (state.vocabState === "loading" && !state.vocab) {
+      el.durationGroup.innerHTML = "";
+      el.durationHint.textContent = "正在读取时长档位…";
+      return;
+    }
+    if (state.vocabState === "error") {
+      el.durationGroup.innerHTML = "";
+      el.durationHint.textContent = "读不到标签词表，时长暂时不可选。";
+      return;
+    }
+    // 词表里没有的档位（换了片库/上游改了）就不要留在选择里 —— 否则界面上
+    // 没有这颗 chip、链接里却有它的 id（与 renderYear/renderMonth 同一套规矩）。
+    if (state.duration && !options.some((t) => t.id === state.duration)) state.duration = null;
+    const disabledTitle = !site
+      ? "女优订阅不支持时长 —— 服务那侧遇到它直接 400"
+      : !state.year
+        ? "先选年份：实测单独给时长会被上游静默忽略（服务那侧会把这种写法定成 400）"
+        : "";
+    renderRadioChips(
+      el.durationGroup,
+      "duration",
+      options.map((t) => ({ value: t.id, label: DURATION_LABELS[t.id] ?? t.name })),
+      site ? state.duration : null,
+      disabledTitle,
+    );
+    el.durationHint.textContent = site
+      ? state.year
+        ? "时长必须与年份一起给 —— 现在年份已选，这一排可用。"
+        : "时长必须与年份一起给：实测单独给时长的结果与不筛逐条相同，所以先选年份。"
+      : "女优订阅不支持时长（App 的女优筛选面板里也没有它）：掩码里多写一段会让年份被静默丢弃，服务那侧遇到它直接 400。";
+  }
+
+  /** 一排单选 chip，带一个「不限」。disabledTitle 非空时整排禁用（含「不限」）。 */
+  function renderRadioChips(container, attr, options, current, disabledTitle) {
+    const one = (value, label) =>
+      `<button type="button" class="chip" role="radio" data-${attr}="${esc(value)}"
+        aria-checked="${(current ?? "") === value}"
+        tabindex="${(current ?? "") === value ? 0 : -1}"
+        ${
+          disabledTitle
+            ? `disabled aria-disabled="true" title="${esc(disabledTitle)}"`
+            : ""
+        }>${esc(label)}</button>`;
+    container.innerHTML = one("", "不限") + options.map((o) => one(o.value, o.label)).join("");
+  }
+
   function renderTagUrl() {
-    const canBuild = !!state.picker;
-    el.tagUrl.textContent = canBuild
-      ? tagUrl()
-      : "先从上面选一位女优（或直接手输她的 id）。";
+    const site = state.tagSource === "site";
+    const rejected = site && state.zoneRejected.has(state.zone);
+    const canBuild = site ? !rejected : !!state.picker;
+    el.tagUrl.textContent = rejected
+      ? `这个片库没被放行 —— /rss/tags/${state.zone}.xml 会 404。`
+      : canBuild
+        ? tagUrl()
+        : "先从上面选一位女优（或直接手输她的 id）。";
 
     const parts = [];
     if (canBuild) {
-      if (state.year) {
-        parts.push(`year=${state.year}（整年）`);
-      } else {
-        parts.push(
-          state.tagMode === "all"
-            ? "pages=20 取全部"
-            : `since=${todayISO()} 只取这之后发行的`,
-        );
+      // 提示要逐条对应 URL 里真发出去的参数：链接范围是一件事，筛选维度是
+      // 另一件 —— 「全量」不会吞掉年份/月份那几项。
+      if (state.tagMode === "all") parts.push("pages=20 取全部（较慢）");
+      else if (!state.year && !(site && state.month)) {
+        parts.push(`since=${todayISO()} 只取这之后发行的`);
+      }
+      if (state.year) parts.push(`year=${state.year}（整年）`);
+      if (site && state.month) parts.push(`month=${state.month}（整月）`);
+      if ((state.year || (site && state.month)) && state.tagMode !== "all") {
+        parts.push("选了这个就不再发 since（本地下界与上游精确值同时发必然空）");
       }
       const letters = sortedFlags();
       if (letters.length) parts.push(`主属性 main=${letters.join(",")}（交集）`);
+      if (site && state.duration) parts.push(`时长 ${state.duration}`);
+      if (site) parts.push("掩码由服务构造：片库在路径里");
       const picked = sortedTags();
       if (picked.length) {
         parts.push(`标签 ${picked.map((t) => t.name).join(" + ")}（交集）`);
-      } else if (!letters.length && !state.year) {
+      } else if (!site && !letters.length && !state.year) {
         parts.push("⚠️ 一个筛选都没选 —— 这条等于该女优的全部作品");
       }
     }
@@ -1003,15 +1394,25 @@
   }
 
   function renderTagModeHint() {
-    if (state.year) {
-      // 硬规则：两个过滤维度不能互相抵消。
-      el.tagModeHint.textContent = `已选 ${state.year} 年 —— 这里让位：since= 是本服务的本地下界、year= 是上游整年，同时发必然得到空 feed（服务那侧也会判 400）。`;
+    const site = state.tagSource === "site";
+    const picked = [state.year && `${state.year} 年`, site && state.month && `${state.month} 月`]
+      .filter(Boolean)
+      .join(" ");
+    if (picked && state.tagMode === "new") {
+      // 硬规则：两个过滤维度不能互相抵消。全量模式本来就不发 since，
+      // 所以「让位」那句话只对追新成立。
+      el.tagModeHint.textContent = `已选 ${picked} —— 这里让位：since= 是本服务的本地下界、year=/month= 是上游精确筛选，同时发必然得到空 feed（服务那侧也会判 400）。`;
       return;
     }
-    el.tagModeHint.textContent =
-      state.tagMode === "all"
-        ? "pages=20：把这位女优的作品尽量取完（较慢）。"
-        : `since=${todayISO()}：只取这天之后发行的。`;
+    if (state.tagMode === "all") {
+      el.tagModeHint.textContent = picked
+        ? `pages=20 取全部，另加 ${picked} 的筛选。`
+        : site
+          ? "pages=20：把这个片库的结果尽量取完（较慢）。"
+          : "pages=20：把这位女优的作品尽量取完（较慢）。";
+      return;
+    }
+    el.tagModeHint.textContent = `since=${todayISO()}：只取这天之后发行的。`;
   }
 
   function syncExpandButton() {
@@ -1147,6 +1548,98 @@
   radioGroup(el.tagModeGroup, "tagmode", (v) => {
     state.tagMode = v;
     renderTagModeHint();
+    renderTagUrl();
+  });
+
+  /**
+   * 切换标签来源。两种模式的控件状态**不共享**：
+   *
+   *   · 标签与主属性都按「从哪儿来」取候选集 —— 她的 tags[]/filter_tags ↔
+   *     整个片库的词表。换模式就换了一套候选，留着旧的会出现「界面上没有、
+   *     链接里有」那种最坏的不一致。
+   *   · 月份与时长只有全站形态有对应的掩码槽位，切回女优模式必须清掉。
+   *
+   * 年份是两种模式都有的真筛选，留着 —— renderYear 会用新词表校验它还在不在。
+   */
+  function switchTagSource(v) {
+    if (v === state.tagSource) return;
+    state.tagSource = v;
+    clearFilterSelection();
+    if (v === "actress") {
+      state.month = null;
+      state.duration = null;
+    }
+    syncVocabulary();
+    renderTagArea();
+  }
+
+  /** 清掉标签与主属性的选择（换人 / 换模式 / 换片库时用 —— 它们都属于某个候选集）。 */
+  function clearFilterSelection() {
+    state.flags.clear();
+    state.tags.clear();
+    state.tagSearch = "";
+    el.tagSearch.value = "";
+    state.groupOpen.clear();
+  }
+
+  radioGroup(el.tagSourceGroup, "source", switchTagSource);
+
+  /**
+   * 把一排 role=radio 的 chip 接上点击与方向键。选中值变了就重渲染，
+   * 因而要把焦点还回同值的那一颗 —— 否则键盘用户每选一下就掉回 <body>。
+   */
+  function bindChipRadio(container, attr, onPick) {
+    const activate = (btn) => {
+      const value = btn.dataset[attr] || null;
+      onPick(value);
+      const again = container.querySelector(`[data-${attr}="${CSS.escape(value ?? "")}"]`);
+      if (again) again.focus();
+    };
+    container.addEventListener("click", (e) => {
+      const btn = e.target.closest(`[data-${attr}]`);
+      if (!btn || btn.disabled) return;
+      activate(btn);
+    });
+    container.addEventListener("keydown", (e) => {
+      const step =
+        e.key === "ArrowRight" || e.key === "ArrowDown"
+          ? 1
+          : e.key === "ArrowLeft" || e.key === "ArrowUp"
+            ? -1
+            : 0;
+      if (!step) return;
+      const btns = [...container.querySelectorAll(`[data-${attr}]:not([disabled])`)];
+      const i = btns.indexOf(document.activeElement);
+      if (i < 0) return;
+      e.preventDefault();
+      activate(btns[(i + step + btns.length) % btns.length]);
+    });
+  }
+
+  /**
+   * 换片库 = 换一套 id 空间（四个库的标签 id 各算各的）。旧选择留在 URL 里
+   * 就是「看不见却生效」，所以一律清掉；词表也要跟着重新拉 ——
+   * 这正是「词表按片库取、不是写死快照」的用处。
+   */
+  bindChipRadio(el.zoneGroup, "zone", (v) => {
+    const zone = Number(v);
+    if (zone === state.zone) return;
+    state.zone = zone;
+    clearFilterSelection();
+    syncVocabulary();
+    renderTagArea();
+  });
+
+  bindChipRadio(el.monthGroup, "month", (v) => {
+    state.month = v;
+    renderTime();
+    renderTagModeHint();
+    renderTagUrl();
+  });
+
+  bindChipRadio(el.durationGroup, "duration", (v) => {
+    state.duration = v;
+    renderTime();
     renderTagUrl();
   });
 
@@ -1290,7 +1783,9 @@
 
   el.yearSelect.addEventListener("change", () => {
     state.year = el.yearSelect.value || null;
-    renderYear();
+    // 时长必须与年份同给：年份一没，它就不生效了 —— 留着就是「选着但链接里没有」。
+    if (!state.year) state.duration = null;
+    renderTime();
     renderTagModeHint();
     renderTagUrl();
   });
@@ -1302,6 +1797,31 @@
   });
 
   el.tagAdd.addEventListener("click", () => {
+    if (state.tagSource === "site") {
+      if (state.zoneRejected.has(state.zone)) return; // 不给一条会 404 的链接
+      const ids = sortedTags();
+      const flags = sortedFlags(); // 总是含 m
+      // 同一个片库只留一条：它是一份「当前怎么筛」的快照，重复点就是同一条链的
+      // 新版本；不同片库之间互不影响。
+      state.links = state.links.filter((l) => l.kind !== "site" || l.zone !== state.zone);
+      state.links.push({
+        key: `site:${state.zone}`,
+        kind: "site",
+        zone: state.zone,
+        mode: state.tagMode,
+        year: state.year,
+        month: state.month,
+        duration: state.duration,
+        flags,
+        tags: ids.map((t) => t.id),
+        label: `全站 · ${zoneName(state.zone)} · 标签筛选`,
+        sub: ids.length ? `${ids.length} 个标签` : "无标签",
+      });
+      renderTray();
+      setTrayOpen(true);
+      announce("已加入待复制");
+      return;
+    }
     if (!state.picker) return;
     const name = state.profile?.name || state.picker.name || state.picker.id;
     const ids = sortedTags();
@@ -1327,8 +1847,10 @@
   });
 
   el.tagCopy.addEventListener("click", () => {
-    if (!state.picker) return;
-    doCopy(el.tagCopy, tagUrl(), "这条标签链接");
+    const rejected = state.tagSource === "site" && state.zoneRejected.has(state.zone);
+    const canBuild = (state.tagSource === "site" && !rejected) || !!state.picker;
+    if (!canBuild) return;
+    doCopy(el.tagCopy, tagUrl(), state.tagSource === "site" ? "这条全站链接" : "这条标签链接");
   });
 
   // ── 待复制 ──

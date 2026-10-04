@@ -243,16 +243,74 @@
            不该把它连坐 —— 没配 token 时这里照旧可用。 -->
       <section id="panel-tags" aria-labelledby="tags-heading" class="mt-10">
         <h2 id="tags-heading" class="text-sm font-semibold tracking-tight">
-          某位女优的标签
+          标签筛选
         </h2>
         <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
-          选一位女优（或直接手输她的 id），把她<strong
-            class="font-medium text-foreground"
-            >自己的标签</strong
-          >按上游分组挑出来，落到一条订阅链接上。标签词表与女优标签都是匿名可读的。
+          两种模式：挑<strong class="font-medium text-foreground"
+            >某位女优自己的标签</strong
+          >，或者按<strong class="font-medium text-foreground">片库</strong
+          >挑全站标签。两种都只读上游词表与女优资料，匿名可读、不需要 token。
         </p>
 
         <div class="mt-4">
+          <span
+            id="tag-source-label"
+            class="text-xs font-medium text-muted-foreground"
+            >标签从哪儿来</span
+          >
+          <div
+            id="tag-source-group"
+            role="radiogroup"
+            aria-labelledby="tag-source-label"
+            class="segmented mt-1.5"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked="true"
+              data-source="actress"
+            >
+              某位女优的标签
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked="false"
+              data-source="site"
+            >
+              全站标签
+            </button>
+          </div>
+          <p id="tag-source-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+        </div>
+
+        <!-- 全站模式：片库写进 URL 路径，筛选走 filter_by 掩码的槽位。
+             写错片库不报错、只会给另一个库的作品 —— 所以片库必须看得见、改得动。 -->
+        <div id="site-note" class="note mt-4" role="note" hidden>
+          <p>
+            全站模式<strong class="font-medium text-foreground">不挂任何实体</strong
+            >：片库写进 URL 路径，标签/年份/月份/时长各占
+            <code class="font-mono">filter_by</code> 掩码的一个槽位 ——
+            <strong class="font-medium text-foreground"
+              >不是 <code class="font-mono">filter_by_tags</code></strong
+            >（后者只对女优实体生效，清单/搜索上会被静默忽略）。掩码由服务构造，
+            这一页只发语义参数。
+          </p>
+          <div class="mt-3">
+            <span id="zone-label" class="text-xs font-medium text-muted-foreground"
+              >片库</span
+            >
+            <div
+              id="zone-group"
+              role="radiogroup"
+              aria-labelledby="zone-label"
+              class="mt-1.5 flex flex-wrap gap-2"
+            ></div>
+            <p id="zone-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+          </div>
+        </div>
+
+        <div id="tag-picker-wrap" class="mt-4">
           <label
             for="tag-picker"
             class="text-xs font-medium text-muted-foreground"
@@ -351,19 +409,7 @@
             </button>
           </div>
 
-          <p class="note mt-2">
-            分组名、分组顺序、组内标签都取自上游词表
-            <code class="font-mono">/tags?type=0</code>（女优订阅用的就是有码那个库），
-            但<strong class="font-medium text-foreground"
-              >只保留她自己 <code class="font-mono">tags[]</code> 里有的那几个</strong
-            >。最多 5 个不是我们的约定 —— 实测第
-            <strong class="font-medium text-foreground"
-              >6 个 id 会被上游静默丢弃</strong
-            >（同一个 id 挪到前 5 位就生效），所以上限只能是 5。多个标签之间是<strong
-              class="font-medium text-foreground"
-              >交集</strong
-            >。
-          </p>
+          <p id="tag-note" class="note mt-2"></p>
 
           <div id="tag-selected" class="mt-3"></div>
           <div id="tag-groups" class="mt-4 space-y-2"></div>
@@ -374,19 +420,51 @@
         </div>
 
         <div class="mt-6 rounded-lg border border-border p-4">
-          <h3 class="text-xs font-medium text-foreground">年份</h3>
-          <div class="mt-3">
-            <label
-              for="year-select"
-              class="text-xs font-medium text-muted-foreground"
-              >发行年份</label
-            >
-            <!-- 年份是**精确的整年**（掩码第 5 段，实测 `::2021` 返回的 19 部全在
-                 2021 内），所以选项文字里没有、也不能有「起」—— 那是只有下界
-                 （`since=`）时的说法。26 个年份铺成一排 chip 会淹没这一屏，
-                 用原生 select：它有键盘跳转，手机上是系统滚轮。 -->
-            <select id="year-select" class="field mt-1.5 md:max-w-40"></select>
-            <p id="year-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+          <h3 class="text-xs font-medium text-foreground">时间与时长</h3>
+          <p
+            id="time-hint"
+            class="mt-2 text-xs leading-relaxed text-muted-foreground"
+          ></p>
+          <div class="mt-4 space-y-3">
+            <div>
+              <label
+                for="year-select"
+                class="text-xs font-medium text-muted-foreground"
+                >发行年份</label
+              >
+              <!-- 年份是**精确的整年**（掩码第 5 段/槽，实测 `::2021` 返回的 19 部
+                   全在 2021 内），所以选项文字里没有、也不能有「起」—— 那是只有
+                   下界（`since=`）时的说法。年份铺成一排 chip 会淹没这一屏，
+                   用原生 select：它有键盘跳转，手机上是系统滚轮。 -->
+              <select id="year-select" class="field mt-1.5 md:max-w-40"></select>
+              <p id="year-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+            </div>
+            <div>
+              <span id="month-label" class="text-xs font-medium text-muted-foreground"
+                >月份</span
+              >
+              <div
+                id="month-group"
+                role="radiogroup"
+                aria-labelledby="month-label"
+                class="mt-1.5 flex flex-wrap gap-2"
+              ></div>
+              <p id="month-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+            </div>
+            <div>
+              <span
+                id="duration-label"
+                class="text-xs font-medium text-muted-foreground"
+                >时长</span
+              >
+              <div
+                id="duration-group"
+                role="radiogroup"
+                aria-labelledby="duration-label"
+                class="mt-1.5 flex flex-wrap gap-2"
+              ></div>
+              <p id="duration-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+            </div>
           </div>
         </div>
 

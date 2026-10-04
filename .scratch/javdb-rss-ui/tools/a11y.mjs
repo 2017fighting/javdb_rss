@@ -154,6 +154,16 @@ for (const width of [375, 768, 1440]) {
     const motion = await page.evaluate(() => getComputedStyle(document.querySelector("#tray-copy-all")).transitionDuration);
     notes.push(`reduced-motion transitionDuration [${width}/${theme}] = ${motion}`);
 
+    // ── 7. 全站模式（票 05）：片库 chip、月份/时长 chip、掩码说明都只在
+    //       那个模式下可见 —— 只在女优模式下跑 axe 会漏掉它们。──
+    const trayOpen = await page.$eval("#tray-panel", (e) => !e.hidden);
+    if (trayOpen) await page.click("#tray-toggle");
+    await page.click('[data-source="site"]');
+    await page.waitForFunction(
+      () => document.querySelectorAll('#tag-groups details[data-group="subject"]').length > 0,
+    );
+    await axeRun("site");
+
     await ctx.close();
   }
 }

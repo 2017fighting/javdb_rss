@@ -11,6 +11,8 @@
  * 本票（03）覆盖：页面骨架 + 收藏女优区 + 待复制 + 复制回退 + 服务地址。
  * 票 04 补上：某位女优的标签区（词表 / 她自己的标签 / 撞号消歧 / 上限 5 /
  * 折叠与搜索 / 整年 / 逐字符 URL / 加载态与失败态 / 手输 id）。
+ * 票 05 补上：全站标签模式（片库四选一 / 词表按片库取 / m 总在 main 里 /
+ * 月份与时长只在此模式可用 / 模式切换清状态 / 逐字符地不含 filter_by）。
  * 清单与想看（06）、状态可见性（07）的断言在各自的票里补。
  */
 import { chromium } from "playwright";
@@ -553,6 +555,324 @@ check(
   true,
 );
 await notokenTag.ctx.close();
+
+// ══════════════════════════════════════════════════════════════════════
+// 需求 3b：全站标签（票 05）
+//
+// 全站模式不挂实体：片库在 URL 路径里，标签/年/月/时长走 filter_by 掩码的
+// 槽位（掩码由服务构造）。这一区只发语义参数。最要紧的两条断言是
+// 「m 总在 main 里」与「换片库换词表」—— 两者错了都不报错，只静默给错东西。
+// ══════════════════════════════════════════════════════════════════════
+const site = await newPage();
+// 页面到底按哪个片库取了词表 —— 「词表按片库取，不是写死快照」只能这样验。
+const vocabCalls = [];
+await site.page.route(/\/tags\?type=/, (route) => {
+  vocabCalls.push(new URL(route.request().url()).searchParams.get("type"));
+  route.continue();
+});
+await site.page.goto(origin, { waitUntil: "load" });
+await site.page.waitForSelector("#actress-list [data-actress]");
+await site.page.waitForFunction(() => document.querySelectorAll("#tag-groups details").length > 0);
+
+// ── 女优模式：月份与时长在界面上，但被禁用并说明原因（不是藏起来）──
+check(
+  "女优模式下月份控件可见但禁用",
+  await site.page.$$eval(
+    "#month-group [data-month]",
+    (ns) => ns.length > 0 && ns.every((n) => n.disabled),
+  ),
+  true,
+);
+check(
+  "女优模式下时长控件可见但禁用",
+  await site.page.$$eval(
+    "#duration-group [data-duration]",
+    (ns) => ns.length > 0 && ns.every((n) => n.disabled),
+  ),
+  true,
+);
+check(
+  "女优模式的月份说明点出服务会判 400",
+  (await site.page.textContent("#month-hint")).includes("400"),
+  true,
+);
+check(
+  "女优模式的月份 chip 带说明 title",
+  (await site.page.$eval('#month-group [data-month="3"]', (e) => e.title)).includes(
+    "女优订阅不支持月份",
+  ),
+  true,
+);
+check("女优模式不显示片库选择", await site.page.$eval("#site-note", (e) => e.hidden), true);
+check(
+  "女优模式的说明讲的是她自己 tags[]",
+  (await site.page.textContent("#tag-note")).includes("她自己"),
+  true,
+);
+
+// ── 切到全站模式 ──
+await site.page.click('[data-source="site"]');
+check("全站模式显示片库选择", await site.page.$eval("#site-note", (e) => !e.hidden), true);
+check("全站模式隐藏女优输入框", await site.page.$eval("#tag-picker-wrap", (e) => e.hidden), true);
+check(
+  "全站模式给出四个片库",
+  await site.page.$$eval("#zone-group [data-zone]", (ns) =>
+    ns.map((n) => n.dataset.zone).join(","),
+  ),
+  "0,1,2,3",
+);
+check(
+  "全站模式的说明点出「走掩码槽位、不是 filter_by_tags」",
+  (await site.page.textContent("#tag-note")).includes("掩码槽位") &&
+    (await site.page.textContent("#tag-note")).includes("filter_by_tags"),
+  true,
+);
+
+// ── 默认链接：追新 + m（m 总是并进 main，不是「没有别的才用 m」）──
+check(
+  "全站模式默认把 m 并进 main",
+  await site.page.textContent("#tag-url"),
+  `${origin}/rss/tags/0.xml?since=${today}&main=m`,
+);
+check(
+  "全站模式的 URL 里没有掩码",
+  (await site.page.textContent("#tag-url")).includes("filter_by"),
+  false,
+);
+check(
+  "全站模式下月份可用",
+  await site.page.$$eval(
+    '#month-group [data-month]:not([data-month=""]):not([disabled])',
+    (ns) => ns.length,
+  ),
+  3,
+);
+check(
+  "全站模式下没选年份时时长仍禁用",
+  await site.page.$$eval(
+    '#duration-group [data-duration]:not([data-duration=""]):not([disabled])',
+    (ns) => ns.length,
+  ),
+  0,
+);
+
+// ── 主属性：c → c,m（并进去，不是覆盖）──
+await site.page.click('#main-flags [data-flag="c"]');
+check(
+  "全站模式主属性 c → c,m",
+  await site.page.textContent("#tag-url"),
+  `${origin}/rss/tags/0.xml?since=${today}&main=c,m`,
+);
+check(
+  "m 那颗 chip 总是按下且不可取消",
+  await site.page.$eval(
+    '#main-flags [data-flag="m"]',
+    (e) => e.getAttribute("aria-pressed") === "true" && e.disabled,
+  ),
+  true,
+);
+
+// ── 标签来自**片库词表**（不是某位女优的 tags[]）──
+check(
+  "全站模式的标签组就是词表里除 main/年/月/时长之外的全部",
+  await site.page.$$eval("#tag-groups details", (ds) =>
+    ds.map((d) => d.dataset.group).join(","),
+  ),
+  "subject,role,cloth,body,behavior,play_method,category",
+);
+await site.page.click("#tag-expand");
+await site.page.click('#tag-groups [data-tag="3"]'); // 服裝
+await site.page.click('#tag-groups [data-tag="68"]'); // 主題
+check(
+  "全站模式标签按词表顺序（组顺序 + id）拼进 URL",
+  await site.page.textContent("#tag-url"),
+  `${origin}/rss/tags/0.xml?since=${today}&main=c,m&tags=68,3`,
+);
+
+// ── 换片库：路径换、词表跟着换、旧选择清掉 ──
+await site.page.click('#zone-group [data-zone="2"]');
+await site.page.waitForFunction(
+  () => document.querySelectorAll('#tag-groups details[data-group="place"]').length > 0,
+);
+check(
+  "换片库后路径换到 2",
+  (await site.page.textContent("#tag-url")).startsWith(`${origin}/rss/tags/2.xml?`),
+  true,
+);
+check("换片库后按 type=2 取了另一份词表", vocabCalls.includes("2"), true);
+check(
+  "换片库后出现 type=0 词表里没有的组（地點）",
+  await site.page.$eval('#tag-groups details[data-group="place"]', (e) => !!e),
+  true,
+);
+check(
+  "换片库时旧标签被清掉（不留看不见却生效的 id）",
+  (await site.page.textContent("#tag-url")).includes("tags="),
+  false,
+);
+check(
+  "换片库后标签区说明写的是新片库",
+  (await site.page.textContent("#tag-note")).includes("type=2"),
+  true,
+);
+
+// ── 换回 0（等一个**只属于 zone 0 词表**的 tag，免得拿上一份词表做断言）──
+await site.page.click('#zone-group [data-zone="0"]');
+await site.page.waitForFunction(
+  () => document.querySelectorAll('#tag-groups [data-tag="312"]').length > 0,
+);
+const siteYearText = await site.page.$$eval("#year-select option", (os) =>
+  os.map((o) => o.textContent).join("|"),
+);
+check("全站模式的年份选项不带「起」", siteYearText.includes("起"), false);
+check("全站模式的年份选项是整年文字", siteYearText.includes("2025 年"), true);
+await site.page.selectOption("#year-select", "2025");
+check(
+  "全站模式选了年份后 year 进 URL、since 让位",
+  await site.page.textContent("#tag-url"),
+  `${origin}/rss/tags/0.xml?main=m&year=2025`,
+);
+check(
+  "全站模式下选了年份后时长恢复可用",
+  await site.page.$$eval(
+    '#duration-group [data-duration]:not([data-duration=""]):not([disabled])',
+    (ns) => ns.length,
+  ),
+  4,
+);
+await site.page.click('#duration-group [data-duration="gt-120"]');
+check(
+  "全站模式选了时长后 duration 进 URL",
+  await site.page.textContent("#tag-url"),
+  `${origin}/rss/tags/0.xml?main=m&year=2025&duration=gt-120`,
+);
+await site.page.click('#month-group [data-month="3"]');
+check(
+  "全站模式月份进 URL（在时长之前）",
+  await site.page.textContent("#tag-url"),
+  `${origin}/rss/tags/0.xml?main=m&year=2025&month=3&duration=gt-120`,
+);
+await site.page.click("#tag-expand");
+await site.page.click('#tag-groups [data-tag="68"]');
+check(
+  "全站模式标签与年/月/时长同时进 URL（逐字符）",
+  await site.page.textContent("#tag-url"),
+  `${origin}/rss/tags/0.xml?main=m&tags=68&year=2025&month=3&duration=gt-120`,
+);
+check(
+  "全站模式的链接里仍然没有 filter_by",
+  (await site.page.textContent("#tag-url")).includes("filter_by"),
+  false,
+);
+
+// 全量（pages=20）不能吞掉年份/月份那几项：链接与提示都得同时说它们。
+await site.page.click('[data-tagmode="all"]');
+check(
+  "全站模式全量 + 年/月/时长仍然逐字符正确",
+  await site.page.textContent("#tag-url"),
+  `${origin}/rss/tags/0.xml?pages=20&main=m&tags=68&year=2025&month=3&duration=gt-120`,
+);
+const allHint = await site.page.textContent("#tag-url-hint");
+check("全量模式的提示仍然提到年份", allHint.includes("year=2025"), true);
+check("全量模式的提示仍然提到月份", allHint.includes("month=3"), true);
+check(
+  "全量模式不再讲「since 让位」（它本来就不发 since）",
+  (await site.page.textContent("#tag-mode-hint")).includes("让位"),
+  false,
+);
+await site.page.click('[data-tagmode="new"]');
+
+// ── 全站链接也能进待复制并复制（待复制仍然是唯一的输出台）──
+await site.page.click("#tag-add");
+check("全站链接加入待复制", await site.page.textContent("#tray-count"), "1");
+const siteTrayUrl = await site.page.$eval("#tray-list li code", (e) => e.textContent);
+check(
+  "待复制里那条就是全站链接",
+  siteTrayUrl,
+  `${origin}/rss/tags/0.xml?main=m&tags=68&year=2025&month=3&duration=gt-120`,
+);
+await site.page.click("#tray-list [data-copy-row]");
+await site.page.waitForTimeout(120);
+check(
+  "待复制里的全站链接能复制",
+  await site.page.evaluate(() => navigator.clipboard.readText()),
+  siteTrayUrl,
+);
+
+// ── 切回女优模式：另一模式专属的状态被清掉，不留在 URL 里 ──
+await site.page.click('[data-source="actress"]');
+await site.page.waitForFunction(() => document.querySelectorAll("#tag-groups details").length > 0);
+const backToActress = await site.page.textContent("#tag-url");
+check(
+  "切回女优模式后链接里既没有 month 也没有 duration",
+  backToActress.includes("month=") || backToActress.includes("duration=") || backToActress.includes("tags="),
+  false,
+);
+check(
+  "切回女优模式后月份控件又禁用",
+  await site.page.$$eval("#month-group [data-month]", (ns) => ns.every((n) => n.disabled)),
+  true,
+);
+check("切回女优模式后年份还在（两种模式都有的真筛选）", await site.page.inputValue("#year-select"), "2025");
+check(
+  "切回女优模式后说明也换回「她自己 tags[]」",
+  (await site.page.textContent("#tag-note")).includes("她自己"),
+  true,
+);
+await site.ctx.close();
+
+// ── 片库被 feeds.zones 白名单挡下时：不给一条会 404 的链接 ──
+// /tags?type={zone} 的 404 就是那个信号（与 /rss/tags/{zone}.xml 同一套语义）。
+const blocked = await newPage();
+await blocked.page.route(/\/tags\?type=3/, (route) =>
+  route.fulfill({
+    status: 404,
+    contentType: "application/json; charset=utf-8",
+    body: JSON.stringify({ error: "未知的订阅" }),
+  }),
+);
+await blocked.page.goto(origin, { waitUntil: "load" });
+await blocked.page.waitForSelector("#actress-list [data-actress]");
+await blocked.page.waitForFunction(() => document.querySelectorAll("#tag-groups details").length > 0);
+await blocked.page.click('[data-source="site"]');
+await blocked.page.click('#zone-group [data-zone="3"]');
+await blocked.page.waitForFunction(() =>
+  document.getElementById("tag-empty").textContent.includes("没被放行"),
+);
+check(
+  "未放行的片库 chip 被禁用",
+  await blocked.page.$eval('#zone-group [data-zone="3"]', (e) => e.disabled),
+  true,
+);
+check(
+  "未放行的片库不再渲染标签",
+  await blocked.page.$$eval("#tag-groups details", (ns) => ns.length),
+  0,
+);
+check(
+  "未放行的片库说清是白名单/404 而不是「暂时读不到」",
+  (await blocked.page.textContent("#tag-empty")).includes("404"),
+  true,
+);
+check(
+  "未放行的片库不给链接",
+  (await blocked.page.textContent("#tag-url")).includes("404"),
+  true,
+);
+check(
+  "未放行的片库禁用「加入待复制」",
+  await blocked.page.$eval("#tag-add", (e) => e.disabled),
+  true,
+);
+// 换回一个放行的片库，链接又回来了。
+await blocked.page.click('#zone-group [data-zone="0"]');
+await blocked.page.waitForFunction(() => document.querySelectorAll("#tag-groups details").length > 0);
+check(
+  "换回放行的片库后链接恢复",
+  (await blocked.page.textContent("#tag-url")).startsWith(`${origin}/rss/tags/0.xml?`),
+  true,
+);
+await blocked.ctx.close();
 
 await browser.close();
 
