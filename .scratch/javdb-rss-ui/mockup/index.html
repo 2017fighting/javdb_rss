@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>JavDB 订阅链接 · 生成器</title>
+    <meta
+      name="description"
+      content="把 JavDB App 里的订阅渲染成 qBittorrent 能用的 RSS 链接。"
+    />
+    <script>
+      // 主题在首帧之前定下来，避免闪一下白。
+      (function () {
+        try {
+          var stored = localStorage.getItem("javdb-rss-theme");
+          var dark = stored
+            ? stored === "dark"
+            : window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {}
+      })();
+    </script>
+    <link rel="stylesheet" href="./assets/app.css" />
+  </head>
+
+  <body class="min-h-dvh text-sm">
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <!-- ───────────────────────── 顶栏 ───────────────────────── -->
+    <header
+      class="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur"
+    >
+      <div class="mx-auto w-full max-w-6xl px-4 md:px-6">
+        <div class="flex h-14 items-center gap-3">
+          <span
+            class="hidden shrink-0 rounded-sm border border-border px-1.5 py-0.5 font-mono text-2xs tracking-widest text-muted-foreground sm:inline"
+            aria-hidden="true"
+            >RSS</span
+          >
+          <h1 class="truncate text-sm font-semibold tracking-tight">
+            JavDB 订阅链接
+          </h1>
+
+          <span
+            id="upstream-chip"
+            class="hidden shrink-0 items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground md:inline-flex"
+          >
+            <span
+              class="size-1.5 rounded-full bg-foreground"
+              aria-hidden="true"
+            ></span>
+            <span id="upstream-text">上游正常</span>
+          </span>
+
+          <div class="ms-auto flex items-center gap-2">
+            <div class="flex items-center gap-2">
+              <label
+                for="base-url"
+                class="sr-only lg:not-sr-only lg:text-xs lg:text-muted-foreground"
+                >服务地址</label
+              >
+              <input
+                id="base-url"
+                class="field h-9 w-52 font-mono text-xs lg:w-60"
+                type="url"
+                inputmode="url"
+                spellcheck="false"
+                autocomplete="off"
+                aria-describedby="base-url-hint"
+                value="http://127.0.0.1:8080"
+              />
+            </div>
+            <button
+              id="theme-toggle"
+              class="btn btn-md btn-outline"
+              type="button"
+              aria-pressed="false"
+            >
+              <span id="theme-icon" aria-hidden="true">◐</span>
+              <span class="sr-only">切换深色模式</span>
+            </button>
+          </div>
+        </div>
+
+        <p id="base-url-hint" class="sr-only">
+          生成的 RSS 链接用哪个地址作为前缀。默认是 127.0.0.1，如果你在别的机器上跑
+          qBittorrent，改成这台机器在局域网里的地址。
+        </p>
+
+        <!-- 分区导航。四个分区 = 四件不同的事，一次只显示一件。 -->
+        <nav aria-label="分区" class="-mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
+          <!-- APG 的 tabs 模式：tablist 的直接子元素必须就是 tab，
+               所以这里不能拿 ul/li 当壳（li 会变成孤立的 listitem）。 -->
+          <div
+            id="tabs"
+            role="tablist"
+            aria-label="订阅类型"
+            class="flex min-w-max gap-1 pb-px"
+          >
+            <button
+              id="tab-actress"
+              role="tab"
+              type="button"
+              aria-selected="true"
+              aria-controls="panel-actress"
+              tabindex="0"
+              class="tab"
+            >
+              收藏女优<span class="tab-count" id="tab-actress-count"></span>
+            </button>
+            <button
+              id="tab-tags"
+              role="tab"
+              type="button"
+              aria-selected="false"
+              aria-controls="panel-tags"
+              tabindex="-1"
+              class="tab"
+            >
+              标签筛选
+            </button>
+            <button
+              id="tab-lists"
+              role="tab"
+              type="button"
+              aria-selected="false"
+              aria-controls="panel-lists"
+              tabindex="-1"
+              class="tab"
+            >
+              清单<span class="tab-count" id="tab-lists-count"></span>
+            </button>
+            <button
+              id="tab-want"
+              role="tab"
+              type="button"
+              aria-selected="false"
+              aria-controls="panel-want"
+              tabindex="-1"
+              class="tab"
+            >
+              想看
+            </button>
+          </div>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main" class="mx-auto w-full max-w-6xl px-4 pt-4 pb-40 md:px-6">
+      <p class="note mb-4 flex items-start gap-2">
+        <span aria-hidden="true">◈</span>
+        <span>
+          这是<strong class="font-medium text-foreground">设计稿</strong>：数据是示例数据，复制出来的链接是真实格式，但服务未必在你手上。
+          演示不同状态：
+          <a class="underline underline-offset-2" href="#state=ok">正常</a> ·
+          <a class="underline underline-offset-2" href="#state=empty">没有收藏</a> ·
+          <a class="underline underline-offset-2" href="#state=notoken">没配 token</a> ·
+          <a class="underline underline-offset-2" href="#state=error">上游出错</a>
+        </span>
+      </p>
+
+      <!-- ══════════════════ 1. 收藏女优 ══════════════════ -->
+      <section
+        id="panel-actress"
+        role="tabpanel"
+        aria-labelledby="tab-actress"
+      >
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div class="min-w-0 flex-1 sm:max-w-xs">
+            <label for="actress-search" class="text-xs font-medium text-muted-foreground"
+              >按名字或 id 搜索</label
+            >
+            <input
+              id="actress-search"
+              class="field mt-1.5"
+              type="search"
+              placeholder="花守夏歩 / D2EdJ"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+
+          <div class="flex flex-wrap items-end gap-4">
+            <div>
+              <span id="gender-label" class="text-xs font-medium text-muted-foreground"
+                >收藏里也有男优</span
+              >
+              <div
+                id="gender-group"
+                role="radiogroup"
+                aria-labelledby="gender-label"
+                class="segmented mt-1.5"
+              >
+                <button type="button" role="radio" aria-checked="true" data-gender="female">
+                  只看女优
+                </button>
+                <button type="button" role="radio" aria-checked="false" data-gender="all">
+                  全部演员
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <span id="mode-label" class="text-xs font-medium text-muted-foreground"
+                >链接模式</span
+              >
+              <div
+                id="mode-group"
+                role="radiogroup"
+                aria-labelledby="mode-label"
+                class="segmented mt-1.5"
+              >
+                <button type="button" role="radio" aria-checked="true" data-mode="new">
+                  追新
+                </button>
+                <button type="button" role="radio" aria-checked="false" data-mode="all">
+                  全量
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="note mt-3">
+          <p>
+            <strong class="font-medium text-foreground">追新</strong> = 只取发行日期在
+            <span id="today-echo" class="font-mono"></span> 之后的（<code class="font-mono">since=</code>）；
+            <strong class="font-medium text-foreground">全量</strong> =
+            整个片单（<code class="font-mono">pages=20</code>）。
+          </p>
+          <details class="mt-1.5">
+            <summary
+              class="cursor-pointer text-foreground/80 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              全量为什么慢？
+            </summary>
+            <p class="mt-1.5">
+              全量要把这位女优的全部作品拉完再逐条取磁链（一位约 5 页、200 多次上游请求）。
+              一次挑很多人又都选全量，一轮轮询可能要好几分钟 —— 只有补旧作时才用。
+            </p>
+          </details>
+        </div>
+
+        <div class="mt-4 flex flex-wrap items-center gap-2">
+          <button id="actress-select-all" class="btn btn-md btn-outline" type="button">
+            全选搜索结果
+          </button>
+          <button id="actress-clear" class="btn btn-md btn-ghost" type="button">
+            清空选择
+          </button>
+          <p
+            class="ms-auto text-xs text-muted-foreground tnum"
+            id="actress-status"
+            role="status"
+          ></p>
+        </div>
+
+        <div class="mt-2 overflow-hidden rounded-lg border border-border bg-card">
+          <div
+            class="hidden items-center gap-3 border-b border-border bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground md:flex"
+            aria-hidden="true"
+          >
+            <span class="w-4"></span>
+            <span class="flex-1">女优</span>
+            <span class="w-16 text-right md:w-20">作品数</span>
+            <span class="w-24 text-right">链接模式</span>
+          </div>
+          <ul id="actress-list" class="divide-y divide-border"></ul>
+        </div>
+
+        <p
+          id="actress-empty"
+          class="hidden rounded-lg border border-dashed border-border px-4 py-10 text-center"
+        ></p>
+      </section>
+
+      <!-- ══════════════════ 2. 标签筛选 ══════════════════ -->
+      <section
+        id="panel-tags"
+        role="tabpanel"
+        aria-labelledby="tab-tags"
+        hidden
+      >
+        <div>
+          <span id="source-label" class="text-xs font-medium text-muted-foreground"
+            >标签从哪儿来</span
+          >
+          <div
+            id="tag-source-group"
+            role="radiogroup"
+            aria-labelledby="source-label"
+            class="segmented mt-1.5"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked="true"
+              data-source="actress"
+            >
+              某位女优的标签
+            </button>
+            <button type="button" role="radio" aria-checked="false" data-source="site">
+              全站标签
+            </button>
+          </div>
+        </div>
+
+        <!-- 全站标签：后端还没有。宁可看见缺失，也不要一条会 404 的链接。 -->
+        <div
+          id="site-warning"
+          class="mt-4 hidden rounded-lg border border-destructive/40 bg-destructive/5 p-4"
+          role="note"
+        >
+          <p class="flex items-start gap-2 font-medium text-foreground">
+            <span aria-hidden="true">⛔</span>
+            全站标签还生成不出链接 —— 后端没有这条路由
+          </p>
+          <ul class="mt-2 ms-6 list-disc space-y-1 text-xs text-muted-foreground">
+            <li>
+              标签本身是通的：上游 <code class="font-mono">/api/v2/tags?type={zone}</code>
+              给出全站词汇表，<code class="font-mono">filter_by_tags</code> 也确认生效
+              （多个 id 是<strong class="font-medium text-foreground">交集</strong>）。
+            </li>
+            <li>
+              缺的只是一条服务路由（形状建议
+              <code class="font-mono">/rss/tags/{zone}/{ids}.xml</code>）—— zone 必须在 URL
+              里，因为词汇表按 zone 分（type=0 有 11 组、type=3 只有 5 组）。
+            </li>
+            <li>下面是它该有的样子（全站 355 个标签，真实数据），按钮先禁用。</li>
+          </ul>
+        </div>
+
+        <div id="actress-picker-wrap" class="mt-4">
+          <label for="actress-picker" class="text-xs font-medium text-muted-foreground"
+            >女优</label
+          >
+          <input
+            id="actress-picker"
+            class="field mt-1.5 md:max-w-xs"
+            list="actress-options"
+            placeholder="输入名字或 id，从下拉里选"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <datalist id="actress-options"></datalist>
+          <p id="picker-status" class="mt-1.5 text-xs text-muted-foreground" role="status"></p>
+        </div>
+
+        <fieldset class="mt-5">
+          <legend class="text-xs font-medium text-muted-foreground">
+            基本 <span class="font-mono">main</span> —— 这组走
+            <code class="font-mono">filter_by</code>，不走
+            <code class="font-mono">filter_by_tags</code>
+          </legend>
+          <div id="main-flags" class="mt-2 flex flex-wrap gap-2"></div>
+        </fieldset>
+
+        <fieldset class="mt-5">
+          <legend class="text-xs font-medium text-muted-foreground">
+            链接范围
+          </legend>
+          <div id="tag-mode-group" role="radiogroup" aria-label="链接范围" class="segmented mt-2">
+            <button type="button" role="radio" aria-checked="true" data-tagmode="new">
+              追新
+            </button>
+            <button type="button" role="radio" aria-checked="false" data-tagmode="all">
+              全量
+            </button>
+          </div>
+        </fieldset>
+
+        <!-- 标签：分组来自上游 /api/v2/tags，顺序与名称原样用。折叠形式与 App 一致。 -->
+        <div class="mt-6">
+          <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h3 class="text-xs font-medium text-muted-foreground">标签</h3>
+            <p class="text-xs text-muted-foreground">
+              最多选 <span class="tnum">5</span> 个 · 已选
+              <span id="tag-count" class="tnum font-medium text-foreground">0</span>/5
+            </p>
+            <input
+              id="tag-search"
+              class="field ms-auto h-9 md:max-w-48"
+              type="search"
+              placeholder="筛选标签…"
+              autocomplete="off"
+            />
+            <button id="tag-expand" class="btn btn-sm btn-ghost shrink-0" type="button">
+              全部展开
+            </button>
+          </div>
+
+          <p class="note mt-2">
+            分组名、顺序、组内标签全部取自上游
+            <code class="font-mono">/api/v2/tags?type=0</code>。最多 5 个不是我们的约定 ——
+            实测第 <strong class="font-medium text-foreground">6 个 id 会被上游静默丢弃</strong>
+            （同一个 id 挪到前 5 位就生效，同一批请求的结果从 1 条变成 0 条），
+            所以上限只能是 5。多个标签之间是<strong class="font-medium text-foreground">交集</strong>。
+          </p>
+
+          <div id="tag-selected" class="mt-3"></div>
+          <div id="tag-groups" class="mt-4 space-y-2"></div>
+          <p
+            id="tag-empty"
+            class="mt-3 hidden rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground"
+          ></p>
+        </div>
+
+        <!-- 上游给了词表、但没有过滤通道的三组 —— 改为本服务本地过滤。 -->
+        <div id="tag-time" class="mt-6 rounded-lg border border-border p-4">
+          <h3 class="text-xs font-medium text-foreground">时间与时长</h3>
+          <p class="mt-2 text-xs leading-relaxed text-muted-foreground">
+            上游把这三组和标签放在同一个响应里，但它们的 id
+            <strong class="font-medium text-foreground">不是标签 id</strong>：月份 1–12
+            与真标签 id 完全撞号（<span class="font-mono">3</span> = 服裝:眼鏡），時長 的 id
+            形如 <span class="font-mono">lt-45</span>；试过的 30 个参数名在 4 个端点上又全部被
+            静默忽略。所以这三组不走上游，由本服务按
+            <code class="font-mono">release_date</code> / <code class="font-mono">duration</code>
+            在本地筛 —— 这两个字段在列表响应里 100% 出现。
+          </p>
+
+          <div class="mt-4 space-y-3">
+            <div>
+              <label for="year-select" class="text-xs font-medium text-muted-foreground"
+                >年份</label
+              >
+              <!-- 26 个年份铺成一排 chip 是灾难（Hick's Law），用原生 select：
+                   它有键盘输入跳转，手机上是系统滚轮，而且不用自己实现弹层。
+                   选项文字带「起」—— 服务只有 since=，语义是「这个日期起」而不是
+                   「只这一年」。把这件事写进控件本身，比只写在下面的说明里可靠。 -->
+              <select id="year-select" class="field mt-1.5 md:max-w-40"></select>
+              <p id="year-hint" class="mt-1.5 text-xs text-muted-foreground"></p>
+            </div>
+            <div>
+              <span id="month-label" class="text-xs font-medium text-muted-foreground">月份</span>
+              <div
+                id="month-group"
+                role="radiogroup"
+                aria-labelledby="month-label"
+                class="mt-1.5 flex flex-wrap gap-2"
+              ></div>
+            </div>
+            <p class="text-xs text-muted-foreground">
+              时長（<span class="font-mono">lt-45</span> / <span class="font-mono">45-90</span> /
+              <span class="font-mono">90-120</span> / <span class="font-mono">gt-120</span>）
+              <strong class="font-medium text-foreground">这一版不做</strong> ——
+              它需要一条本服务自己的 <code class="font-mono">duration=</code> 过滤，
+              而这个需求还没定。放在这里只是为了不让人以为漏了。
+            </p>
+          </div>
+
+          <details class="mt-3">
+            <summary
+              class="cursor-pointer text-xs text-foreground/80 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              实测证据与复跑命令
+            </summary>
+            <ul class="mt-1.5 ms-4 list-disc space-y-0.5 text-xs text-muted-foreground">
+              <li>
+                <span class="font-mono">filter_by_tags=45-90</span> 与
+                <span class="font-mono">=45</span> 返回
+                <strong class="font-medium text-foreground">逐条相同</strong>的 6 部 ——
+                非数字 id 被截到了数字前缀 45（類別:第一人稱攝影），而这 6 部的时长全部 &gt; 90
+                分钟。
+              </li>
+              <li>
+                <span class="font-mono">filter_by_tags=gt-120</span>、<span class="font-mono"
+                  >=2026</span
+                >
+                → 0 条。
+              </li>
+              <li>
+                <span class="font-mono">year=2020</span> / <span class="font-mono">month=3</span> /
+                <span class="font-mono">duration=lt-45</span> /
+                <span class="font-mono">movie_filter_by=…</span> 在
+                <span class="font-mono">/movies/tags</span>、<span class="font-mono"
+                  >/movies/latest</span
+                >、<span class="font-mono">/movies/top</span> 上全部与基线逐条相同。
+              </li>
+              <li>复跑命令见 notes/lists.md 第 2 节。</li>
+            </ul>
+          </details>
+        </div>
+
+        <div class="mt-6 rounded-lg border border-border bg-card p-4">
+          <h3 class="text-xs font-medium text-muted-foreground">这条链接长这样</h3>
+          <p
+            id="tag-url"
+            class="mt-2 rounded-md bg-muted px-3 py-2 font-mono text-xs break-all text-foreground"
+            aria-live="polite"
+          ></p>
+          <p id="tag-url-hint" class="mt-2 text-xs text-muted-foreground"></p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button id="tag-add" class="btn btn-lg btn-outline" type="button">
+              加入待复制
+            </button>
+            <button id="tag-copy" class="btn btn-lg btn-ghost" type="button">
+              复制这条
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════════ 3. 清单 ══════════════════ -->
+      <section
+        id="panel-lists"
+        role="tabpanel"
+        aria-labelledby="tab-lists"
+        hidden
+      >
+        <p class="note" role="note">
+          这一节<strong class="font-medium text-foreground">后端已经做好了</strong>：发现端点
+          <code class="font-mono">GET /collected_lists</code>，订阅
+          <code class="font-mono">GET /rss/list/{id}.xml</code>。下面 5 份是你账号里真实的清单
+          （2026-10-04 对着真实上游与真实服务跑出来的），链接可以直接填进 qBittorrent。
+          <br />
+          ⚠️ 它是<strong class="font-medium text-foreground">你建的</strong>清单，不是「你关注的」——
+          那个概念对应上游
+          <code class="font-mono">/api/v1/users/collected_lists</code>，而该端点<strong
+            class="font-medium text-foreground">实测返回 HTTP 500</strong>，所以服务读的是
+          <code class="font-mono">/api/v1/lists/simple</code>。
+          需要 token 才能列出清单；但 feed 本身不需要（标题拿不到名字时退回 id）。
+        </p>
+
+        <ul id="list-cards" class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3"></ul>
+      </section>
+
+      <!-- ══════════════════ 4. 想看 ══════════════════ -->
+      <section
+        id="panel-want"
+        role="tabpanel"
+        aria-labelledby="tab-want"
+        hidden
+      >
+        <div class="rounded-lg border border-border bg-card p-5">
+          <h2 class="text-base font-semibold tracking-tight">
+            你在 App 里标的「想看」，全在这一条里
+          </h2>
+          <p class="mt-1.5 text-xs text-muted-foreground">
+            内容跟着你在 App 里的标记走，URL 里没有任何参数 ——
+            所以在 App 里标一部，qBittorrent 下一轮轮询就会看到它。
+          </p>
+
+          <div class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <code
+              id="want-url"
+              class="min-w-0 flex-1 rounded-md bg-muted px-3 py-2 font-mono text-xs break-all"
+              >http://127.0.0.1:8080/rss/want.xml</code
+            >
+            <button id="want-copy" class="btn btn-lg btn-primary shrink-0" type="button">
+              复制链接
+            </button>
+          </div>
+
+          <dl class="mt-5 grid gap-3 border-t border-border pt-4 sm:grid-cols-3">
+            <div>
+              <dt class="text-xs font-medium text-foreground">需要 token</dt>
+              <dd class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                这条读的是你在 App 里的标记。没配 token 时服务返回
+                <span class="font-mono">503</span> 并说明原因，而不是给你一条空 feed。
+              </dd>
+            </div>
+            <div>
+              <dt class="text-xs font-medium text-foreground">待磁链的数量在标题里</dt>
+              <dd class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                还没出种的作品不发条目，但不会被悄悄丢掉 ——
+                数量写进 feed 标题，qBittorrent 里看得见。
+              </dd>
+            </div>
+            <div>
+              <dt class="text-xs font-medium text-foreground">
+                qBittorrent 只显示前 50 条
+              </dt>
+              <dd class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                它的默认上限是每个 feed 50 篇。清单更长时去
+                <span class="whitespace-nowrap">设置 → RSS</span> 调大。
+              </dd>
+            </div>
+          </dl>
+
+          <div class="mt-4 flex flex-wrap gap-2">
+            <button id="want-add" class="btn btn-md btn-outline" type="button">
+              加入待复制
+            </button>
+            <a
+              id="want-open"
+              class="btn btn-md btn-ghost"
+              href="http://127.0.0.1:8080/rss/want.xml"
+              target="_blank"
+              rel="noreferrer"
+              >打开看看<span class="sr-only">（新标签页）</span></a
+            >
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- ─────────────────── 待复制：唯一的输出台 ─────────────────── -->
+    <div class="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card">
+      <div class="mx-auto w-full max-w-6xl px-4 md:px-6">
+        <div class="flex h-16 items-center gap-2">
+          <p class="min-w-0 text-xs text-muted-foreground">
+            <span id="tray-count" class="tnum text-sm font-semibold text-foreground">0</span>
+            条链接待复制
+            <span id="tray-note" class="ms-1 hidden sm:inline"></span>
+          </p>
+
+          <div class="ms-auto flex items-center gap-2">
+            <button
+              id="tray-toggle"
+              class="btn btn-md btn-ghost"
+              type="button"
+              aria-expanded="false"
+              aria-controls="tray-panel"
+            >
+              查看
+            </button>
+            <button id="tray-copy-all" class="btn btn-lg btn-primary" type="button" disabled>
+              复制全部
+            </button>
+            <button
+              id="tray-clear"
+              class="btn btn-md btn-ghost"
+              type="button"
+              aria-label="清空待复制的链接"
+              disabled
+            >
+              清空
+            </button>
+          </div>
+        </div>
+
+        <div id="tray-panel" hidden class="border-t border-border">
+          <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 py-2">
+            <p id="tray-panel-label" class="text-xs font-medium">待复制的链接</p>
+            <p class="text-xs text-muted-foreground">
+              「复制全部」给的是<b class="font-medium text-foreground">换行分隔的整串</b>，适合留档或填配置；
+              qBittorrent 一次只能加一条，用每行的「复制」。
+            </p>
+          </div>
+          <ul
+            id="tray-list"
+            aria-labelledby="tray-panel-label"
+            class="max-h-96 divide-y divide-border overflow-y-auto"
+          ></ul>
+        </div>
+      </div>
+    </div>
+
+    <p id="live" aria-live="polite" class="sr-only"></p>
+
+    <script src="./src/data.js" defer></script>
+    <script src="./app.js" defer></script>
+  </body>
+</html>

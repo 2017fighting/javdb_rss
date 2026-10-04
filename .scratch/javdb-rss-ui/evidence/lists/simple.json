@@ -1,0 +1,44 @@
+{
+  "lists": [
+    {
+      "id": "k4EVE4",
+      "name": "遥控跳蛋",
+      "privacy": "open",
+      "is_default": false,
+      "movies_count": 1,
+      "has_movie": false
+    },
+    {
+      "id": "p36Eww",
+      "name": "影绘 剪影",
+      "privacy": "open",
+      "is_default": false,
+      "movies_count": 9,
+      "has_movie": false
+    },
+    {
+      "id": "ZX11zV",
+      "name": "跳蛋蛋蛋",
+      "privacy": "open",
+      "is_default": false,
+      "movies_count": 1,
+      "has_movie": false
+    },
+    {
+      "id": "p31z8B",
+      "name": "vrvr",
+      "privacy": "open",
+      "is_default": false,
+      "movies_count": 2,
+      "has_movie": false
+    },
+    {
+      "id": "R9r77",
+      "name": "default",
+      "privacy": "own",
+      "is_default": true,
+      "movies_count": 6,
+      "has_movie": false
+    }
+  ]
+}

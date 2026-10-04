@@ -1,0 +1,252 @@
+/*
+ * javdb-rss-ui mockup — Tailwind v4 entry.
+ *
+ * 颜色/圆角**全部**来自 shadcn 的 CSS 自定义属性（见 ../ui-contract.md），
+ * 因此本文件与编译产物里都不出现任何 raw hex —— L1 token-lint 是硬闸门。
+ *
+ * 构建： cd .scratch/javdb-rss-ui && npm run build
+ */
+@import "tailwindcss";
+
+/* class 版深色模式（shadcn 约定：.dark 挂在 <html> 上） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 只扫 mockup 自己的文件，别把整个 Go 仓库拖进来 */
+@source "../index.html";
+@source "../src/data.js";
+@source "../app.js";
+
+/* ── shadcn 默认主题（neutral），HSL 三元组形式 ───────────────────────── */
+:root {
+  --background: 0 0% 100%;
+  --foreground: 0 0% 3.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 3.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 3.9%;
+  --primary: 0 0% 9%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 0 0% 96.1%;
+  --secondary-foreground: 0 0% 9%;
+  --muted: 0 0% 96.1%;
+  /* shadcn 默认是 45.1%，在 bg-muted(hsl(0 0% 96.1%)) 上只有 4.35:1 —— 不过 WCAG AA。
+     取 40% 后：白底 5.74:1、bg-muted 上 5.27:1。这是本 effort 对默认主题唯一
+     的偏离，记在 ui-contract.md 里。 */
+  --muted-foreground: 0 0% 40%;
+  --accent: 0 0% 96.1%;
+  --accent-foreground: 0 0% 9%;
+  --destructive: 0 72.2% 50.6%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 89.8%;
+  --input: 0 0% 89.8%;
+  --ring: 0 0% 3.9%;
+  --radius: 0.5rem;
+}
+
+.dark {
+  --background: 0 0% 3.9%;
+  --foreground: 0 0% 98%;
+  --card: 0 0% 5.9%;
+  --card-foreground: 0 0% 98%;
+  --popover: 0 0% 5.9%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 0 0% 98%;
+  --primary-foreground: 0 0% 9%;
+  --secondary: 0 0% 14.9%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 0 0% 14.9%;
+  --muted-foreground: 0 0% 63.9%;
+  --accent: 0 0% 16.5%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 62.8% 45%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 16.9%;
+  --input: 0 0% 16.9%;
+  --ring: 0 0% 83.1%;
+}
+
+/* 令牌 → Tailwind 实用类。inline 让类里落成 var()，主题切换无需重编译。 */
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+
+  /* 系统字体栈，不是 Inter —— shadcn 自身的默认，也避开「Inter 到处都是」的 AI 指纹。
+     中文回退到各平台的本地黑体。 */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: var(--font-sans);
+  }
+}
+
+/* 自定义 utility：这样 @apply 与 HTML 里共用同一个名字。
+   作品数、计数都走等宽数字，列才对得齐。 */
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 微型标签字号（tab 计数、字母角标）。走令牌而不是各处写 text-[10px]，
+   否则「字号只有一种来源」这条立刻就不成立了。 */
+@utility text-2xs {
+  font-size: 0.625rem;
+  line-height: 0.875rem;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md text-sm
+      font-medium whitespace-nowrap transition-colors
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+      focus-visible:ring-offset-2 focus-visible:ring-offset-background
+      disabled:pointer-events-none disabled:opacity-45;
+  }
+  .btn-md {
+    @apply h-10 px-4;
+  }
+  /* 主操作 ≥44px 触摸目标（Fitts's Law / WCAG 2.5.5 AAA） */
+  .btn-lg {
+    @apply h-11 px-5;
+  }
+  .btn-sm {
+    @apply h-8 px-2.5 text-xs;
+  }
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary/90;
+  }
+  .btn-outline {
+    @apply border border-input bg-background hover:bg-accent hover:text-accent-foreground;
+  }
+  .btn-ghost {
+    @apply hover:bg-accent hover:text-accent-foreground;
+  }
+  .field {
+    @apply h-10 w-full rounded-md border border-input bg-background px-3 text-sm
+      placeholder:text-muted-foreground focus-visible:outline-none
+      focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2
+      focus-visible:ring-offset-background;
+  }
+
+  /* 分段控件：模式开关 / 主属性切换共用同一个形态（H4 一致性） */
+  .segmented {
+    @apply inline-flex items-center rounded-md border border-input bg-muted/60 p-0.5;
+  }
+  .segmented > button {
+    @apply inline-flex h-7 items-center rounded-sm px-2.5 text-xs font-medium
+      text-muted-foreground transition-colors focus-visible:outline-none
+      focus-visible:ring-2 focus-visible:ring-ring;
+  }
+  .segmented > button[aria-checked="true"] {
+    @apply bg-background text-foreground shadow-xs;
+  }
+  .dark .segmented > button[aria-checked="true"] {
+    @apply bg-primary text-primary-foreground;
+  }
+
+  /* 多选 chip。选中态三通道冗余：填充 + 勾 + aria-pressed，
+     不靠颜色单独表意（WCAG 1.4.1）。 */
+  .chip {
+    @apply inline-flex items-center gap-2 rounded-full border border-input bg-background
+      px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+      disabled:pointer-events-none disabled:opacity-45;
+  }
+  .chip::before {
+    content: "✓";
+    visibility: hidden;
+  }
+  .chip[aria-pressed="true"] {
+    @apply border-primary bg-primary text-primary-foreground;
+  }
+  .chip[aria-pressed="true"]::before {
+    visibility: visible;
+  }
+
+  .note {
+    @apply rounded-md border bg-muted/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground;
+  }
+
+  /* 分区标签页。选中态用下划线 + 前景色，不只靠颜色粗细（WCAG 1.4.1）。 */
+  .tab {
+    @apply -mb-px inline-flex h-10 items-center gap-1.5 border-b-2 border-transparent
+      px-3 text-sm font-medium text-muted-foreground transition-colors
+      hover:text-foreground focus-visible:outline-none focus-visible:ring-2
+      focus-visible:ring-ring focus-visible:ring-offset-2
+      focus-visible:ring-offset-background;
+  }
+  .tab[aria-selected="true"] {
+    @apply border-foreground text-foreground;
+  }
+  .tab-count {
+    @apply rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] leading-none
+      text-foreground tnum;
+  }
+  .tab[aria-selected="true"] .tab-count {
+    @apply bg-foreground text-background;
+  }
+}
+
+/* 尊重 prefers-reduced-motion（WCAG 2.3.3） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 跳转链接只在获得焦点时出现 */
+.skip-link {
+  @apply sr-only;
+}
+.skip-link:focus {
+  @apply not-sr-only fixed top-2 left-2 z-50 rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground;
+}
+
+  /* 单选 chip（年/月/时长）：与多选 chip 同一形态，只换语义。 */
+  .chip[aria-checked="true"] {
+    @apply border-primary bg-primary text-primary-foreground;
+  }
+  .chip[aria-checked="true"]::before {
+    visibility: visible;
+  }
+  .chip[role="radio"]::before {
+    content: none;
+  }

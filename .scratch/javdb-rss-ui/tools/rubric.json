@@ -1,0 +1,48 @@
+{
+  "$comment": "shadcn 预设的 7 条 L4 布尔 rubric 的答案。score = pass/N 由 tools/rubric.mjs 算，不由模型报一个浮点。needsHuman=true 的项只能靠肉眼定稿 —— 我没拿到那一眼，不当成已验收。",
+  "checks": [
+    {
+      "id": "tokens",
+      "pass": true,
+      "reason": "全部颜色走 hsl(var(--*))；L1 token-lint 闸门 PASS（编译产物里只有 Tailwind 自己的 --tw-* 默认值，没有我们的色值字面量）。",
+      "evidence": "validate_mockup{system:shadcn} L1 PASS"
+    },
+    {
+      "id": "radius",
+      "pass": true,
+      "reason": "卡片/按钮/输入框/chip 只经 --radius 派生的 radius-sm|md|lg；没有一处写死圆角。",
+      "evidence": "grep 'rounded-\\[' → 0 命中；@theme 里 --radius-sm/md/lg 皆由 var(--radius) 派生"
+    },
+    {
+      "id": "neutral-palette",
+      "pass": true,
+      "reason": "整个页面饱和度为 0（HSL 三元组第一段恒为 0），无渐变、无紫、无修饰性色块；只有 destructive 用于真实错误态。",
+      "evidence": "grep -c gradient → 0；色相全部为 0"
+    },
+    {
+      "id": "contrast",
+      "pass": true,
+      "reason": "axe WCAG2A/AA 在 375/768/1440 × 亮/暗 × 空态/填满态全部 0 违规；另外为 --muted-foreground 与 --destructive 各修正了一处 shadcn 默认值不达 AA 的地方。",
+      "evidence": "tools/a11y.mjs → PASS"
+    },
+    {
+      "id": "focus-ring",
+      "pass": true,
+      "reason": "真按 Tab 走一遍，每个获得焦点的元素都有可见 outline/box-shadow（首版 tabpanel 的 focus-visible:outline-none 是这么被抓出来的，已删）。",
+      "evidence": "tools/a11y.mjs 焦点检查 → PASS"
+    },
+    {
+      "id": "hierarchy",
+      "pass": true,
+      "reason": "内容区与固定工具条各最多一个主操作；144 行演员、43 个时间/时长控件里没有任何一个抢焦点。",
+      "evidence": "tools/a11y.mjs 主操作计数（分区 × 断点 × 主题）",
+      "needsHuman": true
+    },
+    {
+      "id": "spacing-rhythm",
+      "pass": true,
+      "reason": "间距/尺寸只用 4px 刻度；唯一剩下的方括号值是 accent-[hsl(var(--primary))]，那是**引用令牌**而不是字面量。",
+      "evidence": "grep '\\b[a-z-]+-\\[[^]]+\\]' → 只剩 accent-[hsl(var(--primary))]"
+    }
+  ]
+}

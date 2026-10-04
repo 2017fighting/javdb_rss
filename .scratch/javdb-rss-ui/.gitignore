@@ -1,0 +1,3 @@
+node_modules/
+# 截图是生成物，可重跑 tools/shots.mjs 得到
+shots/

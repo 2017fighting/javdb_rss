@@ -1,0 +1,6 @@
+{
+  "name": "javdb-rss-ui-mockup",
+  "private": true,
+  "scripts": { "build": "tailwindcss -i mockup/src/input.css -o mockup/assets/app.css --minify" },
+  "devDependencies": { "tailwindcss": "^4.3.3", "@tailwindcss/cli": "^4.3.3" }
+}
