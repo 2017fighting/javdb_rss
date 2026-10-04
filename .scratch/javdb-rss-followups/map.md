@@ -27,13 +27,14 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 11 | 按定稿语义落地 `since` | ~~10~~ 已 resolved（2026-10-05） |
 | 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | ~~无~~ 已 resolved（2026-10-05） |
 | 13 | tag 推送即发布镜像到 GHCR | ~~无~~ 已 resolved（2026-10-05） |
-| 14 | 统一 action 版本：ci.yml 的 v4/v5 → v7 | 无（13 把它从「观察」升级成「不一致」） |
+| 14 | 统一 action 版本：ci.yml 的 v4/v5 → v7 | ~~无~~ 已 resolved（2026-10-05） |
 | 15 | 三份部署配置改为拉已发布的镜像 | 13 |
 
-（**01–13 全部 resolved，见下 Decisions so far**；
+（**01–14 全部 resolved，见下 Decisions so far**；
 07 为机械验收项，已随 push 关闭。**13–15 是 2026-10-04 新开的**：
 13 是发版链路本身（2026-10-05 结票），14/15 是它落地时按「记录层不骗人」
-拆出来的两件（一件是本仓库里两套 action 版本并存，一件是镜像有了但部署还没用上）。）
+拆出来的两件 —— 14（同一仓库里两套 action 版本并存）同日结票，
+15（镜像有了但部署还没用上）仍开着。）
 
 10–12 的来源与前九张不同：不是 code-review 的「未修」，而是清账时发现的
 **一笔孤儿欠账** —— `since` 的比较语义在初次交付的票 09 里被标成已解决，
@@ -158,6 +159,19 @@ qBittorrent 多下一份文件，而没有任何告警。
   拆出的两件是 [14](issues/14-unify-action-versions.md)（两套 action 版本并存）与
   [15](issues/15-deploy-pull-ghcr-image.md)（镜像有了但部署还没用上）。
   完整事实与复核命令在 [`notes/release-first-run.md`](notes/release-first-run.md)。
+- [统一 action 版本](issues/14-unify-action-versions.md)
+  — **`ci.yml` 的 `checkout` `v4 → v7`、`setup-go` `v5 → v7`，与 `release.yml` 共用同一批大版本。**
+  跨大版本逐条读过（不是机械替换）：七个变更里六条对本仓库不适用 —— 凭据持久化到独立
+  文件（CI 无 `git` 网络操作）、v7 拦 `pull_request_target`/`workflow_run` 上的 fork PR
+  （我们只挂 `push`/`pull_request`）、`GOTOOLCHAIN=local`（`go.mod` 要 `1.27.1`，
+  装到的就是它）、优先 `toolchain` 指令（本仓库没有该行）、runner 下限 `v2.327.1`
+  （托管 runner `2.337.0`）、Node 24。
+  **唯一真代价**是 setup-go `v6.3.0` 把默认缓存键从 `go.sum` 换成 `go.mod`：升级后
+  第一跑冷缓存（`Cache is not found`，`go vet`/`test (race)`/`build` 由 `1s/7s/0s`
+  变 `17s/28s/12s`，整跑 46s → 1m40s），attempt 2 即命中新键、整跑回到 45s。
+  验收用差分判据而不是「任务变绿」（升级前也绿）：真 CI run `37226687575`（sha `1cac8f5`）
+  8 步全绿，且**同一份日志里弃用警告 0 次**（升级前的 run `37226396921` 是 1 次）。
+  顺带复核 ci.md 第 3 条：`ubuntu-latest` **尚未**迁到 26.04，仍解析为 `24.04.5 LTS`。
 - [收藏女优的批量挑选](issues/06-collected-bulk-picking.md)
   — **交付不在本 effort 里：由 [`.scratch/javdb-rss-ui/`](../javdb-rss-ui/spec.md) 做的**
   （UI 的 spec 首页就写着「取代 06 的验收清单」；那 8 张票全部 resolved，含 08 的真实验收：
@@ -173,16 +187,17 @@ qBittorrent 多下一份文件，而没有任何告警。
 
 <!-- 看得出方向、但还捏不成 ticket 的东西 -->
 
-- **CI 的两条维护性观察**（来自 ticket 07 首跑，见
-  [`javdb-rss/notes/ci.md`](../javdb-rss/notes/ci.md)）：`ubuntu-latest` 2026-11 迁
-  Ubuntu 26.04；`checkout`/`setup-go` 的 Node 20 弃用警告。
-  原先并列的第三条（`.dockerignore` 漏排根目录 `javdb-rss` 导致 8 MB 构建上下文）
-  **已由票 13 修掉**：加了忽略行，并把 `ci.yml` 的容器构建排到 `make build` 之前 ——
-  两头都堵上，以后不再依赖「记得那行忽略规则」。
-  弃用警告那条在票 13 之后不再是「已知遗留」而是**同一仓库里两套 action 版本并存**
-  （`release.yml` 已是 v7），因此收进票 14。
+- **CI 的一条维护性观察**（来自 ticket 07 首跑，见
+  [`javdb-rss/notes/ci.md`](../javdb-rss/notes/ci.md)）：`ubuntu-latest` 迁
+  Ubuntu 26.04（[`actions/runner-images#14748`](https://github.com/actions/runner-images/issues/14748)：
+  10-19 起滚动，11-19 前完成；2026-10-05 复核时仍是 `ubuntu-24.04`）。
+  原先并列的另两条都已收掉：`.dockerignore` 漏排根目录 `javdb-rss` 导致的 8 MB
+  构建上下文由票 13 修掉（加忽略行 + 把容器构建排到 `make build` 之前，两头都堵上，
+  实测 `8.16MB → 1.03MB`）；`checkout`/`setup-go` 的 Node 20 弃用警告由票 14 收掉
+  （两处升到 `v7`、与 `release.yml` 同批，实测日志里归零）。
   Ubuntu 26.04 迁移仍只是时间问题：本项目的 CI 只依赖 Go 与 Docker，
-  两者在 26.04 上都有，到那天复核一次即可。
+  两者在 26.04 上都有（#14748 的对照表里 Docker Buildx 两版同为 `0.37.0`），
+  到那天复核一次即可。
 - **ticket 03 复勘暴露的两条口径未知**（都记在 notes 里，未开票）：
   `tags[].videos_count` 与 `filter_by_tags` 实得条数口径不同（80 个标签里 15 个
   对不上，两个方向都有）；`i`/`v` 的含义是从字段反推的，没有上游文案佐证。

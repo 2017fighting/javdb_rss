@@ -75,7 +75,7 @@ docker daemon 甚至没起来（见 [`../issues/04-config-and-deploy.md`](../iss
 （注：`1.03MB` 不等于本笔记上文那个 `244,270` 字节 —— 那是 webui 落地**之前**的树，
 现在多出来的大头是 `internal/webui/assets`，不是那份二进制。）
 
-### 2. 两个 action 的 Node 20 弃用警告
+### 2. 两个 action 的 Node 20 弃用警告 —— 2026-10-05 已解决（两处升到 v7）
 
 每次运行都有一条，来自 `actions/checkout@v4` 与 `actions/setup-go@v5`
 （它们声明跑 Node 20，被强制在 Node 24 上跑）：
@@ -85,9 +85,9 @@ docker daemon 甚至没起来（见 [`../issues/04-config-and-deploy.md`](../iss
 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-go@v5.
 ```
 
-**现状**：只是 warning，任务照样 success。**当前最新**：checkout `v7.0.1`、
+**当时**：只是 warning，任务照样 success。**当时最新**：checkout `v7.0.1`、
 setup-go `v7.0.0`（2026-09-30 查）。升级是**跨大版本**（setup-go 从 v5 → v7 跨了 v6），
-不是机械替换，需要读两版 release notes 再动。**本票不改**。
+不是机械替换，需要读两版 release notes 再动，所以当时没改。
 
 **2026-10-05 升级为不一致**：票 13 新增的 `release.yml` 直接用当前大版本
 （checkout@v7 / setup-go@v7），而 `ci.yml` 仍停在 v4/v5 —— 这条从「已知遗留」变成了
@@ -95,7 +95,38 @@ setup-go `v7.0.0`（2026-09-30 查）。升级是**跨大版本**（setup-go 从
 [`issues/14-unify-action-versions.md`](../../javdb-rss-followups/issues/14-unify-action-versions.md)。
 （首次发布 run `37226112866` 里 checkout@v7 与 setup-go@v7 都已正常跑过一遍。）
 
-### 3. `ubuntu-latest` 将在 2026-11 迁到 Ubuntu 26.04
+**2026-10-05 已解决**（票 14）：`ci.yml` 的两处 ref 升到 `v7`（checkout `v4 → v7`、
+setup-go `v5 → v7`），两个 workflow 从此共用同一批大版本。真 CI 实测：run
+[`37226687575`](https://github.com/2017fighting/javdb_rss/actions/runs/37226687575)，
+sha `1cac8f5`，8 个步骤全绿。判据不是「任务绿」（升级前也绿），是**同一份日志里
+这条警告从 1 条变成 0 条** —— 整跑 `grep -c 'Node.js 20 is deprecated'` 得 `0`，
+而升级前那一跑（run `37226396921`）得 `1`；日志里也确实出现
+`Run actions/checkout@v7` / `Run actions/setup-go@v7` 两个步骤名（不是改了没用上）。
+剩下唯一的注解是下面第 3 条那条 Ubuntu 26 迁移预告 —— 它由 runner 镜像本身打出，
+与 action 版本无关，换版本消不掉。
+
+跨大版本的影响逐条查过（读的是 release notes，不是猜的）：
+
+| 变更 | 出处 | 本仓库是否受影响 |
+|---|---|---|
+| 两个 action 的 Node 20 → Node 24 | checkout `v5.0.0` / setup-go `v6.0.0` | **就是本条的成因** |
+| 要求 runner ≥ `v2.327.1` | 同上 | 否 —— 托管 runner 是 `2.337.0` |
+| checkout 把凭据持久化到独立文件（不再写 `.git/config`） | checkout `v6.0.0` | 否 —— CI 步骤里没有任何 `git` 网络操作 |
+| checkout v7 在 `pull_request_target` / `workflow_run` 上拦 fork PR | checkout `v7.0.0` | 否 —— `ci.yml` 只挂 `push`(main) 与 `pull_request` |
+| setup-go 默认 `GOTOOLCHAIN=local`（不再自动下载更新的 toolchain） | setup-go `v6.0.0` | 否 —— `go-version-file: go.mod` 解出 `1.27.1` **且装到的就是它**（日志：`Successfully set up Go version 1.27.1`、`GOTOOLCHAIN='local'`），四个用到 `go` 的步骤（gofmt / go vet / test (race) / build）全绿 |
+| setup-go 优先读 `go.mod` 的 `toolchain` 指令 | setup-go `v6.0.0` | 否 —— 本仓库 `go.mod` 没有 `toolchain` 行 |
+| setup-go 默认缓存键从 `go.sum` 改成 `go.mod` | setup-go `v6.3.0` | **一次性代价**，见下 |
+
+**唯一真花代价的是最后一条。** 升级后第一跑（run `37226687575` attempt 1）日志里是
+`Cache is not found`：`go vet` 17s、`test (race)` 28s、`build` 12s（对照上一跑 v4/v5 的
+`1s / 7s / 0s`），整跑 46s → 1m40s；差异全落在用到 `go` 的步骤上，与冷缓存对得上
+（docker 那两步 23s → 26s，基本不变）。**它确实只有一次**：同一运行的 attempt 2
+复核到 `Cache restored from key: setup-go-Linux-x64-ubuntu24-go-1.27.1-83d87e14…`，
+`go vet` 0s、`test (race)` 5s、`build` 0s，整跑 **45s**（比升级前还快 1s）。
+注意这个键里带着 `ubuntu24`（取自 runner 的 `ImageOS`）—— 所以第 3 条那次镜像迁移发生时，
+缓存会再冷启一次，属预期。
+
+### 3. `ubuntu-latest` 迁 Ubuntu 26.04：10-19 起滚动、11-19 前完成（2026-10-05 复核：尚未发生）
 
 运行底座的注解：
 
@@ -103,11 +134,20 @@ setup-go `v7.0.0`（2026-09-30 查）。升级是**跨大版本**（setup-go 从
 "The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026."
 ```
 
-**当前** `ubuntu-latest` 解析为 `ubuntu-24.04`（runner `2.337.0`，镜像
-`ubuntu-24.04 / 20260920.314.1`），Go 由 `go-version-file: go.mod` 定为 `1.27.1`
-（与本地一致），setup-go 缓存命中。**等到 11 月迁移时再看一次即可**——
-本项目的 CI 只依赖 Go 与 Docker，两者在 26.04 上都有，预判无需改动。
+出处在 [`actions/runner-images#14748`](https://github.com/actions/runner-images/issues/14748)
+（2026-09-17 开，仍 open）：**10-19 起分批滚动，计划 11-19 前完成** ——
+所以「2026-11」是**完成**日，起点比它早两周多。
+
+**当前**（run `37226687575`，2026-10-05）`ubuntu-latest` 仍解析为 `ubuntu-24.04`：
+OS `24.04.5 LTS`、`Image: ubuntu-24.04`、Included Software
+`…/ubuntu24/20260927.320/…`、runner `2.337.0`。**迁移还没发生**，Go 仍由
+`go-version-file: go.mod` 定为 `1.27.1`（与本地一致），setup-go 缓存命中。
+
+**等 11-19 之后再复核一次即可** —— 本项目的 CI 只依赖 Go 与 Docker，两者在 26.04 上都有
+（#14748 的对照表里 Docker Buildx 两版同为 `0.37.0`），预判无需改动。
 登记在此，是为了迁移当天有据可查，而不是重新考古。
+（迁移那天的可见信号有两个：`Image:` 变成 `ubuntu-26.04`，以及 setup-go 的缓存键
+从 `…-ubuntu24-…` 变成 `…-ubuntu26-…` 并因此冷启一次。）
 
 ## 复核方法
 
@@ -122,6 +162,15 @@ gh api repos/2017fighting/javdb_rss/actions/runs/36661326933/jobs \
 
 # 构建上下文大小（找 "transferring context:"）
 gh run view 36661326933 --log | grep 'transferring context'
+
+# Node 20 弃用警告是否还在（票 14 之后应为 0；升级前的 run 37226396921 是 1）
+gh run view 37226687575 --log | grep -c 'Node.js 20 is deprecated'
+
+# 缓存是冷启还是命中（找 "Cache is not found" / "Cache restored from key"）
+gh run view 37226687575 --attempt 2 --log | grep -i 'cache restored from key'
+
+# ubuntu-latest 当前解析到什么镜像（找 "Image:" 与 "Included Software:"）
+gh run view 37226687575 --log | sed -n '/Runner Image/,/Included Software/p'
 
 # 干净检出里 docker 上下文的大小（对照 8 MB，把 Command 拷进 Dockerfile 跑）
 # 无先 build：244,270 字节；先 make build：8,211,150 字节
