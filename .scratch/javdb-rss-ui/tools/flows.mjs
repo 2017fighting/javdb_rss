@@ -16,7 +16,8 @@
  * 票 06 补上：清单与想看（一清单一链接 / 默认与私有标记 / 私有名字读不到
  * 退回 id / 想看一个显眼的复制按钮 / 两者都能进待复制 / 没 token 时禁用并
  * 说明 token_file，标签区不受连坐）。
- * 状态可见性（07）的断言在那一票里补。
+ * 票 07 补上：状态与运维可见性（上游状态取自 /readyz / /collected 截断时
+ * 明说「已知不完整」/ 白名单生效时说「没列出的订阅会 404」）。
  */
 import { chromium } from "playwright";
 
@@ -1085,6 +1086,162 @@ check(
   true,
 );
 await noTokenOut.ctx.close();
+
+// ══════════════════════════════════════════════════════════════════════
+// 需求 5：状态与运维可见性（票 07）
+//
+// 三件事必须在页面上说出来，否则页面会「长得像一切正常」：
+//   · /readyz 说上游坏了 → 页面上看得见，且与 /readyz 的说法逐字一致；
+//   · /collected 报截断 → 列表明说「已知不完整」，而不是「加载失败」；
+//   · 白名单生效 → 说清「没列出的订阅会 404」。
+//
+// 同时守「不制造假警告」：健康 / 未截断 / 没配白名单时三处提示都不出现。
+// ══════════════════════════════════════════════════════════════════════
+const status = await newPage();
+await status.page.goto(origin, { waitUntil: "load" });
+await status.page.waitForSelector("#actress-list [data-actress]");
+await status.page.waitForFunction(
+  () => !document.getElementById("upstream-text").textContent.includes("检查"),
+);
+
+// /version 本身也要交出三类白名单布尔 —— 页面（与任何消费方）只有它可用。
+const versionBody = await status.page.evaluate(() => fetch("/version").then((r) => r.json()));
+check(
+  "/version 给出三类白名单布尔",
+  Object.keys(versionBody.whitelist || {}).sort().join(","),
+  "actresses,lists,zones",
+);
+check(
+  "stub 服务没配白名单（三类都 false）",
+  Object.values(versionBody.whitelist || {}).some(Boolean),
+  false,
+);
+
+check("上游健康时 chip 说上游正常", await status.page.textContent("#upstream-text"), "上游正常");
+check(
+  "上游健康时 chip 不报错",
+  await status.page.$eval("#upstream-chip", (e) => e.classList.contains("text-destructive")),
+  false,
+);
+check(
+  "上游健康时内容区不出告警（不制造假警告）",
+  await status.page.$eval("#upstream-note", (e) => e.classList.contains("hidden")),
+  true,
+);
+check(
+  "未截断时不出现「已知不完整」",
+  await status.page.$eval("#actress-truncated", (e) => e.classList.contains("hidden")),
+  true,
+);
+check(
+  "没配白名单时不出现白名单提示",
+  await status.page.$eval("#whitelist-note", (e) => e.classList.contains("hidden")),
+  true,
+);
+await status.ctx.close();
+
+// ── 截断：/collected 报 truncated → 列表上出现「已知不完整」 ──
+const truncated = await newPage();
+await truncated.page.route("**/collected", (route) =>
+  route.fulfill({
+    status: 200,
+    contentType: "application/json; charset=utf-8",
+    body: JSON.stringify({
+      actresses: [
+        { id: "EvkJ", name: "河北彩花", videos_count: 12, gender: 0, feed: "/rss/actress/EvkJ.xml" },
+      ],
+      truncated: true,
+      pages_fetched: 3,
+      max_pages: 3,
+    }),
+  }),
+);
+await truncated.page.goto(origin, { waitUntil: "load" });
+await truncated.page.waitForFunction(
+  () => !document.getElementById("actress-truncated").classList.contains("hidden"),
+);
+const truncText = await truncated.page.textContent("#actress-truncated");
+check("截断时明说「已知不完整」", truncText.includes("已知不完整"), true);
+check("截断提示带上读了多少页 / 上限", truncText.includes("3"), true);
+check("截断措辞不是「读不到 / 出错了」", /读不到|出错了/.test(truncText), false);
+// 截断不等于列不出东西：列表本身照常渲染。
+check(
+  "截断时列表照常渲染",
+  await truncated.page.$$eval("#actress-list [data-actress]", (ns) => ns.length),
+  1,
+);
+await truncated.ctx.close();
+
+// ── 上游不健康：/readyz 503 → 页面看得见，且与 /readyz 的说法一致 ──
+const upstreamDown = await newPage();
+const readyzText = "上游不可用: signature_broken";
+await upstreamDown.page.route("**/readyz", (route) =>
+  route.fulfill({ status: 503, contentType: "text/plain; charset=utf-8", body: readyzText + "\n" }),
+);
+await upstreamDown.page.goto(origin, { waitUntil: "load" });
+await upstreamDown.page.waitForFunction(() =>
+  document.getElementById("upstream-text").textContent.includes("不可用"),
+);
+check("上游不健康时 chip 说上游不可用", await upstreamDown.page.textContent("#upstream-text"), "上游不可用");
+check(
+  "上游不健康时 chip 标红",
+  await upstreamDown.page.$eval("#upstream-chip", (e) => e.classList.contains("text-destructive")),
+  true,
+);
+check(
+  "chip 的 title 就是 /readyz 的原话",
+  await upstreamDown.page.$eval("#upstream-chip", (e) => e.title),
+  readyzText,
+);
+const upstreamNoteText = await upstreamDown.page.textContent("#upstream-note");
+check("上游不健康时内容区也说明", upstreamNoteText.includes("上游不可用"), true);
+check("内容区引用 /readyz 的原话（说法一致）", upstreamNoteText.includes("signature_broken"), true);
+await upstreamDown.ctx.close();
+
+// ── 白名单生效：/version 报受限 → 提示「没列出的订阅会 404」 ──
+const white = await newPage();
+await white.page.route("**/version", (route) =>
+  route.fulfill({
+    status: 200,
+    contentType: "application/json; charset=utf-8",
+    body: JSON.stringify({
+      version: "test",
+      provider: "stub",
+      whitelist: { actresses: true, lists: true, zones: true },
+    }),
+  }),
+);
+await white.page.goto(origin, { waitUntil: "load" });
+await white.page.waitForFunction(
+  () => !document.getElementById("whitelist-note").classList.contains("hidden"),
+);
+const whiteText = await white.page.textContent("#whitelist-note");
+check("白名单生效时说清「没列出的订阅会 404」", /没列出/.test(whiteText) && whiteText.includes("404"), true);
+check("白名单提示点出受限的三类", /女优/.test(whiteText) && /清单/.test(whiteText) && /全站标签/.test(whiteText), true);
+// 只有一类受限时也要出现（页面的判据是「任一类生效」）。
+const whiteOne = await newPage();
+await whiteOne.page.route("**/version", (route) =>
+  route.fulfill({
+    status: 200,
+    contentType: "application/json; charset=utf-8",
+    body: JSON.stringify({
+      version: "test",
+      provider: "stub",
+      whitelist: { actresses: false, lists: true, zones: false },
+    }),
+  }),
+);
+await whiteOne.page.goto(origin, { waitUntil: "load" });
+await whiteOne.page.waitForFunction(
+  () => !document.getElementById("whitelist-note").classList.contains("hidden"),
+);
+check(
+  "只有一类白名单生效时也提示",
+  (await whiteOne.page.textContent("#whitelist-note")).includes("404"),
+  true,
+);
+await whiteOne.ctx.close();
+await white.ctx.close();
 
 await browser.close();
 

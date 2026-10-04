@@ -75,6 +75,12 @@
     base: $("base-url"),
     themeToggle: $("theme-toggle"),
     themeIcon: $("theme-icon"),
+    // ── 服务与上游状态 ──
+    upstreamChip: $("upstream-chip"),
+    upstreamText: $("upstream-text"),
+    upstreamNote: $("upstream-note"),
+    whitelistNote: $("whitelist-note"),
+    actressTruncated: $("actress-truncated"),
     actressSearch: $("actress-search"),
     actressList: $("actress-list"),
     actressEmpty: $("actress-empty"),
@@ -150,6 +156,9 @@
     actresses: [],
     loading: true,
     error: null, // {status, message}
+    // /collected 的截断信号。**看键在不在**才是判据（服务只在真的触顶时
+    // 才给 truncated 这三个键），所以 null = 这份清单是完整的。
+    truncated: null, // {pagesFetched, maxPages}
 
     // ── 标签区 ──
 
@@ -200,6 +209,13 @@
 
     // 待复制。只存「怎么生成」，URL 每次现算 —— 换服务地址要立刻跟上。
     links: [],
+
+    // ── 服务与上游状态 ──
+    // /version 的白名单三类（女优 / 清单 / 全站标签）。null = 还没读到，
+    // 那时不输出任何白名单提示（宁可不说，也不编）。
+    whitelist: null, // {actresses, lists, zones}
+    // /readyz 的结果。unknown = 还没读到或读不到 —— 那时不声称「正常」。
+    upstream: { state: "unknown", message: "" }, // unknown | ok | down
   };
 
   // ─────────────────────────── 小工具 ───────────────────────────
@@ -519,12 +535,25 @@
       const body = await res.json().catch(() => null);
       if (!res.ok) {
         state.actresses = [];
+        state.truncated = null;
         state.error = { status: res.status, message: serverMessage(body, res.status) };
       } else {
         state.actresses = Array.isArray(body?.actresses) ? body.actresses : [];
+        // 截断信号：**看键在不在**，不看值 —— 服务只在真的触顶时才给
+        // truncated / pages_fetched / max_pages 这三个键（`omitempty`）。
+        // 写成 `"truncated" in body` 而不是 `body.truncated`：契约说的是
+        // 「键存在 = 已知不完整」，一个 `truncated: false` 也应当被当成那个键。
+        state.truncated =
+          body && "truncated" in body
+            ? {
+                pagesFetched: Number(body.pages_fetched) || 0,
+                maxPages: Number(body.max_pages) || 0,
+              }
+            : null;
       }
     } catch (e) {
       state.actresses = [];
+      state.truncated = null;
       state.error = { status: 0, message: `读不到服务：${e.message}` };
     }
     state.loading = false;
@@ -600,6 +629,105 @@
       state.error?.message ||
       "尚未配置 token，读不到 App 里的标记。请从 App 导出后配置 app_api.token_file（见 README）。"
     );
+  }
+
+  // ─────────────────── 服务与上游状态（票 07） ───────────────────
+
+  /**
+   * 读 /readyz —— 页面上的上游状态**只**来自这里，不是写死的装饰。
+   *
+   *   200        → 上游正常
+   *   503        → 上游不可用（body 就是探针给出的原因）
+   *   其它/网络错 → 状态未知（**不**声称「正常」）
+   *
+   * 「与 /readyz 的说法一致」是这一条的全部意义：chip 与说明都直接用它
+   * 给的文案，不另编一句更顺口的。
+   */
+  async function loadReadyz() {
+    let next;
+    try {
+      const res = await fetch("/readyz", { headers: { accept: "text/plain" } });
+      const text = ((await res.text()) || "").trim();
+      next =
+        res.status === 200
+          ? { state: "ok", message: text || "ok" }
+          : res.status === 503
+            ? { state: "down", message: text || "上游不可用" }
+            : { state: "unknown", message: `服务返回 ${res.status}` };
+    } catch (e) {
+      next = { state: "unknown", message: `读不到服务：${e.message}` };
+    }
+    state.upstream = next;
+    renderUpstream();
+  }
+
+  function renderUpstream() {
+    const st = state.upstream;
+    const down = st.state === "down";
+    el.upstreamChip.classList.toggle("text-destructive", down);
+    el.upstreamText.textContent =
+      st.state === "ok" ? "上游正常" : down ? "上游不可用" : "上游状态未知";
+    // /readyz 的原话放在 title 里，鼠标悬停就能看到「探针到底怎么说的」。
+    el.upstreamChip.title = st.message;
+
+    // 内容区的说明只在**不健康**时出现。chip 在小屏（<md）是隐藏的，
+    // 而「上游坏了」是用户接下来所有异常的共同解释，必须在任何宽度都看得见。
+    if (!down) {
+      el.upstreamNote.classList.add("hidden");
+      el.upstreamNote.textContent = "";
+      return;
+    }
+    el.upstreamNote.innerHTML =
+      `<p class="flex items-start gap-2 text-sm font-medium">` +
+      `<span aria-hidden="true">⛔</span>上游不可用</p>` +
+      `<p class="mt-1.5 leading-relaxed">` +
+      `服务的 <code class="font-mono">/readyz</code> 现在返回 503，说明它连不上上游。` +
+      `下面已经拿到的订阅链接仍然可用；新内容的读取会失败，直到上游恢复。探针的原话：` +
+      `<code class="font-mono">${esc(st.message)}</code></p>`;
+    el.upstreamNote.classList.remove("hidden");
+  }
+
+  /**
+   * 读 /version 的白名单状态。页面据此在白名单生效时说一句「没列出的订阅会 404」——
+   * 没有它，白名单就表现为「链接看得见、一订就 404」（契约硬规则 6 要避免的静默）。
+   */
+  async function loadVersion() {
+    try {
+      const res = await fetch("/version", { headers: { accept: "application/json" } });
+      const body = await res.json().catch(() => null);
+      if (res.ok && body) state.whitelist = body.whitelist || null;
+    } catch (e) {
+      // 读不到就保持 null：宁可不说，也不编一条「白名单已在生效」的提示。
+    }
+    renderWhitelistNote();
+  }
+
+  /** 三类里任意一类生效，就意味着「没列出的订阅会 404」。 */
+  function whitelistActive() {
+    const w = state.whitelist;
+    return !!(w && (w.actresses || w.lists || w.zones));
+  }
+
+  function renderWhitelistNote() {
+    if (!whitelistActive()) {
+      el.whitelistNote.classList.add("hidden");
+      el.whitelistNote.textContent = "";
+      return;
+    }
+    const w = state.whitelist;
+    const kinds = [];
+    if (w.actresses) kinds.push("女优");
+    if (w.lists) kinds.push("清单");
+    if (w.zones) kinds.push("全站标签");
+    el.whitelistNote.innerHTML =
+      `<p class="flex items-start gap-2 text-sm font-medium">` +
+      `<span aria-hidden="true">⚠</span>服务启用了订阅白名单</p>` +
+      `<p class="mt-1.5 leading-relaxed">` +
+      `配置里写了 <code class="font-mono">feeds</code> 段，所以` +
+      `<b class="font-medium text-foreground">没列出的订阅会返回 404</b>` +
+      `（当前受限：${esc(kinds.join(" / "))}）。页面照常把地址交出来，` +
+      `但不在白名单里的那些粘进 qBittorrent 只会得到 404 —— 要订就先把它加进配置。</p>`;
+    el.whitelistNote.classList.remove("hidden");
   }
 
   /** 当前模式需要哪个片库的词表：女优订阅固定 type=0，全站模式就是选的片库。 */
@@ -720,7 +848,31 @@
     el.actressEmpty.classList.remove("hidden");
   }
 
+  /**
+   * /collected 的截断提示。
+   *
+   * 只在服务真的给了 truncated 键时出现 —— 未截断时它是隐藏的，
+   * 不制造一条假的「清单不完整」警告。措辞是「已知不完整」而不是「加载失败」：
+   * 列出来的那些都是对的、可用的，只是不保证是全部。
+   */
+  function renderTruncated() {
+    const t = state.truncated;
+    if (!t) {
+      el.actressTruncated.classList.add("hidden");
+      el.actressTruncated.textContent = "";
+      return;
+    }
+    el.actressTruncated.innerHTML =
+      `<p class="flex items-start gap-2 text-sm font-medium">` +
+      `<span aria-hidden="true">⚠</span>这份清单已知不完整</p>` +
+      `<p class="mt-1.5 leading-relaxed">` +
+      `服务读到第 ${t.pagesFetched} 页就到了翻页上限（${t.maxPages} 页），收藏里可能还有人没列出来。` +
+      `这不是「加载失败」—— 下面列出的都能用，只是不保证是全部。</p>`;
+    el.actressTruncated.classList.remove("hidden");
+  }
+
   function renderActors() {
+    renderTruncated();
     const rows = visibleActors();
     el.actressCount.textContent = String(rows.length);
 
@@ -2239,4 +2391,8 @@
   loadVocabulary();
   loadLists();
   loadCollected();
+  // 服务与上游状态（票 07）：/version 给白名单三类，/readyz 给上游健康。
+  // 两者都不阻塞收藏列表的渲染 —— 状态说完之前页面照常能用。
+  loadVersion();
+  loadReadyz();
 })();

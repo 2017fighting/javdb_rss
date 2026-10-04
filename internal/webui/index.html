@@ -43,6 +43,23 @@
             JavDB 订阅链接
           </h1>
 
+          <!-- 上游状态。它取自服务自己的 /readyz（不是写死的装饰）：
+               /readyz 200 = 上游正常，503 = 上游不可用，且把 /readyz 的原话放进
+               title 里，好让「页面说的」与「探针说的」逐字对得上。
+               小屏隐藏是设计稿的取舍（头部在 375px 放不下它），
+               但**不健康**时内容区还会另起一条说明（见 #upstream-note）。 -->
+          <span
+            id="upstream-chip"
+            class="hidden shrink-0 items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground md:inline-flex"
+            role="status"
+          >
+            <span
+              class="size-1.5 rounded-full bg-foreground"
+              aria-hidden="true"
+            ></span>
+            <span id="upstream-text">正在检查上游…</span>
+          </span>
+
           <div class="ms-auto flex items-center gap-2">
             <div class="flex items-center gap-2">
               <label
@@ -80,6 +97,14 @@
     </header>
 
     <main id="main" class="mx-auto w-full max-w-6xl px-4 pt-4 pb-40 md:px-6">
+      <!-- 白名单生效时的全局提示。没配 feeds 段时**不出现** —— 它说的是一句
+           会让用户去改配置的话，凭一个猜测出现比不出现更坏。 -->
+      <div id="whitelist-note" class="note mb-4 hidden" role="note"></div>
+
+      <!-- 上游不健康时的说明。chip 在小屏是隐藏的，这条保证「不健康」在
+           任何宽度都看得见，而且与 /readyz 的说法一致。 -->
+      <div id="upstream-note" class="note mb-4 hidden" role="note"></div>
+
       <!-- ══════════════════ 收藏女优 ══════════════════ -->
       <section id="panel-actress" aria-labelledby="actress-heading">
         <h2 id="actress-heading" class="sr-only">收藏女优</h2>
@@ -217,6 +242,11 @@
           >
           位 · 勾选后链接进入下方待复制区
         </p>
+
+        <!-- 截断信号。/collected 只在翻页真的触顶时才给 truncated 三个键，
+             所以这条提示也只在那个状态下出现 —— 措辞是「已知不完整」而不是
+             「加载失败」：列出来的这些都能用，只是还有人没列出来。 -->
+        <div id="actress-truncated" class="note mt-3 hidden" role="note"></div>
 
         <div class="mt-2 overflow-hidden rounded-lg border border-border bg-card">
           <div

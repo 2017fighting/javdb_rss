@@ -259,6 +259,18 @@ func (c *Config) AllowsZone(zone string) bool {
 	return false
 }
 
+// WhitelistActive 报告 feeds 白名单段是否**生效**（而不只是放不放行某一条）。
+//
+// AllowsCode / AllowsList / AllowsZone / ActressSub 回答的是「这一条能不能订」；
+// 页面需要的是另一个问题：「这个种类的订阅整体受不受白名单约束」。
+// 两者不能混：一个看得见却一订就 404 的链接，正是页面必须提前说出来的那类静默。
+//
+// 闸门是**整段**的：feeds 段一旦出现，没列出的订阅（不分种类）一律 404。
+// 因此对任何一个种类来说，「白名单是否生效」都等同于「feeds 段在不在」。
+// /version 仍按类各给一个布尔（女优 / 清单 / 全站标签），是为了让页面在将来
+// 改成按类独立放行时不必跟着改 —— 现在它们同值。
+func (c *Config) WhitelistActive() bool { return c.Feeds != nil }
+
 // ActressSub 查询某个女优的白名单条目。
 //
 // 白名单不存在时返回一个空的订阅（放行，参数由 URL 决定）；

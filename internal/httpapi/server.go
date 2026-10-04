@@ -788,10 +788,37 @@ func (w wantSummary) description() string {
 	return b.String()
 }
 
+// whitelistStatus 是 /version 里的白名单状态：受白名单约束的三类订阅各一个布尔。
+//
+// 三类是**页面会渲染出链接**的那三类（女优 / 清单 / 全站标签）。番号链接页面上
+// 没有（它只出现在 README 与配置里），所以不在这里报。
+type whitelistStatus struct {
+	Actresses bool `json:"actresses"`
+	Lists     bool `json:"lists"`
+	Zones     bool `json:"zones"`
+}
+
+// versionBody 是 /version 的响应体。
+//
+// ⚠️ whitelist 三个布尔现在是**同值**的：feeds 段是整段闸门（见
+// config.WhitelistActive）。按类报告是为了让页面不必在闸门粒度变化时跟着改。
+type versionBody struct {
+	Version   string          `json:"version"`
+	Provider  string          `json:"provider"`
+	Whitelist whitelistStatus `json:"whitelist"`
+}
+
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"version":  Version,
-		"provider": s.cfg.Current().Provider,
+	cfg := s.cfg.Current()
+	active := cfg.WhitelistActive()
+	writeJSON(w, http.StatusOK, versionBody{
+		Version:  Version,
+		Provider: cfg.Provider,
+		Whitelist: whitelistStatus{
+			Actresses: active,
+			Lists:     active,
+			Zones:     active,
+		},
 	})
 }
 
