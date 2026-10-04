@@ -105,6 +105,14 @@ func (f *fakeAPI) handler() http.Handler {
 			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"magnets":[
 				{"name":"X","hash":"abc","size":1,"cnsub":false,"hd":true,"files_count":1,"created_at":"09/01/2026"},
 				{"name":"X","hash":"def","size":2,"cnsub":true,"hd":true,"files_count":2,"created_at":"09/02/2026"}]}}`))
+		case strings.HasPrefix(r.URL.Path, "/api/v2/users/review_movies"):
+			// 「想看」清单：第一页一条、第二页空（空页 = 到底）。
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"movies":[]}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"success":1,"action":null,"data":{"movies":[` +
+				`{"id":"m1","number":"KV-328","title":"T","release_date":"2026-09-01","magnets_count":1}]}}`))
 		case strings.HasPrefix(r.URL.Path, "/api/v2/search"):
 			// number 必须与查询的番号**精确匹配** ——
 			// resolveExact 的正确行为就是「匹配不上就报错」。
@@ -555,6 +563,69 @@ func TestBuildSourcePinsSelections(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "\"m1\"") {
 		t.Errorf("磁盘上的 pin 文件应当包含 m1: %s", raw)
+	}
+}
+
+// TestBuildSourceWantListIsWiredAndPinned 是「想看」 feed 在**装配路径**上的验收。
+//
+// 两条断言各有理由：
+//
+//  1. 装配出来的 source 能真的读出这份清单 —— 走的必须是 buildSource 接出来的那条
+//     链（appapi → pin → dedupe），而不是测试里手搋的结构体。这个仓库为此吃过一次
+//     亏：装配漏传 log 时所有单元测试都通过，而线上第一个请求就 panic。
+//  2. 选中的磁链**落进了 pin 文件** —— 这条 feed 会被 qBittorrent 周期轮询，
+//     不钉就是 guid 抖动（同一部片被多下一份，而且没有任何告警）。
+func TestBuildSourceWantListIsWiredAndPinned(t *testing.T) {
+	fake := newFakeAPI()
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token.json")
+	if err := config.SaveToken(tokenPath, oldToken); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf("provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  probe_interval: \"0\"\n",
+		srv.URL, tokenPath)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvToken, "")
+	t.Setenv(config.EnvUsername, "alice")
+	t.Setenv(config.EnvPassword, "s3cret")
+
+	holder, err := config.NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := pin.Open(holder.PinPath())
+	if err != nil {
+		t.Fatalf("打开 pin store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	src, err := buildSource(holder.Current(), holder, st)
+	if err != nil {
+		t.Fatalf("buildSource: %v", err)
+	}
+
+	list, err := src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	if len(list.Works) != 1 {
+		t.Fatalf("得到 %d 部作品，want 1", len(list.Works))
+	}
+	if got := list.Works[0].Magnets; len(got) != 1 || got[0].Infohash != "def" {
+		t.Fatalf("选中 = %+v，应当是那条中文字幕磁链 def", got)
+	}
+	rec, ok := st.Get("m1")
+	if !ok {
+		t.Fatal("「想看」 feed 的选中磁链也应当落进 pin 表")
+	}
+	if rec.Infohash != "def" {
+		t.Errorf("pin 的 infohash = %q, want def", rec.Infohash)
 	}
 }
 

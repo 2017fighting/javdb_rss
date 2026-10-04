@@ -27,7 +27,9 @@ type fakeSource struct {
 	// 就算 pin 表根本没被共享（甚至没被用上）也会「通过」。
 	code    []catalog.Work
 	actress []catalog.Work
-	err     error
+	// want 可单独覆盖「想看」清单的返回。
+	want []catalog.Work
+	err  error
 	// calls 记录被调用的次数，用来验证 dedupe 之外的行为。
 	mu    sync.Mutex
 	calls int
@@ -75,6 +77,14 @@ func cloneWorks(in []catalog.Work) []catalog.Work {
 func (f *fakeSource) ActressName(context.Context, string) (string, error) { return "名字", nil }
 func (f *fakeSource) CollectedActresses(context.Context) (catalog.Collection, error) {
 	return catalog.Collection{}, nil
+}
+
+func (f *fakeSource) WantToWatch(context.Context) (catalog.WantList, error) {
+	f.mu.Lock()
+	f.calls++
+	works := cloneWorks(f.pick(f.want))
+	f.mu.Unlock()
+	return catalog.WantList{Works: works}, f.err
 }
 
 // newStore 打开一个落在临时目录里的 Store。
@@ -346,6 +356,47 @@ func TestWorksWithoutMagnetsPassThrough(t *testing.T) {
 	}
 	if st.Len() != 0 {
 		t.Error("无磁链的作品不该被钉住")
+	}
+}
+
+// TestWantListGoesThroughPinToo 确认「想看」 feed 与番号/女优 feed 走**同一套**钉住。
+//
+// 这条路径同样会被 qBittorrent 周期轮询，而 guid = 选中的 infohash：
+// 不钉就是「上游新增一条普通候选 → 新 guid → 同一部片被下第二份」，
+// 而且没有任何告警。
+func TestWantListGoesThroughPinToo(t *testing.T) {
+	st := newStore(t)
+	inner := &fakeSource{want: []catalog.Work{{
+		ID: "m1", Number: "A-1", Magnets: []catalog.Magnet{magnet("x", false)},
+	}}}
+	src := New(inner, st, DefaultPolicy{})
+
+	first, err := src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := first.Works[0].Magnets[0].Infohash; got != "x" {
+		t.Fatalf("首次选中 = %q, want x", got)
+	}
+	if st.Len() != 1 {
+		t.Fatal("「想看」清单里选中的磁链应当落进 pin 表")
+	}
+
+	// 上游新增一条创建时间更新的**普通**候选 —— 按切换语义不该切。
+	// 若不切换，说明这条路径确实走了 pin，而不是直接透传纯函数的选择。
+	inner.mu.Lock()
+	inner.want = []catalog.Work{{
+		ID: "m1", Number: "A-1",
+		Magnets: []catalog.Magnet{magnet("x", false), magnetAt("newer", false, "09/30/2026")},
+	}}
+	inner.mu.Unlock()
+
+	second, err := src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := second.Works[0].Magnets; len(got) != 1 || got[0].Infohash != "x" {
+		t.Errorf("普通候选的变化不该动 pin，得到 %+v", got)
 	}
 }
 

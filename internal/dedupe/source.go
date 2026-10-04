@@ -92,6 +92,24 @@ func (s *Source) CollectedActresses(ctx context.Context) (catalog.Collection, er
 	return got, nil
 }
 
+// WantToWatch 实现 catalog.Source。
+//
+// 它没有参数，因此所有并发调用合并成一次 —— 与收藏列表同一个理由，而且更划算：
+// 这条清单要翻页 + 逐部拉磁链，而它每 15 分钟就被 qBittorrent 拉一次。
+func (s *Source) WantToWatch(ctx context.Context) (catalog.WantList, error) {
+	v, err, sharedCall := s.group.Do("want", func() (any, error) {
+		return s.inner.WantToWatch(ctx)
+	})
+	if sharedCall {
+		s.shared.Add(1)
+	}
+	if err != nil {
+		return catalog.WantList{}, err
+	}
+	got, _ := v.(catalog.WantList)
+	return got, nil
+}
+
 // do 是两条路由共用的收尾，顺便统计命中情况。
 func (s *Source) do(key string, fn func() ([]catalog.Work, error)) ([]catalog.Work, error) {
 	v, err, sharedCall := s.group.Do(key, func() (any, error) {

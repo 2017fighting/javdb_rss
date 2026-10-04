@@ -32,9 +32,14 @@ type Source struct {
 	// 它是一个完整的 catalog.Collection，因此需要构造截断场景的测试
 	// 可以同时给出 Truncated / PagesFetched / MaxPages，而不是只给一部分。
 	Collected *catalog.Collection
-	// NoToken 为 true 时 CollectedActresses 返回 catalog.ErrNoToken，
-	// 用来验证上层对「没配 token」的处置。
+	// NoToken 为 true 时 CollectedActresses 与 WantToWatch 返回
+	// catalog.ErrNoToken，用来验证上层对「没配 token」的处置。
 	NoToken bool
+	// Want 是 WantToWatch 的返回值；为 nil 时用内置样例。
+	//
+	// 它也是一个完整的 catalog.WantList，因此要构造截断场景的测试
+	// 可以同时给出 Truncated / PagesFetched / MaxPages。
+	Want *catalog.WantList
 }
 
 // 样例数据刻意覆盖三种关键形态，好让端到端跑起来时一眼能看出规则生效：
@@ -138,4 +143,22 @@ func (s *Source) CollectedActresses(_ context.Context) (catalog.Collection, erro
 		{ID: "EvkJ", Name: "河北彩花", VideosCount: 229},
 		{ID: "xyz1", Name: "Another Name", VideosCount: 57},
 	}}, nil
+}
+
+// WantToWatch 实现 catalog.Source。
+//
+// 默认样例刻意包含一部**没有磁链**的作品（sampleNoMagnet）：
+// 「标了想看但还没有种」是这份清单的常态，而它正是 feed 描述里那个计数信号的
+// 唯一来源 —— 样例里少一部，那条路径就没有端到端的兜底。
+func (s *Source) WantToWatch(_ context.Context) (catalog.WantList, error) {
+	if s.NoToken {
+		return catalog.WantList{}, fmt.Errorf("取想看清单: %w", catalog.ErrNoToken)
+	}
+	if s.Err != nil {
+		return catalog.WantList{}, s.Err
+	}
+	if s.Want != nil {
+		return *s.Want, nil
+	}
+	return catalog.WantList{Works: []catalog.Work{sampleWithSub, sampleNoMagnet}}, nil
 }

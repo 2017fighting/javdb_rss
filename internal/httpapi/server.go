@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -62,6 +63,14 @@ func (s *Server) Handler() http.Handler {
 	// 路径段，而我们要容忍结尾的 .xml，因此在这里自己剥。
 	mux.HandleFunc("GET /rss/code/", s.handleCode)
 	mux.HandleFunc("GET /rss/actress/", s.handleActress)
+
+	// 「想看」 feed。它是一张**固定路径**的列表 feed（清单内容由 App 里的标记
+	// 决定，不在 URL 里），因此用精确路径注册而不是前缀剥尾。
+	//
+	// 它刻意**不受 feeds 白名单约束**：那份白名单描述的是「订阅」
+	// （你要订哪些番号/女优），而这张清单的边界由你在 App 里画 ——
+	// 一个会变的列表放不进配置。
+	mux.HandleFunc("GET /rss/want.xml", s.handleWant)
 
 	// 健康检查分两层，分别对应 k8s 的两种探针。这个区分很重要：
 	//
@@ -205,7 +214,7 @@ func (s *Server) handleCollected(w http.ResponseWriter, r *http.Request) {
 	col, err := s.src.CollectedActresses(r.Context())
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "取收藏女优失败", "err", err)
-		writeCollectedError(w, err)
+		writeListError(w, err, "收藏女优")
 		return
 	}
 
@@ -231,15 +240,18 @@ func (s *Server) handleCollected(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// writeCollectedError 把三种失败分开。
+// writeListError 把「读一份需要 token 的 App 清单」的三种失败分开。
 //
-// 关键是**不能返回 200 + 空列表**：那会被理解成「你没收藏任何人」，
-// 而真相是「服务读不到」—— 两者的下一步动作完全不同。
-func writeCollectedError(w http.ResponseWriter, err error) {
+// 关键是**不能返回 200 + 空列表**：那会被理解成「你没收藏任何人」/
+// 「你没标过任何想看」，而真相是「服务读不到」—— 两者的下一步动作完全不同。
+//
+// subject 是要给用户看的清单名（「收藏女优」/「「想看」清单」）。
+// 抽成参数而不是写一份通用文案：含糊的「读取失败」会让用户不知道去 App 里看哪儿。
+func writeListError(w http.ResponseWriter, err error, subject string) {
 	switch {
 	case errors.Is(err, catalog.ErrNoToken):
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "尚未配置 token，读不到 App 里的收藏女优。" +
+			"error": "尚未配置 token，读不到 App 里的" + subject + "。" +
 				"请从 App 导出后配置 app_api.token_file（见 README）。" +
 				"注意：番号订阅与女优订阅不需要 token，不受此影响。",
 		})
@@ -249,9 +261,88 @@ func writeCollectedError(w http.ResponseWriter, err error) {
 		})
 	default:
 		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "读取收藏女优失败：" + err.Error(),
+			"error": "读取" + subject + "失败：" + err.Error(),
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 「想看」 feed
+// ---------------------------------------------------------------------------
+
+// handleWant 服务 GET /rss/want.xml：把 App 里「想看」的作品渲染成订阅源。
+//
+// # 为什么它是一条 feed，而不是像 /collected 那样的发现端点
+//
+// /collected 交出的是一份「你可以订什么」的清单，产物是给人看的；
+// 这里是「我要什么」—— 它是一张**待办**：你在 App 里标一条，等于说
+// 「这部片一有磁链就交给我」。它随上游出现磁链而自动变得可用，因此
+// 天然适合交给 qBittorrent 周期轮询。两者形态不同是刻意的。
+//
+// # 尚无磁链的作品为什么要「说出来」
+//
+// 「标了想看但还没有种」是这份清单的常态（领域定义如此），所以这类作品
+// **不发条目** —— qBittorrent 用不了没有 enclosure 的条目。
+// 但它们也不能静默消失：那会让你以为服务没读到这张清单，或是列表丢了。
+// 因此把两个计数写进 channel 描述，让它在订阅界面上直接看得见。
+// （对照 /collected 用 JSON 字段报截断 —— feed 里没有 JSON 字段可用，
+// 描述就是它唯一的可见通道。）
+func (s *Server) handleWant(w http.ResponseWriter, r *http.Request) {
+	list, err := s.src.WantToWatch(r.Context())
+	if err != nil {
+		s.log.ErrorContext(r.Context(), "取想看清单失败", "err", err)
+		writeListError(w, err, "「想看」清单")
+		return
+	}
+
+	// 尚无磁链的作品选不出任何一条（catalog.Select 返回 false），
+	// feed.Build 会把它们跳过。这里先数一遍，好把「有几部在等磁力」说出来。
+	//
+	// 用 catalog.Select 而不是 len(Magnets)==0 来判：前者就是 feed.Build
+	// 用的同一个判据，两者分头写的话，「跳过」与「计数」会在上游出现怪数据时
+	// （比如候选全带空 infohash）对不上。
+	pending := 0
+	for _, wk := range list.Works {
+		if _, ok := catalog.Select(wk.Magnets); !ok {
+			pending++
+		}
+	}
+	if list.Truncated {
+		// 与 /collected 一样：它不只是文案问题，运维也该在日志里看到
+		// 「清单已经多到读不完了」—— 那意味着要上调上限。
+		s.log.WarnContext(r.Context(), "想看清单超过翻页上限，本 feed 可能不完整",
+			"已读页数", list.PagesFetched, "上限", list.MaxPages, "已读条数", len(list.Works))
+	}
+	if pending > 0 {
+		// debug 级：等磁链是常态而不是故障，因此不占 warn/error。
+		// 用户看的信号在 channel 描述里（见下）。
+		s.log.DebugContext(r.Context(), "想看清单里有尚无磁链的作品，未列入 feed",
+			"想看", len(list.Works), "待磁力", pending)
+	}
+
+	s.renderFeed(w, r, feed.Meta{
+		Title:       "JavDB · 想看",
+		Link:        s.feedURL(r),
+		Description: wantDescription(len(list.Works), pending, list.Truncated, list.MaxPages),
+		Language:    s.cfg.Current().Feed.Language,
+	}, list.Works)
+}
+
+// wantDescription 构造 channel 描述：它同时承担「这份清单有多少条」与
+// 「有多少条还没法下发」两件事。
+//
+// 措辞刻意不用「失败」「错误」—— 尚无磁链是正常状态。必须说清楚的是
+// **它为何没出现在下面**（未列入本 feed），否则用户只会发现条目少了。
+func wantDescription(total, pending int, truncated bool, maxPages int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "App 里「想看」的作品，共 %d 部", total)
+	if pending > 0 {
+		fmt.Fprintf(&b, "；其中 %d 部尚无磁链，未列入本 feed", pending)
+	}
+	if truncated {
+		fmt.Fprintf(&b, "；清单在读取第 %d 页时触顶，可能不完整", maxPages)
+	}
+	return b.String()
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {

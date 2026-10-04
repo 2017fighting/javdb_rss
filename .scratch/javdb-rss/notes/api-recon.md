@@ -128,6 +128,7 @@ T _Z15byteToHexStringPhiPc
 | 当前用户 | `/api/v1/users`、`/api/v1/users/additional` |
 | **App 里收藏的女优** | `/api/v1/users/collected_actors` |
 | 收藏的番号 / 系列 / 片商 / 导演 / 列表 | `/api/v1/users/collected_codes`、`collected_series`、`collected_makers`、`collected_directors`、`collected_lists` |
+| **App 里标了「想看」/「看过」的作品** | `/api/v2/users/review_movies?status=want_watch\|watched`（读）；`POST /api/v1/movies/{id}/reviews`（写，`status=watched` 即标「看过」） |
 | 女优详情 / 列表 / 推荐 | `/api/v1/actors/%s`、`/api/v1/actors`、`/api/v1/actors/recommend` |
 | 女优收藏动作 | `/api/v1/actors/%s/collect_actions` |
 | 最新作品 | `/api/v1/movies/latest` |
@@ -138,6 +139,21 @@ T _Z15byteToHexStringPhiPc
 | 排行榜 / Top | `/api/v1/rankings`、`/api/v1/rankings/actors`、`/api/v1/movies/top` |
 
 完整列表（约 90 条）可由 `strings libapp.so | grep -oE "/api/v[0-9]/[^ \"]*" | sort -u` 复现。
+
+> ⚠️ **「想看」那两行不是从 libapp.so 抽出来的** —— 来源是 MIT 先例项目
+> [`FlanChanXwO/javdb-cli`](https://github.com/FlanChanXwO/javdb-cli)
+> 的 `internal/javdb/appapi/endpoint/user/user.go`（它的 `want`/`watched` 命令就用它）。
+>
+> ✅ **2026-10-04 已用真 token 实测确认（读的那一条）**：
+> `data.movies[]` 的元素就是 `movieSlim` —— id/number/title/release_date/has_cnsub/
+> **magnets_count**（本页实测值里就有一个 0）/origin_title/cover_url/duration/
+> can_play/has_preview_images/has_preview_video/new_magnets/first_magnets/preview_images；
+> **每页 10 条** + `current_page`；空页 = 到底。
+> 同一天该账号的实时数据：**想看共 234 部**（23 页满页 + 第 24 页 4 条，第 25 页空）。
+>
+> ⚠️ **仍未经本仓库实测的是写的那一条**（`POST .../reviews` 标成「看过」，
+> 以及 `DELETE .../reviews/{id}`）—— 那是已停做的主动推送模式要用的，
+> 形状与坑记在 [`want-push-deferred.md`](want-push-deferred.md)。
 
 注意：App 里的「订阅」语义有两处 —— **收藏女优**（`/users/collected_actors`）和 **关注标签**（`/following_tags`）。用户第 4 条需求指的是前者，需在 ticket 06 用真实响应确认。
 

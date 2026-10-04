@@ -15,6 +15,7 @@ import (
 type countingSource struct {
 	codeCalls    atomic.Int64
 	actressCalls atomic.Int64
+	wantCalls    atomic.Int64
 	delay        time.Duration
 	gotParams    []string
 	mu           sync.Mutex
@@ -43,6 +44,12 @@ func (c *countingSource) Actress(_ context.Context, _ string, params url.Values)
 	c.mu.Unlock()
 	time.Sleep(c.delay)
 	return []catalog.Work{{Number: "X-1"}}, nil
+}
+
+func (c *countingSource) WantToWatch(context.Context) (catalog.WantList, error) {
+	c.wantCalls.Add(1)
+	time.Sleep(c.delay)
+	return catalog.WantList{Works: []catalog.Work{{Number: "W-1"}}}, nil
 }
 
 // TestCodeMergesConcurrentIdenticalRequests 是这一层存在的全部理由：
@@ -234,6 +241,9 @@ func (emptySource) ActressName(context.Context, string) (string, error) { return
 func (emptySource) CollectedActresses(context.Context) (catalog.Collection, error) {
 	return catalog.Collection{}, nil
 }
+func (emptySource) WantToWatch(context.Context) (catalog.WantList, error) {
+	return catalog.WantList{}, nil
+}
 
 // truncatedSource 总是报告截断。它复用 emptySource 的空实现，只覆盖需要的一条。
 type truncatedSource struct{ emptySource }
@@ -245,6 +255,62 @@ func (truncatedSource) CollectedActresses(context.Context) (catalog.Collection, 
 		PagesFetched: 20,
 		MaxPages:     20,
 	}, nil
+}
+
+func (truncatedSource) WantToWatch(context.Context) (catalog.WantList, error) {
+	return catalog.WantList{
+		Works:        []catalog.Work{{Number: "W-1"}},
+		Truncated:    true,
+		PagesFetched: 20,
+		MaxPages:     20,
+	}, nil
+}
+
+// TestWantTruncationSurvivesDedupe 是上面那条测试在「想看」清单上的孪生条目。
+//
+// 它与 TestCollectedTruncationSurvivesDedupe 一样，盯的是**装饰器吞掉信号**：
+// dedupe 只转发一部分字段的实现会在这里现形。
+func TestWantTruncationSurvivesDedupe(t *testing.T) {
+	s := New(truncatedSource{})
+	got, err := s.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Truncated {
+		t.Fatal("dedupe 层把截断信号弄丢了")
+	}
+	if got.PagesFetched != 20 || got.MaxPages != 20 {
+		t.Errorf("解释信号的两个字段也应当保留：%+v", got)
+	}
+}
+
+// TestWantMergesConcurrentIdenticalRequests 确认这条无参清单调用也会被合并。
+//
+// 它比收藏列表更值得合并：这条路径要翻页 + 逐部拉磁链，而 qBittorrent
+// 会周期性地拉它。
+func TestWantMergesConcurrentIdenticalRequests(t *testing.T) {
+	inner := &countingSource{delay: 50 * time.Millisecond}
+	s := New(inner)
+
+	const n = 20
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := s.WantToWatch(context.Background()); err != nil {
+				t.Errorf("err = %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := inner.wantCalls.Load(); got != 1 {
+		t.Errorf("上游被调了 %d 次，应当合并成 1 次", got)
+	}
 }
 
 // TestCollectedTruncationSurvivesDedupe 钉住一个容易被装饰器吞掉的信号：

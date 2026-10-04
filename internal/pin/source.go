@@ -87,6 +87,27 @@ func (s *Source) CollectedActresses(ctx context.Context) (catalog.Collection, er
 	return s.inner.CollectedActresses(ctx)
 }
 
+// WantToWatch 实现 catalog.Source。
+//
+// 它**要**钉住 —— 与番号/女优 feed 同一个理由：这条 feed 会被 qBittorrent
+// 当作订阅周期轮询，而「选中哪条磁链」决定 guid。不钉的话，上游候选一变
+// 就会出现一条新 guid，客户端把同一部片再下一份。
+//
+// 尚无磁链的作品（Magnets 为空）在这里无害地穿过：pinOne 没什么可选，
+// 也就不钉任何东西；等它有了磁链，那一次调用才会钉上。
+func (s *Source) WantToWatch(ctx context.Context) (catalog.WantList, error) {
+	list, err := s.inner.WantToWatch(ctx)
+	if err != nil {
+		return catalog.WantList{}, err
+	}
+	works, err := s.pinAll(list.Works)
+	if err != nil {
+		return catalog.WantList{}, err
+	}
+	list.Works = works
+	return list, nil
+}
+
 // pinAll 对一批作品逐个钉住，并在收尾时**一次性**落盘。
 func (s *Source) pinAll(works []catalog.Work) ([]catalog.Work, error) {
 	var stats FlushStats

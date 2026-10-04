@@ -38,6 +38,10 @@ type recordingSource struct {
 	collected       *catalog.Collection
 	collectedErr    error
 	collectedCalled int
+	// 「想看」清单相关的可控制行为
+	want       *catalog.WantList
+	wantErr    error
+	wantCalled int
 	// names 控制 ActressName 的返回；不在表里的 id 返回错误。
 	names map[string]string
 }
@@ -77,6 +81,17 @@ func (r *recordingSource) Actress(_ context.Context, id string, params url.Value
 		return nil, r.err
 	}
 	return r.works, nil
+}
+
+func (r *recordingSource) WantToWatch(context.Context) (catalog.WantList, error) {
+	r.wantCalled++
+	if r.wantErr != nil {
+		return catalog.WantList{}, r.wantErr
+	}
+	if r.want != nil {
+		return *r.want, nil
+	}
+	return catalog.WantList{}, nil
 }
 
 func newTestServer(t *testing.T, cfgYAML string, src catalog.Source) http.Handler {

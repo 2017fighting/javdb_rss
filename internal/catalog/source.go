@@ -50,12 +50,39 @@ type Collection struct {
 	MaxPages     int
 }
 
+// WantList 是「用户在 App 里标记为想看（want_watch）的作品」这份清单的读取结果。
+//
+// 它与 Collection 同构，理由也相同：清单按页拉取，而翻页有一个上限。
+// 一旦想看数超过上限，裸切片无法区分「我就标了这么多」与「服务只读到了
+// 这么多」—— 那正是本服务反复要避免的静默少给数据。Truncated 就是为这条
+// 区分而存在的信号。
+//
+// 与 Collection 的一处**实质区别**：这份清单里的作品可能**还没有磁链候选**。
+// 「想看某部片，但它还没有种」是这份清单的常态，不是错误 —— 因此这里保留
+// 这些作品（Magnets 为空），由上层决定「不渲染进 feed，但要说出来」。
+// 在这一层就把它们丢掉的话，上层连「有几部在等磁力」都算不出来。
+//
+// Truncated 为 false 时它是一份**完整的清单**。
+type WantList struct {
+	// Works 是读到的作品，**顺序即上游给出的顺序**。
+	Works []Work
+	// Truncated 报告上游**确实还有数据而本次没读完**（超过翻页上限）。
+	// 为 true 时 Works 是一份**已知不完整的**清单。
+	//
+	// 语义与 Collection.Truncated 完全一致（不是「达到上限」而是「上限之外
+	// 还有数据」），因此实现方同样必须多探一页来分清两者。
+	Truncated bool
+	// PagesFetched 是实际请求的页数，MaxPages 是当时生效的翻页上限。
+	PagesFetched int
+	MaxPages     int
+}
+
 // ErrNoToken 表示这次操作需要用户从 App 导出的 token，但当前没有配置它。
 //
 // 单独成一个可判定的错误，是因为它的处置方式与别的失败都不同：
 // 不是重试、不是改代码，而是**去 App 里导出一次**。
 // 上层据此返回 503 并在文案里说清楚，而不是静默给一个空列表 ——
-// 空列表会被理解成「你没收藏任何人」。
+// 空列表会被理解成「你没收藏任何人」/「你没标过任何想看」。
 var ErrNoToken = errors.New("此操作需要 token：请从 App 导出后配置 app_api.token_file")
 
 // ErrBadRequest 表示**用户提供的订阅参数不合法**。
@@ -129,4 +156,14 @@ type Source interface {
 	// 实现方必须把 Truncated 置为 true，好让上层能给出「这份清单不完整」
 	// 的信号，而不是静默少给数据。
 	CollectedActresses(ctx context.Context) (Collection, error)
+
+	// WantToWatch 返回用户在 App 里标记为「想看」（want_watch）的作品。
+	//
+	// **需要 token**，理由与处置方式与 CollectedActresses 完全相同：
+	// 没有 token 时必须返回包装了 ErrNoToken 的错误，而不是空清单 ——
+	// 空的想看清单会被理解成「我没标过任何片」。
+	//
+	// 与 CollectedActresses 的差别只有一处：它是 feed 的数据源（不是发现端点），
+	// 因此实现方返回的作品**可能没有磁链候选**，而那不是错误（见 WantList）。
+	WantToWatch(ctx context.Context) (WantList, error)
 }

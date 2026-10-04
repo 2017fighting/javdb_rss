@@ -302,6 +302,16 @@ func (s *appapiSource) CollectedActresses(ctx context.Context) (catalog.Collecti
 	return out, err
 }
 
+func (s *appapiSource) WantToWatch(ctx context.Context) (catalog.WantList, error) {
+	var out catalog.WantList
+	err := s.withRelogin(ctx, func(c *appapi.Client) error {
+		var e error
+		out, e = c.WantToWatch(ctx)
+		return e
+	})
+	return out, err
+}
+
 // withRelogin 发一次请求；若因**凭据失效**失败且配了账号密码，则重登一次并重试。
 //
 // 只对凭据类错误重试（appapi.IsAuthError）：
