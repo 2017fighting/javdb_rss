@@ -135,20 +135,20 @@ check(
 );
 await page.selectOption("#year-select", "2024");
 check(
-  "选年份 -> since= + pages=20（本地筛，强制拉全量）",
+  "选年份 → year= 真上游筛选，且 since 让位（两个一起发会把结果全筛掉）",
   await page.textContent("#tag-url"),
-  `http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=2024-01-01&pages=20`,
+  "http://127.0.0.1:8080/rss/actress/EvkJ.xml?year=2024",
 );
-check("年份提示说明只有下界", (await page.textContent("#year-hint")).includes("下界"), true);
+check("年份提示说明了让位", (await page.textContent("#year-hint")).includes("让位"), true);
 await page.selectOption("#year-select", "");
 
 await page.click('[data-flag="c"]'); // 中文字幕
 await page.click('[data-tag="46"]'); // 顏射
 await page.click('[data-tag="68"]'); // 潮吹（先点 46 后点 68，验证 URL 不按点击顺序）
 check(
-  "标签 URL（分组词表 id + 稳定排序）",
+  "女优 URL 用语义参数（掩码交给服务拼）",
   await page.textContent("#tag-url"),
-  `http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=${today}&filter_by=0%3Aa%3AEvkJ%3Ac%3A%3A&filter_by_tags=46%2C68`,
+  `http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=${today}&main=c&tags=46%2C68`,
 );
 check("已选区可取消", await page.$$eval("#tag-selected [data-unselect]", (n) => n.length), 2);
 
@@ -203,9 +203,14 @@ check(
   `http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=${today}`,
 );
 check(
-  "女优模式下时长禁用（尾部槽位未验证）",
+  "女优模式下时长禁用（App 面板里也没有它）",
   await page.$$eval("#duration-group [data-time]", (n) => n.filter((e) => e.disabled).length),
   4,
+);
+check(
+  "女优模式下月份禁用",
+  await page.$$eval("#month-group [data-time]", (n) => n.filter((e) => e.disabled).length),
+  12,
 );
 // 清掉，免得影响后面的服务地址断言
 if (await page.$("[data-clear-tags]")) await page.click("[data-clear-tags]");

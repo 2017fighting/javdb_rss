@@ -409,13 +409,15 @@
         <div id="tag-time" class="mt-6 rounded-lg border border-border p-4">
           <h3 class="text-xs font-medium text-foreground">时间与时长</h3>
           <p class="mt-2 text-xs leading-relaxed text-muted-foreground">
-            这三组在**全站模式**下是真上游筛选 —— 就是掩码的第 4/5/6 个槽位
-            （抓包反推，逐槽位验过）。在<strong class="font-medium text-foreground"
-              >女优模式</strong
-            >下它们暂时禁用：女优页掩码有没有这几个槽位还没验出来，
-            而把值塞进第 4 段之后一律返回 0 条，**区分不了**「槽位存在但值不对」
-            与「槽位不存在、整条掩码因此无效」。宁可现在不给，也不给一条看着筛过、
-            其实没筛的 feed（服务那侧遇到这种参数直接返回 400）。
+            抓包把两者的能力差**验清楚了**：<strong class="font-medium text-foreground"
+              >全站模式</strong
+            >下年/月/时长各占掩码一个槽位（第 5/7/6 段），三个都能用；
+            <strong class="font-medium text-foreground">女优模式</strong
+            >只有<strong class="font-medium text-foreground">年份</strong>（掩码第 5 段，
+            实测整年生效）—— App 的女优筛选面板里也没有月和时长。
+            月份与时长在女优模式下禁用，服务那侧遇到它们直接返回 400：
+            实测掩码里多写一段会让**年份被静默丢弃**（main 仍生效），
+            那种「看着筛了其实没筛」的 feed 比不给更坏。
           </p>
 
           <div class="mt-4 space-y-3">

@@ -240,24 +240,24 @@ const DURATION_LABEL = {
 
   function tagQuery() {
     const qs = new URLSearchParams();
-    const since = timeSince();
-    if (since) {
-      qs.set("since", since);
-      // 指定了年/月就得把整个片单拉回来再本地筛，一页远远不够。
-      qs.set("pages", "20");
+    // ⚠️ 选了年份就**不能**再带 since：`since` 是本服务的本地过滤，
+    // 而 `year` 是上游筛选。两个一起发的话 since=<今天> 会把 year=2021 的结果
+    // 全部筛掉，表现为「选了年份反而是空的」。年份本身就是范围，链接范围那栏让位。
+    if (state.year) {
+      if (state.tagMode === "all") qs.set("pages", "20");
     } else if (state.tagMode === "all") {
       qs.set("pages", "20");
     } else {
       qs.set("since", todayISO());
     }
 
+    // 主属性、年份、标签都用**语义参数**给服务，让服务去拼掩码 ——
+    // 掩码的段数是有讲究的（多一段会让年份被静默丢弃），不该由前端拼。
     const letters = sortedFlags();
-    if (letters.length) {
-      // 复合掩码，主属性必须逗号分隔；拼在一起上游会静默忽略（服务会拦 400）。
-      qs.set("filter_by", `0:a:${state.picker}:${letters.join(",")}::`);
-    }
+    if (letters.length) qs.set("main", letters.join(","));
+    if (state.year) qs.set("year", state.year);
     const ids = sortedTags().map((t) => t.id);
-    if (ids.length) qs.set("filter_by_tags", ids.join(","));
+    if (ids.length) qs.set("tags", ids.join(","));
     return qs;
   }
 
@@ -621,12 +621,14 @@ const DURATION_LABEL = {
         .join("");
     el.yearSelect.value = state.year ?? "";
     // 月份反过来升序：月份是周期量，按日历排才符合直觉（Jakob's Law）。
+    // 女优模式下禁用 —— App 的面板里没有它，掩码里也没有它的位置。
     el.monthGroup.innerHTML = radioChips(
       "month",
-      state.month,
+      site ? state.month : null,
       (MONTH_GROUP?.tags ?? [])
         .map((t) => ({ value: t.id, label: `${t.name} 月起` }))
-        .sort((a, b) => Number(a.value) - Number(b.value)),
+        .sort((a, b) => Number(a.value) - Number(b.value))
+        .map((o) => ({ ...o, extra: site ? "" : 'disabled aria-disabled="true" title="女优订阅不支持月份"' })),
     );
     // 时长：全站模式可用（掩码第 5 槽）；女优模式禁用 —— 那个槽位还没验出来。
     el.durationGroup.innerHTML = radioChips(
@@ -637,12 +639,12 @@ const DURATION_LABEL = {
         label: DURATION_LABEL[t.id] ?? t.name,
         extra: site
           ? ""
-          : 'disabled aria-disabled="true" title="女优页掩码的尾部语法还没验出来（正在抓包）"',
+          : 'disabled aria-disabled="true" title="女优订阅不支持时长"',
       })),
     );
     el.durationHint.textContent = site
       ? "必须与年份一起给 —— 实测单独给时长的结果与不筛逐条相同（服务那侧会把这种写法定成 400）。"
-      : "女优模式暂时禁用：女优页掩码有没有这几个槽位还没验出来，塞进去只会得到 0 条（区分不了「槽位不存在」与「值不对」）。";
+      : "女优订阅不支持时长（App 的筛选面板里也没有它）。实测掩码里多写一段会让**年份被静默丢弃**，所以服务直接返回 400。";
 
     renderTimeHint();
   }
@@ -660,13 +662,19 @@ const DURATION_LABEL = {
   }
 
   function renderTimeHint() {
-    if (!state.year && !state.month) {
-      el.yearHint.textContent = "不选就是「不限」，链接用上面的链接范围（追新 / 全量）。";
+    if (state.source === "site") {
+      // 全站形态：年/月/时长各占掩码一个槽位。
+      el.yearHint.textContent = state.year
+        ? `掩码第 5 槽 = ${state.year}（实测是**整年**：升序第 1 页是 1 月、降序第 9 页是 12 月）。`
+        : "不选就是「不限」。掩码第 5 槽空着；时长那一排这时不可用（它必须与年份一起给）。";
       return;
     }
-    el.yearHint.textContent =
-      `链接里会用 since=${timeSince()} + pages=20 表达（得把整个片单拉回来才能本地筛）。` +
-      "它是**本地过滤**，而且只有下界：意思是「这个日期起」，不是「只这一段」。";
+    // 女优形态：**只有年份**（掩码第 5 段），而且它一出现，追新那栏就得让位。
+    el.yearHint.textContent = state.year
+      ? `掩码会写成 0:a:${state.picker}:{主属性}:${state.year}，实测是**整年**。` +
+        "⚠️ 这时「链接范围」那栏的追新让位 —— 年份本身就是范围；" +
+        "两个一起发的话，本服务的 since 会把年份的结果全筛掉。"
+      : "不选就是「不限」，链接用上面的链接范围（追新 / 全量）。";
   }
 
   function renderTagSelection() {
