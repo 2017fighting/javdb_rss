@@ -1,6 +1,6 @@
 # Spec — 订阅链接生成器（把已批准的设计稿 promote 成服务自己的页面）
 
-**Status:** ready-for-agent
+**Status:** resolved（2026-10-05 核对：`issues/` 下 8 张票全部 resolved；本次核对是为 followups 票 06 结票）
 **Effort:** `.scratch/javdb-rss-ui/`（设计稿、ui-contract、证据、笔记都在这里）
 **取代:** `.scratch/javdb-rss-followups/issues/06-collected-bulk-picking.md` 的验收清单
 **设计权威:** [`ui-contract.md`](ui-contract.md)（令牌 + 15 条硬规则）；本 spec 不得与它冲突

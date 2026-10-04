@@ -19,7 +19,7 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 03 | 上游契约复勘 | ~~无~~ 已 resolved（2026-10-01） |
 | 04 | 磁链选择：顺序无关还是接受风险 | 无 |
 | 05 | `health` 包与上游细节解耦 | 无 |
-| 06 | 收藏女优的批量挑选 | 无 |
+| 06 | 收藏女优的批量挑选 | ~~无~~ 已 resolved（2026-10-05：由 javdb-rss-ui 交付） |
 | 07 | CI 首次跑通 | ~~需先 push~~ 已 push（resolved） |
 | 08 | 「钉住」磁链的存储与失效 | 无（04 决策新开） |
 | 09 | pin 的切换语义 | 无（04 决策新开） |
@@ -27,8 +27,8 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 11 | 按定稿语义落地 `since` | ~~10~~ 已 resolved（2026-10-05） |
 | 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | ~~无~~ 已 resolved（2026-10-05） |
 
-（01/02/03/04/05/07/08/09/10/11/12 已 resolved，见下 Decisions so far；
-07 为机械验收项，已随 push 关闭。**开着的只剩 06。**）
+（**01–12 全部 resolved，见下 Decisions so far**；
+07 为机械验收项，已随 push 关闭。**本 effort 已全部结票。**）
 
 10–12 的来源与前九张不同：不是 code-review 的「未修」，而是清账时发现的
 **一笔孤儿欠账** —— `since` 的比较语义在初次交付的票 09 里被标成已解决，
@@ -138,6 +138,16 @@ qBittorrent 多下一份文件，而没有任何告警。
   并指向 `CONTEXT.md` 的权威定义（原先那句「剩下可能还要收拾」已从本图的
   `## Not yet specified` 里拿掉）。
   另：原注释写「删掉 6 条」而名单只列 5 条，第 6 条无法复原，如实标注不猜。
+- [收藏女优的批量挑选](issues/06-collected-bulk-picking.md)
+  — **交付不在本 effort 里：由 [`.scratch/javdb-rss-ui/`](../javdb-rss-ui/spec.md) 做的**
+  （UI 的 spec 首页就写着「取代 06 的验收清单」；那 8 张票全部 resolved，含 08 的真实验收：
+  真上游 + 真 token + 真 qBittorrent v5.2.4）。**2026-10-05 结票**，
+  四个框逐条对上，并补了一次**当前时刻**的冒烟（不依赖那几张票的自述）：
+  `GET /` → 200（单页、资产内嵌）；`GET /collected` → 200，**144 位**（女 138 / 男 6，
+  与 UI spec 的用户故事数字一致），元素带 `feed` / `gender` / `id` / `name` / `videos_count`；
+  `truncated` 键**不存在**（未截断，契约「看键在不在」成立）；两个新只读端点
+  `/tags?type=0` 与 `/actress_tags/EvkJ` 均 200。
+  没重跑「往真实 qBittorrent 里粘链接」那一步 —— 08 已经做过，重跑不增加信息。
 
 ## Not yet specified
 
