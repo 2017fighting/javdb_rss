@@ -34,6 +34,12 @@ registry 的账号与凭据。
 - 发布链路必须自带 `make fmt-check / vet / race`：tag 推送**不**触发 `ci.yml`，
   「这个提交绿过」这件事只能在发布这一步重新确立，不能靠假设。
 - 部署侧要钉版本时钉的是全量精度 tag（如 `1.0.0`），升级＝改一行。
+  两份容器部署示例（`deploy/docker-compose.yml`、`deploy/k8s.yaml`）现在都这么写，
+  且两处必须是同一个 tag —— 由 `internal/config/deploy_image_test.go` 守着，
+  因为「一份改了另一份没改」的失败方式是静默的。k8s 那份显式写
+  `imagePullPolicy: IfNotPresent`（对全量精度 tag 本就是默认值）：tag 内容不会变，
+  没必要每次启动都去 registry 问一遍；反过来说，**哪天允许浮动 tag，这一行就得重新想**
+  —— 这是「不推浮动 tag」的附带好处。（systemd 那份跑的是二进制，不涉及镜像。）
 - 镜像里的 `/version` 报告 `v1.0.0`（tag 原文），镜像 tag 是 `1.0.0`（去 v）。
   两种形状是有意的：前者要与源码和本地 `make build` 的说法逐字对得上，
   后者是 docker 的惯例。

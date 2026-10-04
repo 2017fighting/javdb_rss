@@ -5,6 +5,9 @@
 # 应用：
 #   kubectl apply -f deploy/k8s.yaml
 #
+# 镜像来自 GHCR（已发布，public 可匿名拉）—— 本文件不需要你本地有源码或 Docker，
+# 也就不再是那个「写着 javdb-rss:latest 但其实无处可拉」的文件了。
+#
 # 配置直接写在本文件内嵌的 ConfigMap 里（没有单独的配置文件）。
 # 改配置：编辑下面 ConfigMap 的 config.yaml，然后 kubectl apply 一次。
 # 本服务支持 SIGHUP 热重载，但改 ConfigMap 不会重载 Pod —— 需要 rollout restart
@@ -83,7 +86,17 @@ spec:
           type: RuntimeDefault
       containers:
         - name: javdb-rss
-          image: javdb-rss:latest
+          # ⭐ 钉已发布的镜像，**全量精度 tag**，与 deploy/docker-compose.yml 同一个。
+          # 升级 = 改这一行的 tag，再 `kubectl apply -f deploy/k8s.yaml`。
+          # 镜像 tag 是去 v 的（1.0.0），而镜像里的 `/version` 报的是 tag 原文 v1.0.0。
+          image: ghcr.io/2017fighting/javdb-rss:1.0.0
+
+          # 显式写出拉取策略，虽然对全量精度 tag 来说这本来就是默认值：
+          # 全量精度 tag 的内容不会变，没必要每次启动都去 registry 问一遍。
+          # 反过来说 —— 哪天允许浮动 tag 了，这一行就得重新想
+          # （这正是「不推浮动 tag」的一个附带好处）。
+          imagePullPolicy: IfNotPresent
+
           args: ["-config", "/config/config.yaml"]
 
           ports:

@@ -4,7 +4,7 @@
 #   mkdir -p data token state
 #   cp deploy/config.docker.yaml data/config.yaml
 #   # 编辑 data/config.yaml，特别是 base_url
-#   docker compose up -d
+#   docker compose up -d        # 第一次会从 GHCR 拉镜像（包是 public 的，不需要 docker login）
 #   docker compose logs -f
 #
 # 改完配置后重载（不用重启容器）：
@@ -12,12 +12,23 @@
 
 services:
   javdb-rss:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      args:
-        VERSION: "dev"
-    # 也可以用现成镜像：把 build 换成 image: ghcr.io/2017fighting/javdb-rss:latest
+    # ⭐ 钉已发布的镜像，**全量精度 tag**（ADR 0001：不推浮动 tag —— 浮动 tag
+    # 的唯一作用就是让 `docker compose pull` 静默换版本）。部署机因此不需要
+    # 源码与 Go 工具链。
+    #
+    # 升级 = 改这一行的 tag，再 `docker compose up -d`。没有别的开关。
+    # 镜像 tag 是去 v 的（1.0.0），而镜像里的 `/version` 报的是 tag 原文 v1.0.0。
+    image: ghcr.io/2017fighting/javdb-rss:1.0.0
+
+    # 想自己构建镜像的人改用下面这段（删掉上面的 image:），再 `docker compose build`。
+    # 那需要源码与 Go 工具链，也正是本文件默认不再做的事。
+    #
+    # build:
+    #   context: ..
+    #   dockerfile: Dockerfile
+    #   args:
+    #     VERSION: "dev"
+
     container_name: javdb-rss
     restart: unless-stopped
 

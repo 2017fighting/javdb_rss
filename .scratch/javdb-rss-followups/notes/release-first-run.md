@@ -92,11 +92,30 @@ docker run --rm -p 127.0.0.1:18081:8080 \
 curl -s 127.0.0.1:18081/version
 ```
 
+## 票 15 落地后的复核（2026-10-05）
+
+两份容器部署改拉这里发布的镜像后，重新验了一遍「拉得到」。用的是**真**
+`deploy/docker-compose.yml`，在一个**没有源码、没有 Go 工具链**的临时目录里：
+
+```bash
+cp deploy/docker-compose.yml /tmp/check/ && cd /tmp/check
+mkdir -p data token state && cp <repo>/deploy/config.docker.yaml data/config.yaml
+docker compose up -d          # 拉 ghcr.io/2017fighting/javdb-rss:1.0.0
+curl -s 127.0.0.1:8080/version   # → {"version":"v1.0.0",...}
+curl -s 127.0.0.1:8080/healthz   # → ok
+```
+
+容器报 healthy，日志里 `pin 表已加载 path=/state/pin.json 条数=0`。
+k8s 那份仍是同一个坐标（`imagePullPolicy: IfNotPresent`），两处不许漂由
+`internal/config/deploy_image_test.go` 守着。细节见
+[票 15 的 Answer](../issues/15-deploy-pull-ghcr-image.md)。
+
 ## 与其它文档的关系
 
 - 票面与决策表：[`../issues/13-release-image-ghcr.md`](../issues/13-release-image-ghcr.md)
 - 为什么这么发（GHCR、不推浮动 tag、关 provenance）：[`docs/adr/0001`](../../../docs/adr/0001-release-images-to-ghcr.md)
 - 这个文件在 ci.md 里被两处引用（构建上下文那条的「2026-10-05 已修」与
   Node 20 那条的「升级为不一致」）：[`../../javdb-rss/notes/ci.md`](../../javdb-rss/notes/ci.md)
-- 拆出来的两件：[14](../issues/14-unify-action-versions.md)（两套 action 版本）、
-  [15](../issues/15-deploy-pull-ghcr-image.md)（部署还没用上镜像）
+- 拆出来的两件（均已 resolved，2026-10-05）：[14](../issues/14-unify-action-versions.md)（两套 action 版本）、
+  [15](../issues/15-deploy-pull-ghcr-image.md)（部署已改拉已发布镜像：
+  `deploy/docker-compose.yml` 与 `deploy/k8s.yaml` 都钉 `ghcr.io/2017fighting/javdb-rss:1.0.0`）

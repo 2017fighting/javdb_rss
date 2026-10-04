@@ -163,11 +163,16 @@ qBittorrent 只会得到 404。
 
 `deploy/` 下有三套现成的部署方式，**按你用哪套挑一份**：
 
-| 文件 | 场景 |
-|---|---|
-| `deploy/javdb-rss.service` | systemd。已加固（普通系统用户、`ProtectSystem=strict` 只读文件系统、`StateDirectory` 提供可写状态、零 capability） |
-| `deploy/docker-compose.yml` + `deploy/config.docker.yaml` | Docker Compose |
-| `deploy/k8s.yaml` | Kubernetes（含签名失效告警的 CronJob） |
+| 文件 | 场景 | 跑的是什么 |
+|---|---|---|
+| `deploy/javdb-rss.service` | systemd。已加固（普通系统用户、`ProtectSystem=strict` 只读文件系统、`StateDirectory` 提供可写状态、零 capability） | **二进制**（不需要 Docker，见下） |
+| `deploy/docker-compose.yml` + `deploy/config.docker.yaml` | Docker Compose | 已发布的镜像 |
+| `deploy/k8s.yaml` | Kubernetes（含签名失效告警的 CronJob） | 同一个已发布的镜像 |
+
+两处容器部署拉的是 GHCR 上已发布的镜像（坐标与升级方式见下面
+「发版与拉取镜像」那一节）；systemd 那份跑的是**二进制** —— `make build` 产出它
+（部署机因此需要源码与 Go 工具链，但**不需要 Docker**），装到 `/usr/local/bin`。
+三套里只有它在升级时要重新构建那个文件。
 
 三份部署配置共用同一套配置结构，**键集合由
 `internal/config/examples_sync_test.go` 强制一致**（取值可以不同：容器 / k8s
@@ -236,8 +241,25 @@ docker pull ghcr.io/2017fighting/javdb-rss:1.0.0
 逐字对得上，后者是 docker 的惯例。理由与取舍见
 [`docs/adr/0001-release-images-to-ghcr.md`](docs/adr/0001-release-images-to-ghcr.md)。
 
-`deploy/docker-compose.yml` 与 `deploy/k8s.yaml` 目前仍按本地构建/本地镜像名来写；
-想用现成镜像，把 compose 里的 `build:` 段换成 `image:` 即可（文件里已留注释）。
+`deploy/docker-compose.yml` 与 `deploy/k8s.yaml` 都钉着同一个**全量精度 tag**
+（当前的坐标是 `ghcr.io/2017fighting/javdb-rss:1.0.0`）：
+
+```yaml
+image: ghcr.io/2017fighting/javdb-rss:1.0.0
+```
+
+**升级＝改这一行**，然后 `docker compose up -d`（或 `kubectl apply -f deploy/k8s.yaml`，
+Deployment 会自己滚动）。没有别的开关，也没有地方会静默换版本 —— 正因为不推浮动 tag，
+`latest`/`1.0` 这类会自己动的写法在这里是不可选项。k8s 那份显式写着
+`imagePullPolicy: IfNotPresent`（对全量精度 tag 本来就是默认值）：tag 内容不会变，
+没必要每次启动都去 registry 问一遍。两处坐标不许漂，
+由 `internal/config/deploy_image_test.go` 守着。
+
+⚠️ **升级前先确认 pin 状态目录仍可写**（见上面「⭐ pin 的落点」那一节）——
+升级后如果它不可写，服务会**拒绝启动**并报清楚原因。
+
+想自己构建镜像的人：compose 文件里留着被注释掉的 `build:` 段，删掉 `image:`、
+启用它再 `docker compose build` 即可（那需要源码与 Go 工具链，也正是默认不再做的事）。
 
 ## 订阅地址
 

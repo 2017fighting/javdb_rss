@@ -28,13 +28,13 @@ qBittorrent** 上验收过，需求 4 用**真实 token** 跑通过。
 | 12 | 订正决策记录：「ticket 09」歧义与 map 的假解决 | ~~无~~ 已 resolved（2026-10-05） |
 | 13 | tag 推送即发布镜像到 GHCR | ~~无~~ 已 resolved（2026-10-05） |
 | 14 | 统一 action 版本：ci.yml 的 v4/v5 → v7 | ~~无~~ 已 resolved（2026-10-05） |
-| 15 | 三份部署配置改为拉已发布的镜像 | 13 |
+| 15 | 三份部署配置改为拉已发布的镜像 | ~~13~~ 已 resolved（2026-10-05） |
 
-（**01–14 全部 resolved，见下 Decisions so far**；
+（**01–15 全部 resolved，见下 Decisions so far**；
 07 为机械验收项，已随 push 关闭。**13–15 是 2026-10-04 新开的**：
 13 是发版链路本身（2026-10-05 结票），14/15 是它落地时按「记录层不骗人」
-拆出来的两件 —— 14（同一仓库里两套 action 版本并存）同日结票，
-15（镜像有了但部署还没用上）仍开着。）
+拆出来的两件 —— 14（同一仓库里两套 action 版本并存）与 15（镜像有了但部署
+还没用上）均于 2026-10-05 结票。至此该 effort 的票已全部关闭。）
 
 10–12 的来源与前九张不同：不是 code-review 的「未修」，而是清账时发现的
 **一笔孤儿欠账** —— `since` 的比较语义在初次交付的票 09 里被标成已解决，
@@ -172,6 +172,18 @@ qBittorrent 多下一份文件，而没有任何告警。
   验收用差分判据而不是「任务变绿」（升级前也绿）：真 CI run `37226687575`（sha `1cac8f5`）
   8 步全绿，且**同一份日志里弃用警告 0 次**（升级前的 run `37226396921` 是 1 次）。
   顺带复核 ci.md 第 3 条：`ubuntu-latest` **尚未**迁到 26.04，仍解析为 `24.04.5 LTS`。
+- [三份部署配置改为拉已发布的镜像](issues/15-deploy-pull-ghcr-image.md)
+  — **两处容器部署都钉 `ghcr.io/2017fighting/javdb-rss:1.0.0`（全量精度），
+  升级＝改那两行 tag；systemd 那份一行未动，它跑的是二进制。**
+  此前 k8s 里那句 `image: javdb-rss:latest` 是**无处可拉**的，这正是本票的一半理由。
+  两个附带决定：k8s 显式写 `imagePullPolicy: IfNotPresent`（对全量精度 tag 本就是默认值，
+  写出来是为了让「哪天允许浮动 tag 就得重新想」这句话看得见）；**不做**「最新版本是多少」
+  的可见性（本服务是拉取方，没有自更新需求，多加一处版本可见性＝多一处会漂的说法）。
+  额外加了一道防线：[`internal/config/deploy_image_test.go`](../../internal/config/deploy_image_test.go)
+  守两处坐标不漂 + 必须是全量精度形状 + systemd 仍跑二进制（含元测试），
+  测试里不写版本号，所以不构成新的 pin 点。验收用真 compose 文件在**无源码、无 Go 工具链**
+  的临时目录里拉起容器：healthy → `/version` 报 tag 原文 `v1.0.0` → `/healthz` ok →
+  `/readyz` 200，`make fmt-check/vet/test` 全绿。
 - [收藏女优的批量挑选](issues/06-collected-bulk-picking.md)
   — **交付不在本 effort 里：由 [`.scratch/javdb-rss-ui/`](../javdb-rss-ui/spec.md) 做的**
   （UI 的 spec 首页就写着「取代 06 的验收清单」；那 8 张票全部 resolved，含 08 的真实验收：
