@@ -56,7 +56,7 @@ check("没有第三方脚本", await page.$$eval("script[src]", (n) => n.map((e)
 // ── 需求 1：收藏女优，默认只看女优、可切全部、男优被标出来、可搜索 ──
 check("默认只看女优（stub fixture）", await page.textContent("#actress-count"), "2");
 await page.click('[data-gender="all"]');
-check("全部演员 = 3", await page.textContent("#actress-count"), "3");
+check("全部收藏 = 3", await page.textContent("#actress-count"), "3");
 check("男优有标记", (await page.textContent("#actress-list")).includes("男优"), true);
 check("男优被标在那一条上", await page.$eval('[data-row="PpQ0"]', (e) => e.textContent.includes("男优")), true);
 await page.click('[data-gender="female"]');

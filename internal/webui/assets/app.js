@@ -105,8 +105,7 @@
 
   /** 待复制里的每条 URL 都在渲染时现算。 */
   function linkUrl(link) {
-    if (link.kind === "actress") return actressUrl(link.id, link.mode);
-    return "";
+    return actressUrl(link.id, link.mode);
   }
 
   // ─────────────────────────── 复制 ───────────────────────────
@@ -174,10 +173,9 @@
 
   // ────────────────────── 单选框组（分段控件） ──────────────────────
 
-  function radioGroup(container, onPick) {
+  function radioGroup(container, dataKey, onPick) {
     const btns = [...container.querySelectorAll('[role="radio"]')];
-    const value = (b) =>
-      b.dataset.mode ?? b.dataset.gender ?? b.dataset.source ?? b.dataset.tagmode;
+    const value = (b) => b.dataset[dataKey];
     const select = (v, focus) => {
       btns.forEach((b) => {
         const on = value(b) === v;
@@ -334,15 +332,17 @@
 
     if (!rows.length) {
       showEmpty(
-        `<p class="text-sm font-medium">没有匹配的演员</p>
-         <p class="mt-1.5 text-xs text-muted-foreground">换个名字或 id 试试，或者把筛选放宽到「全部演员」。</p>
+        `<p class="text-sm font-medium">没有匹配的收藏</p>
+         <p class="mt-1.5 text-xs text-muted-foreground">换个名字或 id 试试，或者把筛选放宽到「全部收藏」。</p>
          <button class="btn btn-md btn-outline mt-4" type="button" data-reset>重置筛选</button>`,
         "rounded-lg border border-dashed border-border px-4 py-10 text-center",
       );
       el.actressEmpty.querySelector("[data-reset]").addEventListener("click", () => {
         el.actressSearch.value = "";
         state.search = "";
-        selectGender("all");
+        // 走一遍单选组自己的 click，而不是直接改 state —— 否则控件的
+        // aria-checked / tabindex 会与真实筛选不一致（看得见的那个开关在说谎）。
+        el.genderGroup.querySelector('[data-gender="all"]').click();
       });
       syncSelectionSummary();
       return;
@@ -389,21 +389,13 @@
     el.actressStatus.textContent = `已选 ${n} 位 · ${all ? `${all} 条全量（较慢）` : "全部追新"}`;
   }
 
-  /** 待复制里的女优链接**完全由选择推导** —— 没有第二处存 URL 的地方。 */
+  /** 待复制里的链接**完全由选择推导** —— 没有第二处存 URL 的地方。 */
   function syncTray() {
-    const keep = state.links.filter((l) => l.kind !== "actress");
-    const picked = [...state.selected]
+    state.links = [...state.selected]
       .map(actressById)
       .filter(Boolean)
       .sort((a, b) => state.actresses.indexOf(a) - state.actresses.indexOf(b))
-      .map((a) => ({
-        key: `actress:${a.id}`,
-        kind: "actress",
-        id: a.id,
-        mode: modeOf(a.id),
-        label: a.name,
-      }));
-    state.links = [...keep, ...picked];
+      .map((a) => ({ id: a.id, mode: modeOf(a.id), label: a.name }));
     renderTray();
   }
 
@@ -474,9 +466,9 @@
     syncTray();
   }
 
-  radioGroup(el.genderGroup, selectGender);
+  radioGroup(el.genderGroup, "gender", selectGender);
 
-  radioGroup(el.modeGroup, (v) => {
+  radioGroup(el.modeGroup, "mode", (v) => {
     state.mode = v;
     // 默认模式变了，逐行的覆盖就没意义了 —— 清掉，让所有人跟上新默认。
     state.rowMode.clear();
@@ -574,11 +566,6 @@
     state.links = [];
     state.selected.clear();
     state.rowMode.clear();
-    if (el.actressList) {
-      el.actressList.querySelectorAll("[data-actress]").forEach((b) => {
-        b.checked = false;
-      });
-    }
     renderActors();
     renderTray();
     announce("已清空待复制");
@@ -611,7 +598,7 @@
   function renderAll() {
     renderActors();
     syncTray();
-    // 收藏里到底有几位男优 —— 不然「只看女优 / 全部演员」这个开关看上去没由来。
+    // 收藏里到底有几位男优 —— 不然「只看女优 / 全部收藏」这个开关看上去没由来。
     const males = state.actresses.filter((a) => a.gender !== 0).length;
     el.genderLabel.textContent = males ? `收藏里有 ${males} 位男优` : "只看女优";
   }
