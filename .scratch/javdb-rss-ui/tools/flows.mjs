@@ -3,30 +3,22 @@
  *
  *   node tools/flows.mjs <origin>
  *
- * 闸门过了不等于能用。这里把四个需求逐条走一遍，断言生成的 URL
- * **逐字符**等于服务真实契约：
- *   /rss/actress/{id}.xml?since=YYYY-MM-DD
- *   /rss/actress/{id}.xml?pages=20
- *   /rss/actress/{id}.xml?since=…&filter_by=0:a:{id}:c::&filter_by_tags=68,46
- *   /rss/want.xml
+ * 它打的是 **provider=stub 的真服务**，不是 mockup 那份静态设计稿 ——
+ * 于是这些逐字符 URL 断言守的不再是设计稿，而是上线的东西。
+ * stub 的收藏 fixture 是 2 女 + 1 男（EvkJ / D2EdJ / PpQ0），
+ * 因此条数断言用的是 **fixture 的数**，不是真账号的 144。
+ *
+ * 本票（03）覆盖：页面骨架 + 收藏女优区 + 待复制 + 复制回退 + 服务地址。
+ * 标签（04/05）、清单与想看（06）、状态可见性（07）的断言在各自的票里补。
  */
 import { chromium } from "playwright";
 
-const origin = process.argv[2] || "http://localhost:62100";
+const origin = (process.argv[2] || "http://127.0.0.1:8080").replace(/\/+$/, "");
 const executablePath =
   process.env.CHROME_PATH ||
   `${process.env.HOME}/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell`;
 
 const browser = await chromium.launch({ executablePath });
-const ctx = await browser.newContext({
-  viewport: { width: 1440, height: 900 },
-  permissions: ["clipboard-read", "clipboard-write"],
-});
-const page = await ctx.newPage();
-
-// 页面里任何一个 JS 异常都算失败 —— 否则“点了没反应”会被当成“设计如此”。
-const pageErrors = [];
-page.on("pageerror", (e) => pageErrors.push(e.message));
 
 const fails = [];
 const ok = [];
@@ -35,6 +27,18 @@ function check(name, actual, expected) {
   else fails.push(`${name}\n     期望 ${JSON.stringify(expected)}\n     实得 ${JSON.stringify(actual)}`);
 }
 
+async function newPage() {
+  const ctx = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  const page = await ctx.newPage();
+  // 页面里任何一个 JS 异常都算失败 —— 否则「点了没反应」会被当成「设计如此」。
+  page.on("pageerror", (e) => fails.push(`页面抛了异常: ${e.message}`));
+  return { ctx, page };
+}
+
+const { ctx, page } = await newPage();
 const today = await page.evaluate(() => {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
@@ -42,247 +46,144 @@ const today = await page.evaluate(() => {
 });
 
 await page.goto(origin, { waitUntil: "load" });
+await page.waitForSelector("#actress-list [data-actress]");
 
-// ── 需求 1：收藏女优，挑几个，追新 / 全量，一人一条链接 ──
-check("默认只看女优", await page.textContent("#tab-actress-count"), "138");
+// ── 页面骨架：GET / 是页面，资产同源 ──
+const cssHref = await page.getAttribute('link[rel="stylesheet"]', "href");
+check("样式是同源资产", cssHref, "/assets/app.css");
+check("没有第三方脚本", await page.$$eval("script[src]", (n) => n.map((e) => e.getAttribute("src")).join(",")), "/assets/app.js");
+
+// ── 需求 1：收藏女优，默认只看女优、可切全部、男优被标出来、可搜索 ──
+check("默认只看女优（stub fixture）", await page.textContent("#actress-count"), "2");
 await page.click('[data-gender="all"]');
-check("全部演员 = 144", await page.textContent("#tab-actress-count"), "144");
+check("全部演员 = 3", await page.textContent("#actress-count"), "3");
 check("男优有标记", (await page.textContent("#actress-list")).includes("男优"), true);
+check("男优被标在那一条上", await page.$eval('[data-row="PpQ0"]', (e) => e.textContent.includes("男优")), true);
 await page.click('[data-gender="female"]');
+check("切回只看女优", await page.textContent("#actress-count"), "2");
 
 await page.fill("#actress-search", "EvkJ");
-await page.check('[data-actress="EvkJ"]');
-await page.fill("#actress-search", "Mm5v4");
-await page.check('[data-actress="Mm5v4"]');
-await page.click('[data-rowmode="Mm5v4"]'); // Mm5v4 改成全量
+check("可按 id 搜索", await page.textContent("#actress-count"), "1");
+await page.fill("#actress-search", "花守");
+check("可按名字搜索", await page.textContent("#actress-count"), "1");
 await page.fill("#actress-search", "");
+
+// 勾两位：一位追新、一位逐行改成全量
+await page.check('[data-actress="EvkJ"]');
+await page.check('[data-actress="D2EdJ"]');
+await page.click('[data-rowmode="D2EdJ"]'); // D2EdJ 改成全量
 const trayRows = await page.$$eval("#tray-list li code", (n) => n.map((e) => e.textContent));
-check("2 条链接", trayRows.length, 2);
+check("勾两位 → 2 条链接", trayRows.length, 2);
 check(
   "追新 = since=今天",
-  trayRows.includes(`http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=${today}`),
+  trayRows.includes(`${origin}/rss/actress/EvkJ.xml?since=${today}`),
   true,
 );
 check(
-  "全量 = pages=20",
-  trayRows.includes("http://127.0.0.1:8080/rss/actress/Mm5v4.xml?pages=20"),
+  "全量 = pages=20（逐行覆盖）",
+  trayRows.includes(`${origin}/rss/actress/D2EdJ.xml?pages=20`),
+  true,
+);
+check(
+  "待复制里的 URL 不含掩码（掩码只由服务构造）",
+  trayRows.every((u) => !u.includes("filter_by") && !u.includes("filter_by_tags")),
   true,
 );
 
 // 默认模式切全量：逐行覆盖要被清掉，所有人跟上
 await page.click('[data-mode="all"]');
 const afterMode = await page.$$eval("#tray-list li code", (n) => n.map((e) => e.textContent));
+check("切默认模式后逐行覆盖被清掉", afterMode.every((u) => u.endsWith("?pages=20")), true);
+await page.click('[data-mode="new"]');
 check(
-  "切默认模式后逐行覆盖被清掉",
-  afterMode.every((u) => u.endsWith("?pages=20")),
+  "切回默认追新后所有人跟上",
+  (await page.$$eval("#tray-list li code", (n) => n.map((e) => e.textContent))).every((u) =>
+    u.endsWith(`?since=${today}`),
+  ),
   true,
 );
-await page.click('[data-mode="new"]');
 
 // 服务地址改一行，所有链接当场跟上（不用重新生成）
 await page.fill("#base-url", "http://192.168.2.186:8080/");
 await page.waitForTimeout(50);
 const afterBase = await page.$$eval("#tray-list li code", (n) => n.map((e) => e.textContent));
-check(
-  "换服务地址后链接重算",
-  afterBase.every((u) => u.startsWith("http://192.168.2.186:8080/")),
-  true,
-);
-await page.fill("#base-url", "http://127.0.0.1:8080");
-await page.waitForTimeout(50);
+check("换服务地址后链接重算", afterBase.every((u) => u.startsWith("http://192.168.2.186:8080/")), true);
 
-// ── 需求 2：想看，单独一个复制按钮 ──
-await page.click("#tab-want");
-check("想看 URL", await page.textContent("#want-url"), "http://127.0.0.1:8080/rss/want.xml");
-await page.click("#want-copy");
+// 逐条复制：内容 + 「已复制 ✓」反馈（行在折叠面板里，先展开）
+await page.click("#tray-toggle");
+await page.click("#tray-list [data-copy-row]");
 await page.waitForTimeout(120);
-check("想看复制内容", await page.evaluate(() => navigator.clipboard.readText()), "http://127.0.0.1:8080/rss/want.xml");
-check("复制后有反馈", (await page.textContent("#want-copy")).includes("已复制"), true);
+check("逐条复制内容", await page.evaluate(() => navigator.clipboard.readText()), `http://192.168.2.186:8080/rss/actress/EvkJ.xml?since=${today}`);
+check("复制后有反馈", (await page.textContent("#tray-list [data-copy-row]")).includes("已复制"), true);
 
-// ── 需求 3：标签选择器（女优 × 标签），按上游分组，最多 5 个 ──
-await page.click("#tab-tags");
-await page.fill("#actress-picker", "河北彩花（EvkJ）");
-await page.dispatchEvent("#actress-picker", "change");
-check("基本组来自上游词表", await page.$$eval("#main-flags [data-flag]", (n) => n.map((e) => e.dataset.flag).join(",")), "p,m,c,s,i,v");
-check(
-  "分组与名称原样取自上游",
-  await page.$$eval("#tag-groups details summary span:first-child", (n) => n.map((e) => e.textContent).join(",")),
-  "主題,角色,服裝,體型,行爲,玩法,類別",
-);
-check(
-  "年份/月份/時長 不作为可点标签出现（它们走本地过滤那一节）",
-  await page.$$eval("#tag-groups details", (n) => n.map((e) => e.dataset.group).join(",")),
-  "subject,role,cloth,body,behavior,play_method,category",
-);
-check("默认全部折叠（与 App 一致）", await page.$$eval("#tag-groups details[open]", (n) => n.length), 0);
-await page.click("#tag-expand");
-check(
-  "全部展开按钮生效",
-  await page.$$eval("#tag-groups details[open]", (n) => n.length),
-  7,
-);
-
-// 年/月/时长：上游没有通道，改成服务本地过滤
-check(
-  "年份是原生 select（26 个选项不铺成 chip）",
-  await page.$$eval("#year-select option", (n) => n.slice(0, 3).map((e) => e.textContent.trim()).join(",")),
-  "不限,2026 年,2025 年",
-);
-check(
-  "月份按日历升序，且标签写明只有下界",
-  await page.$$eval("#month-group [data-time]", (n) => n.slice(0, 4).map((e) => e.textContent.trim()).join(",")),
-  "不限,1 月,2 月,3 月",
-);
-await page.selectOption("#year-select", "2024");
-check(
-  "选年份 → year= 真上游筛选，且 since 让位（两个一起发会把结果全筛掉）",
-  await page.textContent("#tag-url"),
-  "http://127.0.0.1:8080/rss/actress/EvkJ.xml?year=2024",
-);
-check("年份提示说明了让位", (await page.textContent("#year-hint")).includes("让位"), true);
-check(
-  "年份选项不带「起」—— 它是精确的一年，不是下界",
-  (await page.$$eval("#year-select option", (n) => n.map((e) => e.textContent).join(","))).includes("起"),
-  false,
-);
-check(
-  "月份选项不带「起」",
-  (await page.$$eval("#month-group [data-time]", (n) => n.map((e) => e.textContent).join(","))).includes("起"),
-  false,
-);
-await page.selectOption("#year-select", "");
-
-await page.click('[data-flag="c"]'); // 中文字幕
-await page.click('[data-tag="46"]'); // 顏射
-await page.click('[data-tag="68"]'); // 潮吹（先点 46 后点 68，验证 URL 不按点击顺序）
-check(
-  "女优 URL 用语义参数（掩码交给服务拼）",
-  await page.textContent("#tag-url"),
-  `http://127.0.0.1:8080/rss/actress/EvkJ.xml?since=${today}&main=c&tags=46%2C68`,
-);
-check("已选区可取消", await page.$$eval("#tag-selected [data-unselect]", (n) => n.length), 2);
-
-// 触顶：第 6 个点不动，并且说明为什么
-for (const id of [48, 148, 161]) await page.click(`[data-tag="${id}"]`);
-check("标签上限 5", await page.textContent("#tag-count"), "5");
-check("触顶后第 6 个被禁用", await page.isDisabled('[data-tag="212"]'), true);
-check("触顶有解释", (await page.textContent("#tag-empty")).includes("已经选满 5 个"), true);
-check("每组带已选计数", (await page.textContent("#tag-groups")).includes("已选"), true);
-
-// 全站模式：标签走**掩码槽位**（抓包反推的那条），不是 filter_by_tags
-await page.click('[data-source="site"]');
-check("片库四选一", await page.$$eval("#zone-group [data-zone]", (n) => n.length), 4);
-// 先清掉女优模式留下的选择，才谈得上「裸」URL
-await page.click("[data-clear-tags]");
-await page.click('[data-flag="c"]');
-check(
-  "裸全站 URL 自动带上 m（不发它上游返回的全都没有磁链）",
-  await page.textContent("#tag-url"),
-  "http://127.0.0.1:8080/rss/tags/0.xml?main=m",
-);
-check(
-  "全站词汇表包含 7 个可筛组共 307 个标签（折叠时也在 DOM 里）",
-  await page.$$eval("#tag-groups [data-tag]", (n) => n.length),
-  307,
-);
-// 全站模式下 年/月/时长 全部可用。先选回 c，验证 m 是被「并进去」而不是覆盖。
-await page.click('[data-flag="c"]');
-if (await page.$$eval("#tag-groups details:not([open])", (n) => n.length)) {
-  await page.click("#tag-expand");
-}
-await page.click('[data-tag="68"]');
-await page.click('[data-tag="46"]');
-await page.selectOption("#year-select", "2020");
-await page.click('#month-group [data-value="3"]');
-await page.click('#duration-group [data-value="gt-120"]');
-await page.click('#zone-group [data-zone="2"]');
-check(
-  "全站完整 URL（掩码的六个槽位齐了）",
-  await page.textContent("#tag-url"),
-  "http://127.0.0.1:8080/rss/tags/2.xml?main=c%2Cm&tags=46%2C68&year=2020&month=3&duration=gt-120",
-);
-check("全站模式下时长可用（0 个禁用）", await page.$$eval("#duration-group [data-time]", (n) => n.filter((e) => e.disabled).length), 0);
-
-// 切回女优模式：时间维度清空（它们在那条 URL 上根本不出现），并禁用
-await page.click('[data-flag="c"]');
-await page.click("[data-clear-tags]");
-await page.click('[data-source="actress"]');
-// 年份**留着**（两种模式都支持），月份与时长清掉（女优订阅没有它们）。
-check(
-  "切回女优模式：年份留着，月份/时长清掉",
-  await page.textContent("#tag-url"),
-  "http://127.0.0.1:8080/rss/actress/EvkJ.xml?year=2020",
-);
-check(
-  "女优模式下时长禁用（App 面板里也没有它）",
-  await page.$$eval("#duration-group [data-time]", (n) => n.filter((e) => e.disabled).length),
-  4,
-);
-check(
-  "女优模式下月份禁用",
-  await page.$$eval("#month-group [data-time]", (n) => n.filter((e) => e.disabled).length),
-  12,
-);
-// 清掉，免得影响后面的服务地址断言
-if (await page.$("[data-clear-tags]")) await page.click("[data-clear-tags]");
-
-// ── 需求 4：清单（后端已实现），每份清单一条可复制的链接 ──
-await page.click("#tab-lists");
-check("5 份真实清单", await page.$$eval("#list-cards li", (n) => n.length), 5);
-check(
-  "清单按钮可用（路由已经做了）",
-  await page.$$eval("#list-cards [data-list-copy]", (b) => b.every((x) => !x.disabled)),
-  true,
-);
-check(
-  "清单 feed 路径",
-  await page.$eval("#list-cards code", (e) => e.textContent),
-  "http://127.0.0.1:8080/rss/list/k4EVE4.xml",
-);
-check("默认清单有标记", (await page.textContent("#list-cards")).includes("默认"), true);
-await page.click("#list-cards [data-list-copy]");
+// 复制全部：换行分隔的整串
+await page.click("#tray-copy-all");
 await page.waitForTimeout(120);
-check(
-  "清单复制内容",
-  await page.evaluate(() => navigator.clipboard.readText()),
-  "http://127.0.0.1:8080/rss/list/k4EVE4.xml",
-);
-await page.click("#list-cards [data-list-add]");
-check(
-  "清单加入待复制",
-  await page.$$eval("#tray-list code", (n) => n.some((e) => e.textContent.includes("/rss/list/"))),
-  true,
-);
-// 清掉，免得影响后面的服务地址断言
-await page.click("#tray-clear");
+const all = await page.evaluate(() => navigator.clipboard.readText());
+check("复制全部给的是换行分隔整串", all.split("\n").length, 2);
 
 // ── 复制回退：非安全上下文（局域网 http）下 navigator.clipboard 不存在 ──
-await page.click("#tab-want");
 const fallback = await page.evaluate(async () => {
-  const real = Object.getOwnPropertyDescriptor(Navigator.prototype, "clipboard");
   Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
   let used = "";
   document.execCommand = (cmd) => {
     used = cmd;
     return true;
   };
-  document.getElementById("want-copy").click();
+  document.getElementById("tray-copy-all").click();
   await new Promise((r) => setTimeout(r, 80));
-  if (real) Object.defineProperty(Navigator.prototype, "clipboard", real);
   return used;
 });
 check("剪贴板不可用时走 execCommand 回退", fallback, "copy");
 
-// ── 状态：空收藏 / 没 token，文案要指向下一步动作 ──
-await page.goto(origin + "#state=notoken", { waitUntil: "load" });
-const notoken = await page.textContent("#actress-empty");
-check("没 token 时提到 token_file", notoken.includes("token_file"), true);
-check("没 token 时说明订阅不受影响", notoken.includes("不需要 token"), true);
-await page.goto(origin + "#state=empty", { waitUntil: "load" });
-check("空收藏是一个独立的说法", (await page.textContent("#actress-empty")).includes("收藏列表是空的"), true);
+// 刷新后：选择与待复制**不复活**，服务地址仍在。
+await page.fill("#base-url", "http://192.168.2.186:8080");
+await page.waitForTimeout(50);
+await page.reload({ waitUntil: "load" });
+await page.waitForSelector("#actress-list [data-actress]");
+check("刷新后服务地址还在", await page.inputValue("#base-url"), "http://192.168.2.186:8080");
+check("刷新后待复制是空的", await page.textContent("#tray-count"), "0");
+check("刷新后选择不复活", await page.$$eval("#actress-list [data-actress]:checked", (n) => n.length), 0);
+await page.fill("#base-url", origin);
 
-if (pageErrors.length) {
-  fails.push(`页面抛了异常: ${pageErrors.join(" | ")}`);
+// ── 清空：待复制的唯一性 ──
+await page.check('[data-actress="EvkJ"]');
+check("勾选后待复制有 1 条", await page.textContent("#tray-count"), "1");
+await page.click("#tray-clear");
+check("清空后待复制为空", await page.textContent("#tray-count"), "0");
+check("清空后选择也松掉", await page.$$eval("#actress-list [data-actress]:checked", (n) => n.length), 0);
+await ctx.close();
+
+// ── 状态：读不到收藏时，照实说服务给的那句话（不是空列表） ──
+// 服务的 /collected 在没 token 时返回 503 + 那句指向 token_file 的话。
+// stub provider 没有 token 概念，所以这里用路由拦截喂**真实服务的那段文案**
+// （服务自己那侧由 internal/httpapi 的测试覆盖），验的是页面照实呈现它。
+const notokenBody = {
+  error:
+    "尚未配置 token，读不到 App 里的收藏女优。请从 App 导出后配置 app_api.token_file（见 README）。" +
+    "注意：番号订阅与女优订阅不需要 token，不受此影响。",
+};
+
+for (const [name, status, body, markers] of [
+  ["没 token", 503, notokenBody, ["token_file", "不需要 token"]],
+  ["上游出错", 502, { error: "读取收藏女优失败：上游炸了" }, ["上游炸了"]],
+  ["空收藏", 200, { actresses: [] }, ["收藏列表是空的"]],
+]) {
+  const { ctx: c, page: p } = await newPage();
+  await p.route("**/collected", (route) =>
+    route.fulfill({
+      status,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify(body),
+    }),
+  );
+  await p.goto(origin, { waitUntil: "load" });
+  await p.waitForFunction(() => !document.getElementById("actress-empty").classList.contains("hidden"));
+  const text = await p.textContent("#actress-empty");
+  for (const m of markers) {
+    check(`${name} 时页面说出「${m}」`, text.includes(m), true);
+  }
+  await c.close();
 }
 
 await browser.close();

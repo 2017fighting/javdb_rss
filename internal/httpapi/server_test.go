@@ -389,7 +389,7 @@ func TestRouting(t *testing.T) {
 		{"/rss/actress/EvkJ.xml", http.StatusOK},   //
 		{"/healthz", http.StatusOK},                //
 		{"/version", http.StatusOK},                //
-		{"/", http.StatusNotFound},                 // 没有首页
+		{"/", http.StatusOK},                       // 订阅链接生成器页面（票 03）
 		{"/rss/nope/x.xml", http.StatusNotFound},   //
 	}
 	for _, tt := range tests {

@@ -51,8 +51,8 @@ func TestCollectedReturnsTheList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("不是合法 JSON: %v\n%s", err, rec.Body.String())
 	}
-	if len(got.Actresses) != 2 {
-		t.Fatalf("得到 %d 条，want 2", len(got.Actresses))
+	if len(got.Actresses) != 3 {
+		t.Fatalf("得到 %d 条，want 3", len(got.Actresses))
 	}
 	a := got.Actresses[0]
 	if a.ID != "EvkJ" || a.Name != "河北彩花" || a.VideosCount != 229 {

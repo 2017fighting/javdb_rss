@@ -21,6 +21,7 @@ import (
 	"github.com/2017fighting/javdb_rss/internal/config"
 	"github.com/2017fighting/javdb_rss/internal/feed"
 	"github.com/2017fighting/javdb_rss/internal/health"
+	"github.com/2017fighting/javdb_rss/internal/webui"
 )
 
 // Version 是 /version 端点报告的服务版本，构建时用 -ldflags 注入。
@@ -55,6 +56,16 @@ func (s *Server) WithUpstream(t *health.Tracker) *Server {
 // Handler 返回完整的 HTTP 处理器。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// 订阅链接生成器页面。它是服务自己的一个端点（资产 embed 进二进制，
+	// 不依赖 Node、不依赖 CDN），数据来自下面那些发现端点。
+	//
+	// ⚠️ 只注册在**精确的根路径**上（Go 1.22 的 `{$}`），资产走 /assets/ 前缀。
+	// 不能用 `GET /` 当通配：那会把 /rss/want 这类打错的 feed 路径喂成 HTML
+	// 页面，而 qBittorrent 只会说「这不是一个 feed」—— 用户看到的是
+	// 「服务坏了」，而不是「我的 URL 少了个 .xml」。打错的 feed 仍必须是干净的 404。
+	mux.HandleFunc("GET /{$}", webui.Page)
+	mux.HandleFunc("GET "+webui.AssetsPath, webui.Assets)
 
 	// 发现端点 —— **不是 feed**。刻意放在 /rss/ 之外、也不带 .xml，
 	// 因为它的产物是给人看的清单（拿去填配置或 URL），qBittorrent 不会碰它。

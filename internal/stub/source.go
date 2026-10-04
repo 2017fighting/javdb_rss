@@ -168,9 +168,13 @@ func (s *Source) CollectedActresses(_ context.Context) (catalog.Collection, erro
 	if s.Collected != nil {
 		return *s.Collected, nil
 	}
+	// 样例里刻意**有一位男优**：页面「只看女优 / 全部演员」那个开关接的就是
+	// /collected 的 gender 字段，离线 fixture 少了男优，那条路就没法在
+	// 浏览器套件里被验到。名字/条数取自真实收藏的一小截（见 evidence）。
 	return catalog.Collection{Actresses: []catalog.Actress{
-		{ID: "EvkJ", Name: "河北彩花", VideosCount: 229},
-		{ID: "xyz1", Name: "Another Name", VideosCount: 57},
+		{ID: "EvkJ", Name: "河北彩花", VideosCount: 229, Gender: catalog.GenderFemale},
+		{ID: "D2EdJ", Name: "花守夏歩", VideosCount: 179, Gender: catalog.GenderFemale},
+		{ID: "PpQ0", Name: "森林原人", VideosCount: 3345, Gender: catalog.GenderMale},
 	}}, nil
 }
 

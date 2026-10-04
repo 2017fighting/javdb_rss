@@ -8,11 +8,14 @@
  *   2. 量触摸目标尺寸（WCAG 2.5.8 AA ≥24px）。
  *   3. 量焦点可见性、横向溢出、reduced-motion 是否被尊重。
  * 结果算在代码里，不靠「看起来不错」。
+ *
+ * 它打的是 **provider=stub 的真服务**。票 03 只有「收藏女优」一个分区，
+ * 因此这里只跑这一屏；标签（04/05）、清单与想看（06）的分区在各自的票里补回来。
  */
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
 
-const origin = process.argv[2] || "http://localhost:62100";
+const origin = (process.argv[2] || "http://127.0.0.1:8080").replace(/\/+$/, "");
 const axe = readFileSync(
   process.env.AXE_PATH ||
     "/Users/raincore/.pi/agent/npm/node_modules/axe-core/axe.min.js",
@@ -36,14 +39,15 @@ for (const width of [375, 768, 1440]) {
     });
     const page = await ctx.newPage();
     await page.goto(origin, { waitUntil: "load" });
+    await page.waitForSelector("#actress-list [data-actress]");
     if (theme === "dark") {
       await page.evaluate(() => document.documentElement.classList.add("dark"));
     }
 
-    // ── 1. axe：四个分区都跑一遍，因为一次只显示一个 ──
+    // ── 1. axe：空态与填满态都跑一遍 ──
+    // 空页面过闸门而填满后不过，是这种页面最容易漏的一种。
     await page.addScriptTag({ content: axe });
-    for (const tab of ["#tab-actress", "#tab-tags", "#tab-lists", "#tab-want"]) {
-      if (tab !== "#tab-actress") await page.click(tab);
+    const axeRun = async (label) => {
       const res = await page.evaluate(async () =>
         await window.axe.run(document, {
           runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"] },
@@ -55,46 +59,16 @@ for (const width of [375, 768, 1440]) {
           .map((n) => `${n.target.join(" ")} :: ${(n.html || "").slice(0, 90)}`)
           .join(" || ");
         failures.push(
-          `axe[${width}/${theme}] ${tab} ${v.id} (${v.impact}) ×${v.nodes.length}: ${v.help} — ${nodes}`,
+          `axe[${width}/${theme}] ${label} ${v.id} (${v.impact}) ×${v.nodes.length}: ${v.help} — ${nodes}`,
         );
       }
-    }
+    };
+    await axeRun("initial");
 
-    // 后面几项都在第一个分区上量（一个分区一次只显示一个）
-    await page.click("#tab-actress");
-
-    // 先造出「有内容」的状态：选中的行、已选的 chip、展开的待复制面板。
-    // 空页面过闸门而填满后不过，是这种页面最容易漏的一种。
-    for (const id of ["EvkJ", "Mm5v4"]) await page.check(`[data-actress="${id}"]`);
+    // 先造出「有内容」的状态：选中的行 + 展开的待复制面板。
+    for (const id of ["EvkJ", "D2EdJ"]) await page.check(`[data-actress="${id}"]`);
     await page.click("#tray-toggle");
-
-    const populated = await page.evaluate(async () =>
-      await window.axe.run(document, {
-        runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"] },
-      }),
-    );
-    for (const v of populated.violations) {
-      failures.push(
-        `axe-populated[${width}/${theme}] ${v.id} (${v.impact}) ×${v.nodes.length}: ${v.help}`,
-      );
-    }
-
-    await page.click("#tab-tags");
-    await page.click('[data-flag="c"]');
-    // 分组默认折叠（与 App 一致），所以先展开再选。
-    await page.click("#tag-expand");
-    for (const id of [68, 46, 48]) await page.click(`[data-tag="${id}"]`);
-    const tagState = await page.evaluate(async () =>
-      await window.axe.run(document, {
-        runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"] },
-      }),
-    );
-    for (const v of tagState.violations) {
-      failures.push(
-        `axe-tags-selected[${width}/${theme}] ${v.id} (${v.impact}) ×${v.nodes.length}: ${v.help}`,
-      );
-    }
-    await page.click("#tab-actress");
+    await axeRun("populated");
 
     // ── 2. 触摸目标尺寸（WCAG 2.5.8 AA ≥24px）──
     // 两个例外照实算，不当成违规：
@@ -149,47 +123,28 @@ for (const width of [375, 768, 1440]) {
     // ── 4. 一屏一个主操作（Von Restorff + H8）──
     // 分两个区域算：内容区（视图）与固定工具条（待复制）。两个区域各最多一个，
     // 但刻意允许共存 —— 规则写在 ui-contract.md 里。
-    const primaries = [];
-    for (const tab of ["#tab-actress", "#tab-tags", "#tab-lists", "#tab-want"]) {
-      await page.click(tab);
-      const n = await page.evaluate(() => {
-        const vis = [...document.querySelectorAll('[class*="btn-primary"]')].filter(
-          (e) => e.offsetParent !== null,
-        );
-        const inTray = vis.filter((e) => e.closest(".fixed")).length;
-        return { view: vis.length - inTray, tray: inTray };
-      });
-      if (n.view > 1) primaries.push(`${tab} 内容区 ×${n.view}`);
-      if (n.tray > 1) primaries.push(`${tab} 工具条 ×${n.tray}`);
-    }
-    if (primaries.length) {
-      failures.push(`主操作不止一个 [${width}/${theme}]: ${primaries.join(", ")}`);
-    }
-    await page.click("#tab-actress");
-
-    // ── 5. 横向溢出（WCAG 1.4.10 reflow）—— 每个分区都量 ──
-    const overflow = [];
-    for (const tab of ["#tab-actress", "#tab-tags", "#tab-lists", "#tab-want"]) {
-      await page.click(tab);
-      const o = await page.evaluate(() => ({
-        doc: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        wide: [...document.querySelectorAll("body *")]
-          .filter((e) => e.getBoundingClientRect().width > window.innerWidth + 1)
-          .map((e) => `${e.tagName.toLowerCase()}#${e.id || "-"}`)
-          .slice(0, 5),
-      }));
-      if (o.doc > 1) overflow.push(`${tab} +${o.doc}px (${o.wide.join(", ")})`);
-    }
-    if (overflow.length) {
-      failures.push(`横向溢出 [${width}/${theme}]: ${overflow.join(" | ")}`);
-    }
-    await page.click("#tab-actress");
-
-    // ── 5. reduced-motion 是否被尊重 ──
-    const motion = await page.evaluate(() => {
-      const e = document.querySelector("#tray-copy-all");
-      return getComputedStyle(e).transitionDuration;
+    const primaries = await page.evaluate(() => {
+      const vis = [...document.querySelectorAll('[class*="btn-primary"]')].filter(
+        (e) => e.offsetParent !== null,
+      );
+      const inTray = vis.filter((e) => e.closest(".fixed")).length;
+      return { view: vis.length - inTray, tray: inTray };
     });
+    if (primaries.view > 1) failures.push(`主操作不止一个 [${width}/${theme}]: 内容区 ×${primaries.view}`);
+    if (primaries.tray > 1) failures.push(`主操作不止一个 [${width}/${theme}]: 工具条 ×${primaries.tray}`);
+
+    // ── 5. 横向溢出（WCAG 1.4.10 reflow）──
+    const o = await page.evaluate(() => ({
+      doc: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      wide: [...document.querySelectorAll("body *")]
+        .filter((e) => e.getBoundingClientRect().width > window.innerWidth + 1)
+        .map((e) => `${e.tagName.toLowerCase()}#${e.id || "-"}`)
+        .slice(0, 5),
+    }));
+    if (o.doc > 1) failures.push(`横向溢出 [${width}/${theme}]: +${o.doc}px (${o.wide.join(", ")})`);
+
+    // ── 6. reduced-motion 是否被尊重 ──
+    const motion = await page.evaluate(() => getComputedStyle(document.querySelector("#tray-copy-all")).transitionDuration);
     notes.push(`reduced-motion transitionDuration [${width}/${theme}] = ${motion}`);
 
     await ctx.close();
