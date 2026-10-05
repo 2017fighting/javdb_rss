@@ -17,7 +17,7 @@
 | 01 | [home-ops 应用注册](issues/01-home-ops-registration.md) | ~~02~~ 已 resolved（2026-10-05） |
 | 02 | [app 侧 `/metrics`](issues/02-app-metrics-endpoint.md) | 无 |
 | 03 | [ADR 0002/0003 与文档](issues/03-docs-adr-0002-0003.md) | 01 |
-| 04 | [真实验收（含人工步骤）](issues/04-real-acceptance.md) | 01 02 03 |
+| 04 | [真实验收（含人工步骤）](issues/04-real-acceptance.md) | ~~01 02 03~~ 已 resolved（2026-10-05） |
 
 01 依赖 02：`VMPodScrape` 打不到不存在的端点，先有 `/metrics` 再谈采集。
 04 排最后：它的判据就是前三个的产物。
@@ -98,6 +98,10 @@
 
 - **词表：`CONTEXT.md` 补了三条**（`上游` / `签名常量` / `上游健康`，新增 `### 访问上游`）。
   `上游` 是补欠账：全仓库都在用它，从未定义过。
+
+**四张票全部 resolved（2026-10-05）**，服务已在集群里跑着：一行 App Registry、
+一行 edge-sso、`apps/javdb-rss/` 八个文件，镜像 `1.1.0`，页面对人走 SSO、
+feed 对机器走集群内的名，告警真的响过一次（邮件已确认）。
 
 ## 与其它 effort 的关系
 
