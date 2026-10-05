@@ -230,7 +230,7 @@ git push origin v1.0.0
 两个平台是否真的都推上去了，写在那次 Actions run 的摘要里。
 
 ```bash
-docker pull ghcr.io/2017fighting/javdb-rss:1.0.0
+docker pull ghcr.io/2017fighting/javdb-rss:1.1.0
 ```
 
 包是 **public** 的（与仓库一致：用仓库自己的 `GITHUB_TOKEN` 推的包会继承仓库的
@@ -242,10 +242,10 @@ docker pull ghcr.io/2017fighting/javdb-rss:1.0.0
 [`docs/adr/0001-release-images-to-ghcr.md`](docs/adr/0001-release-images-to-ghcr.md)。
 
 `deploy/docker-compose.yml` 与 `deploy/k8s.yaml` 都钉着同一个**全量精度 tag**
-（当前的坐标是 `ghcr.io/2017fighting/javdb-rss:1.0.0`）：
+（当前的坐标是 `ghcr.io/2017fighting/javdb-rss:1.1.0`）：
 
 ```yaml
-image: ghcr.io/2017fighting/javdb-rss:1.0.0
+image: ghcr.io/2017fighting/javdb-rss:1.1.0
 ```
 
 **升级＝改这一行**，然后 `docker compose up -d`（或 `kubectl apply -f deploy/k8s.yaml`，
@@ -767,7 +767,7 @@ javdb_rss_upstream_ok                          0      # 最近一次是否成功
 javdb_rss_upstream_signature_broken            1      # 是否「要改代码」那一类
 javdb_rss_upstream_last_check_timestamp_seconds …
 javdb_rss_upstream_check_latency_seconds       …
-javdb_rss_build_info{version="v1.0.0"}          1
+javdb_rss_build_info{version="v1.1.0"}          1
 ```
 
 ⚠️ **告警要匹配 `signature_broken == 1`，不要用 `ok == 0`。** `ok == 0` 有两种含义：

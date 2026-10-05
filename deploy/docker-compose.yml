@@ -17,8 +17,8 @@ services:
     # 源码与 Go 工具链。
     #
     # 升级 = 改这一行的 tag，再 `docker compose up -d`。没有别的开关。
-    # 镜像 tag 是去 v 的（1.0.0），而镜像里的 `/version` 报的是 tag 原文 v1.0.0。
-    image: ghcr.io/2017fighting/javdb-rss:1.0.0
+    # 镜像 tag 是去 v 的（1.1.0），而镜像里的 `/version` 报的是 tag 原文 v1.1.0。
+    image: ghcr.io/2017fighting/javdb-rss:1.1.0
 
     # 想自己构建镜像的人改用下面这段（删掉上面的 image:），再 `docker compose build`。
     # 那需要源码与 Go 工具链，也正是本文件默认不再做的事。

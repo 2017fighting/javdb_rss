@@ -90,8 +90,8 @@ spec:
         - name: javdb-rss
           # ⭐ 钉已发布的镜像，**全量精度 tag**，与 deploy/docker-compose.yml 同一个。
           # 升级 = 改这一行的 tag，再 `kubectl apply -f deploy/k8s.yaml`。
-          # 镜像 tag 是去 v 的（1.0.0），而镜像里的 `/version` 报的是 tag 原文 v1.0.0。
-          image: ghcr.io/2017fighting/javdb-rss:1.0.0
+          # 镜像 tag 是去 v 的（1.1.0），而镜像里的 `/version` 报的是 tag 原文 v1.1.0。
+          image: ghcr.io/2017fighting/javdb-rss:1.1.0
 
           # 显式写出拉取策略，虽然对全量精度 tag 来说这本来就是默认值：
           # 全量精度 tag 的内容不会变，没必要每次启动都去 registry 问一遍。
