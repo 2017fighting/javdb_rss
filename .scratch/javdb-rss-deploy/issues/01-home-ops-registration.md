@@ -5,7 +5,7 @@
 
 **Blocked by:** [02 — app 侧 `/metrics`](02-app-metrics-endpoint.md)（`VMPodScrape` 要有端点可打）
 
-**Status:** in-progress（2026-10-05：清单已落地并通过本地校验；等推送 + reconcile + 健康）
+**Status:** claimed（2026-10-05：清单已落地并通过本地校验；等推送 + reconcile + 健康）
 
 - [x] `namespace.yaml` —— `prune: disabled` 标签**必须**有（少了它，将来一次 prune 就能删掉整个 namespace）
 - [x] `kustomization.yaml` —— resources 按创建顺序；`components: [../../infrastructure/components/edge-parentref]`；
@@ -106,5 +106,21 @@
    `extra[@]: unbound variable` 警告），**都不影响结论**；跑法是 `JOBS=8 bash scripts/validate.sh`。
    没有顺手改它 —— 与本票无关。
 
-**还没做的（都等推送）**：bridge 文件的生与死、`flux reconcile resourceset app-registry`、
-以及健康检查。推送是对 live 集群的变更，因此停在这里等确认。
+**还没做的（都等推送）**：bridge 文件已经**在提交里**（它必须先于 operator 那一轮落地），
+剩下的是它的**拆**：健康之后删掉它，再 reconcile 一次。加上 `flux reconcile resourceset
+app-registry` 与三处健康检查。推送是对 live 集群的变更，因此停在这里等确认。
+
+## 评审（两轴，2026-10-05）
+
+`/code-review`，固定点 `HEAD~1`（就这一个提交），子代理互不污染。
+
+| 轴 | 结论 | 处置 |
+|---|---|---|
+| Spec | 缺 pod 级 `defaultPodOptions.securityContext`（票面第 36 行要求照 `deploy/k8s.yaml`） | **接受并修**：补 `runAsUser/runAsGroup/fsGroup 10001` + `fsGroupChangePolicy: OnRootMismatch` + `seccompProfile`（pod 级），容器级只留 `allowPrivilegeEscalation` / `readOnlyRootFilesystem` / `drop ALL`。`fsGroup` 不是仪式：`/state` 是 NFS 后备的 PVC，而这个组合是 `lldap` 给同一类卷用的那一对 |
+| Spec | `home-ops/CONTEXT.md` 的 Edge SSO Consumers 未同步 | 有意延后 —— 票面写着「只在那一行真的落进 `edge-sso.yaml` 之后改」。它随**拆 bridge 的那个提交**一起落 |
+| Spec | bridge 文件「提前」进 diff（与票面「还没做」矛盾） | 误报：文件必须在提交里才能先于 operator 那一轮落地。票面措辞已订正（上面） |
+| Standards | 裸写 `ADR-0002` 与 home-ops 自己的 `0002-traefik-v3-gateway-api-mode.md` **撞号** | **接受并修**：四处引用全限定为 `javdb_rss ADR-0002` / `javdb_rss ADR-0003`（含 app-registry 那行注释） |
+| Standards | 清单本身违反 add-app 约定？ | 无：`valuesFrom`、容器端口命名、探针、prune-disabled、无 `namespace:` 都被判为合规 |
+
+**评审后重跑**：`kustomize build` + `JOBS=8 bash scripts/validate.sh`（34 resources 全 Valid、
+CONSISTENCY LINT OK）+ `oxfmt --check .` 全绿。
