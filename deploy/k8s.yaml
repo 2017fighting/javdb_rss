@@ -1,6 +1,8 @@
 # kubernetes 部署示例。
 #
-# 这个文件把 ticket 02 做的健康检查三端点用对了 —— 那是它存在的主要理由。
+# 这个文件把 ticket 02 做的健康检查用对了 —— 那是它存在的主要理由。
+# （第 4 个端点 /metrics 见 apps/javdb-rss/ 那份 Flux 部署与 docs/adr/0003；
+#   本文件保留 CronJob 的形状，因为它是「没有监控栈时」的可移植答案。）
 #
 # 应用：
 #   kubectl apply -f deploy/k8s.yaml

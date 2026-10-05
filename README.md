@@ -711,13 +711,16 @@ qBittorrent 订到，你得在配置里显式改 `listen:` —— 让「暴露�
 
 ## 健康检查（k8s）
 
-服务暴露三个端点，分别对应不同的故障处置：
+服务暴露四个端点，分别对应不同的读者与故障处置：
 
-| 端点 | 用途 | 上游坏了时 |
-|---|---|---|
-| `/healthz` | **存活**。只回答「进程还在吗」 | **仍然 200** |
-| `/readyz` | **就绪**。上游不可用则 503 | 503 |
-| `/healthz/upstream` | 机读详情（供 CronJob / 告警） | 503 + JSON |
+| 端点 | 读者 | 用途 | 上游坏了时 |
+|---|---|---|---|
+| `/healthz` | 编排器 | **存活**。只回答「进程还在吗」 | **仍然 200** |
+| `/readyz` | 编排器 | **就绪**。上游不可用则 503 | 503 |
+| `/healthz/upstream` | **人** | 机读详情（带 `next_step` 这类自然语言） | 503 + JSON |
+| `/metrics` | **告警规则** | Prometheus 文本格式（可查询、有历史） | 一条 gauge 翻成 1 |
+
+后两者读的是**同一个 `health.Tracker` 快照** —— 多一个消费者不等于多一份真相。
 
 ```yaml
 livenessProbe:
@@ -755,6 +758,26 @@ readinessProbe:
 
 告警规则建议匹配 `signature_broken: true` —— 它表示**要改代码，不是重试**。
 普通网络故障不算在内（避免半夜被叫起来改一个其实只需要重试的东西）。
+
+### `/metrics` 上的那一组序列
+
+```
+javdb_rss_upstream_checked                     1      # 是否跑过至少一次检查
+javdb_rss_upstream_ok                          0      # 最近一次是否成功
+javdb_rss_upstream_signature_broken            1      # 是否「要改代码」那一类
+javdb_rss_upstream_last_check_timestamp_seconds …
+javdb_rss_upstream_check_latency_seconds       …
+javdb_rss_build_info{version="v1.0.0"}          1
+```
+
+⚠️ **告警要匹配 `signature_broken == 1`，不要用 `ok == 0`。** `ok == 0` 有两种含义：
+「刚启动、还没检查过」与「真的坏了」，而服务启动时它就是 0 —— 拿它报警会在每次
+重启时制造一次假报。要分开这两种含义，得看 `checked`（它为此单独成一条）。
+`last_check_timestamp_seconds` 与 `check_latency_seconds` 在**从未检查过时不出现**：
+报 0 等于说「1970 年检查过」，而 staleness 类的规则正是拿这个字段算的。
+
+除了上面这些，`/metrics` 还带 **Go 运行时与进程收集器**（`go_*` / `process_*`）：
+本服务是「挂上就不管」的那一类，goroutine、内存、GC、fd 是排查时白拿的材料。
 
 探针间隔由 `app_api.probe_interval` 控制，设 `0` 关闭。
 

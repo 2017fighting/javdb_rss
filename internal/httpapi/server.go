@@ -113,10 +113,16 @@ func (s *Server) Handler() http.Handler {
 	//                     liveness 失败会导致重启循环。
 	//   /readyz           就绪探针。上游签名坏了就 503，把实例从 Service
 	//                     endpoints 里摘掉，但**不重启**。
-	//   /healthz/upstream 详情 JSON，给 k8s CronJob 或告警系统抓。
+	//   /healthz/upstream 详情 JSON，给人与 k8s CronJob 抓。
+	//   /metrics          同一份状态的机读形状，给**告警规则**（VM / Prometheus）。
+	//
+	// 后两者读的是同一个 health.Tracker 快照 —— 多一个消费者不等于多一份真相。
+	// 告警只应该认 /metrics（可查询、有历史），而 /healthz/upstream 的 JSON
+	// 是给人看的（它带 next_step 这种自然语言）。
 	mux.HandleFunc("GET /healthz", s.handleLiveness)
 	mux.HandleFunc("GET /readyz", s.handleReadiness)
 	mux.HandleFunc("GET /healthz/upstream", s.handleUpstreamDetail)
+	mux.Handle("GET /metrics", s.metricsHandler())
 	mux.HandleFunc("GET /version", s.handleVersion)
 
 	return mux
