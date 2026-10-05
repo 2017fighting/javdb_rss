@@ -34,7 +34,10 @@
   ② `sidecar-*` 那套 authelia `bypass`（能让一个域名同时服务人和集群内客户端，
   但要改 authelia 的**全局** access_control，且本服务的能见度从此挂在一条 bypass 上）；
   ③ 只 ClusterIP 不做路由（上一轮整个 UI effort 的成果就只能 port-forward 打开）。
-  顺带：新增 HTTPRoute **只让名字在 LAN 内**解析（Cluster DNS 从集群状态派生），
+  顺带：`feed.base_url` 取的是一个**与消费端订阅时相同的字符串**
+  （`http://javdb-rss.javdb-rss.svc.cluster.local:8080`）—— 它只是 feed 的自指，
+  不是人用的页面（代价：在浏览器里点它会死，人用的入口是那个 SSO 页面）。
+  新增 HTTPRoute **只让名字在 LAN 内**解析（Cluster DNS 从集群状态派生），
   隧道的公网 Caddy 上没有这条路由 ⇒ 互联网访问 404（实测口径见
   `home-ops/apps/netspeed/httproute.yaml` 的注释）。
 

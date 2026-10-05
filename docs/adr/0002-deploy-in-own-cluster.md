@@ -45,7 +45,15 @@ pin 落一个 `truenas-nfs-retain` 的 PVC，且**它没有恢复点**。坐标�
 
 - **集群外订不了 feed。** 这是选定的取舍，不是缺陷：要改就是一次有意识的动作
   （加一条 authelia `bypass`，或为 feed 单开一条不加 filter 的路由）。
-  `<link>` 仍然是那个人用域名（`feed.base_url`），因为它只用于 channel 的 `<link>`。
+- **`base_url` 是「feed 被消费的地址」，不是人用的页面。** channel 的 `<link>` 自称
+  `http://javdb-rss.javdb-rss.svc.cluster.local:8080` —— 与 qbittorrent-private 订阅时用的
+  **同一个字符串**，因此这份 feed 不会自称一个它唯一的机器消费端解析不了的名字。
+  代价已接受：在浏览器里点那个链接会死（LAN 里的浏览器解析不了 `.svc.cluster.local`），
+  而人用的入口是那个走 SSO 的页面 —— 它是一个书签，不是这个链接。
+  ⚠️ 第一版写的是 `https://javdb-rss.raenzo.com`（「人用的域名」），当天改成现在这个值：
+  那一步把「人能不能点」当成了 `<link>` 的职责，而它其实是 **feed 的自指**。
+  范围很小：item 的 link 恒为 magnet、`guid` 恒为 infohash，而**取 feed 用的是客户端
+  自己填的地址**（`feedURL()` 只是把 base_url 前缀到请求路径上）。
 - **pin 的账是空的。** CSI 的 `datasetPath` 是 `nova/k8s`，而仓里声明的两条宿主快照任务
   （`nova/data`、`nova/important/app`）**不覆盖它**；集群里也没有 VolSync/restic 之类
   通用 PVC 备份；cnpg 的 Recovery point 只覆盖数据库卷。丢了就按规则重选磁链，

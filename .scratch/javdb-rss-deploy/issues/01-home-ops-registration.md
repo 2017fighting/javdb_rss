@@ -14,7 +14,11 @@
       add-app 模板里的 `<app>-env` 是环境变量，本服务要的是**配置文件**；
       而 `TZ` 不需要 —— 全仓库没有一处 `time.Local`/`LoadLocation`）：
       `listen: 0.0.0.0:8080`（容器里 127.0.0.1 连不上）、
-      `base_url: https://javdb-rss.raenzo.com`（它只用于 channel 的 `<link>`，全代码两处）、
+      `base_url: http://javdb-rss.javdb-rss.svc.cluster.local:8080`（它只用于 channel 的 `<link>`，
+      全代码两处）—— ⚠️ **票面最初写的是 `https://javdb-rss.raenzo.com`，落地当天改成了现在这个值**：
+      把「人能不能点」当成了 `<link>` 的职责，而它其实是 **feed 的自指**，而这份 feed 的
+      唯一机器消费端解析不了 raenzo.com 之外的名字，也解析不了 `.svc`（反过来同样成立）。
+      理由与代价记在 ADR-0002。
       `token_file` **留空 + 注释**说明 token 走 `JAVDB_TOKEN`、
       `pin_file: /state/pin.json`、`device_uuid` 留空（留空不是随机：transport 的默认值是一个固定常量）、
       `lang: zh-CN`、`magnet_concurrency: 8`、`probe_interval: 15m`
