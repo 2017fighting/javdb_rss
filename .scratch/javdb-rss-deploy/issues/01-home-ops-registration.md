@@ -86,7 +86,7 @@
 | 检查 | 结果 |
 |---|---|
 | `kustomize build apps/javdb-rss` | 7 个对象；`parentRefs` 由 edge-parentref 组件补上（`traefik`/`networking`/`websecure`） |
-| `JOBS=8 bash scripts/validate.sh` | 34 resources / 6 files 全部 Valid，`CONSISTENCY LINT: OK (31 apps)` |
+| `bash scripts/validate.sh` | **279 resources / 53 files 全部 Valid**，`CONSISTENCY LINT: OK (31 apps)`。⚠️ 这个数字是**修复闸门之后**才拿到的，见文末「一次记录订正」—— 当时那句「34 resources / 6 files」是**假的**（脚本在 macOS 上只渲染出 6 个 root 就说全绿） |
 | `oxfmt --check .` | 310 files 全部已格式化 |
 | `sops -d …` 往返 + oxfmt 前后 diff | 解出 `Secret/javdb-rss-secret` + `JAVDB_TOKEN`（115 字符），**格式化前后解密内容 byte-identity** |
 | 渲染细节 | `valuesFrom: javdb-rss-workload-profile`；容器端口 `http/8080`；探针 `/healthz` + `/readyz`；`state` → `truenas-nfs-retain` 64Mi；envFrom `javdb-rss-secret`；VMRule `== 1, for: 1h, warning` |
@@ -149,5 +149,27 @@ run `37266722480` 全绿，镜像 `1.1.0` 两个架构、`latest` 指向同一�
 | Standards | 裸写 `ADR-0002` 与 home-ops 自己的 `0002-traefik-v3-gateway-api-mode.md` **撞号** | **接受并修**：四处引用全限定为 `javdb_rss ADR-0002` / `javdb_rss ADR-0003`（含 app-registry 那行注释） |
 | Standards | 清单本身违反 add-app 约定？ | 无：`valuesFrom`、容器端口命名、探针、prune-disabled、无 `namespace:` 都被判为合规 |
 
-**评审后重跑**：`kustomize build` + `JOBS=8 bash scripts/validate.sh`（34 resources 全 Valid、
-CONSISTENCY LINT OK）+ `oxfmt --check .` 全绿。
+**评审后重跑**：`kustomize build` + `bash scripts/validate.sh`（**279 resources / 53 files 全 Valid**、
+CONSISTENCY LINT OK，见下节）+ `oxfmt --check .` 全绿。
+
+## 一次记录订正（2026-10-05，同日）
+
+本票原先写着「`JOBS=8 bash scripts/validate.sh` → 34 resources / 6 files 全部 Valid」。
+那句话的**数字是错的，而且是错得有价值的那种**：当时 home-ops 的 `scripts/validate.sh`
+在 macOS 自带的 bash 3.2 下有两个只在这类机器上发作的毛病 ——
+
+1. `JOBS="${JOBS:-$(nproc)}"`：`nproc` 来自 coreutils，macOS 没有 → `set -e` 以 127 退出；
+2. `kustomize build "${extra[@]}"` 在**空数组**上被 bash 3.2 + `set -u` 判成未绑定变量，
+   而 `render_root` 跑在后台子 shell 里，那个错误**杀掉了 render，却没让脚本失败**。
+
+后果：53 个 build root 里 47 个死在子 shell，kubeconform 只看了剩下 6 个，
+然后打印 `VALIDATE: all kustomizations render + conform, consistency lint green` 并以 0 退出。
+我引用的「34 resources / 6 files」正是那 6 个幸存的 root 的 Summary 行 ——
+也就是说，**当时的「全绿」有 47/53 是空转**。
+
+已修（home-ops `a8c26c2`：`detect_jobs` 走 nproc → `getconf _NPROCESSORS_ONLN` → 4；
+空数组改用 `${arr[@]+"${arr[@]}"}` 并写明原因），修后全量跑是
+**279 resources in 53 files, Invalid: 0** —— 结论没变，但证据终于是真的了。
+
+本票自己的那条直接证据（`kustomize build apps/javdb-rss` + 渲染结果的逐项核对）
+**不受影响**：那是直接跑的，不是靠这个脚本。
