@@ -508,7 +508,84 @@ guid 跨轮询逐条不变；磁链能被它的引擎接受（`success_count: 1`
 
 这不是可以绕过的小事，它决定了下面每个选择。
 
-### 本地：登录一次
+---
+
+### 从手机导出：不踢手机（推荐）
+
+如果**手机还要继续用这个账号**，那就别跑 `login`，改把手机 App 正在用的那串 token
+搬过来 —— 服务于是用的就是手机那**一个**会话，谁也不踢谁。
+
+先说清楚为什么不能「把数据目录 pull 下来再解」：**那是密文，离线解不开。**
+它落在 `shared_prefs/FlutterSharedPreferences.xml` 的 `flutter.accessToken`
+（176 base64 字符 / 131 字节），密钥在 Android KeyStore 里 ——
+`classes.dex` 里有 `AndroidKeyStore` / `KeyGenParameterSpec$Builder` /
+`AES/GCM/NoPadding` / `KeyStore$SecretKeyEntry`，设备侧的 `native.xml` 里只有两个
+**别名**（`KEY_ALIAS` / `TOKEN_ALIAS`）。KeyStore 的密钥永不出 TEE，所以那不是
+「工作量问题」而是**做不到**，不要在上面花时间。
+
+明文只在进程内存里出现过 —— App 得把它放进 `authorization: Bearer …` 请求头。
+所以做法就是读那份内存。仓库里带了这个工具（纯 shell，不需要 Frida）：
+
+```bash
+# 扫一个已经在跑的 App
+./scripts/export-phone-token.sh
+# adb 看到多个设备时（同一台手机 USB + 无线调试）钉住一个
+./scripts/export-phone-token.sh --serial 4b0350c4
+# App 没在跑就先起它；装在私密空间要带 --user
+./scripts/export-phone-token.sh --launch --user 10
+```
+
+它会打印 token、并把 payload 解出来给你核对；**不写盘、不碰网络**，也不替你决定 token
+落到哪儿，用完删掉推上去的临时脚本。实测约 16 秒。
+
+它怎么工作：App 必须把 token 放进 `authorization: Bearer …` 请求头，所以明文一定会在
+进程内存里出现一次 —— 脚本按 `/proc/<pid>/maps` 逐区 `dd` 读 `/proc/<pid>/mem`，用
+**一条有界的** HS256 模式把 JWT 抠出来（写成 `A|B|C` 交替会让 toybox 的 grep 退化约
+10 倍：6m09s vs 16s）。前置条件只有两个：**root 的手机**（读别的进程的内存是 root-only）
+和 adb。
+
+怎样认哪串是对的：**三段式 + 签名段恰好 43 字符**，且把第二段解出来应当是
+`{"id":…,"username":…}`（脚本已经替你做了这件事）：
+
+```bash
+printf '%s' '<token 的第二段>' | tr '_-' '/+' | base64 -d 2>/dev/null
+# {"id":1234567,"username":"123456789"}
+```
+
+这条模式**不会**误伤本服务读到的另外那些 base64（话题列表、域名 blob）—— 它们不含 `.`，
+三段式对不上。实测（Xiaomi 13 / Android 15 / Magisk）命中且仅命中一条。
+
+拿到之后写进去（脚本刻意不替你写 —— token 是凭据，落盘与否由你决定）：
+
+```bash
+# 方式 A：token.json（与 config.yaml 同目录，权限 0600）
+printf '{"token":"%s"}\n' '<上面那串>' > token.json && chmod 600 token.json
+
+# 方式 B：环境变量（优先级高于文件）
+export JAVDB_TOKEN='<上面那串>'
+```
+
+两个容易卡住的点：
+
+- **adb 看见多个设备**（同一台手机同时插着 USB 又开了无线调试）时每条命令都要指定设备，
+  否则报 `more than one device/emulator`：`adb -s <serial> …`，或导出 `ANDROID_SERIAL`。
+- **App 装在私密空间**（小米「第二空间」之类）时数据在 `/data/user/10/` 而不是
+  `/data/data/`，启动也要带上 user：`adb shell am start --user 10 -n $PKG/$PKG.MainActivity`。
+
+导出之后验证（这一步**不会碰手机**：探针读到已配置 token 时不会登录）：
+
+```bash
+unset JAVDB_USERNAME JAVDB_PASSWORD          # ⚠️ 否则 token 读不到时它会自己登录、把你手机踢掉
+go run ./cmd/contractprobe collected
+# 开头应当打印「使用已配置的 token（不会碰你的手机会话）」
+```
+
+完整的证据链（为什么密文解不开、为什么这条路与 `login` 是二选一）在
+`.scratch/javdb-rss/notes/auth.md` 的「从 App 里挖 token」。
+
+---
+
+### 本地：登录一次（会把你手机挤下线）
 
 ```bash
 javdb-rss login -config config.yaml

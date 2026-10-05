@@ -21,7 +21,7 @@
 | 来源 | 优先级 | 场景 |
 |---|---|---|
 | 环境变量 `JAVDB_TOKEN` | **高** | 正式部署（k8s Secret / docker `env_file`）。容器里不方便挂可写文件 |
-| `app_api.token_file`（默认 `token.json`） | 低 | 本地开发；由 `javdb-rss login` 写入 |
+| `app_api.token_file`（默认 `token.json`） | 低 | 本地开发；由 `javdb-rss login` 写入**或由从手机导出后写进去**（见文末「从 App 里挖 token」） |
 
 环境变量优先是刻意的：它是更明确的那一个。**空白的值不算「设置了」** ——
 否则一个空的 env（compose 里写了但没填）会把文件里本来可用的 token 顶掉。
@@ -159,9 +159,9 @@ token **不会自己过期**（见上）。所以它失效的唯一原因就是
 设了 JAVDB_PASSWORD  -> 自动续期，但每次续期都会踢掉手机
 ```
 
-## 为什么没有做「从 App 里挖 token」
+## 从 App 里挖 token：做了什么、当初为什么没做、现在怎么做（2026-10-05）
 
-用户最初选的是「手工从 App 导出 token」。核实后发现那条路比想象中贵：
+用户最初选的是「手工从 App 导出 token」。核实后那条路被**搁置**，理由当时写得是：
 
 - App 同时用了 `shared_preferences` / `hive` / `sqflite` 三种存储
   （**没有** `flutter_secure_storage`），token 存在哪一个**未确定**
@@ -175,6 +175,118 @@ token **不会自己过期**（见上）。所以它失效的唯一原因就是
 > `javdb-rss login` **就是**这个流程的向导。没有再写一个 bash wizard：
 > 唯一需要人做的动作是「输密码」，而二进制自己会提示、写入、验证 ——
 > 外面再套一层脚本只是仪式。
+
+### 上面的判断对了一半 —— 结论对，原因错了
+
+结论（「这条路贵」）在当时是对的，但 2026-10-05 把存储位置**查实**后发现，
+最后那条理由指错了方向：**不是「要 blutter 逆 Dart 快照」，而是密文的密钥在
+Android KeyStore 里 —— 逆什么都不能离线解出来。** 当时若真去上 blutter，会白花那张票。
+
+实测确认的三件事：
+
+| 事实 | 证据 |
+|---|---|
+| token 落地在 `shared_prefs/FlutterSharedPreferences.xml` 的 `flutter.accessToken` | 真机（Xiaomi 13 / Android 15 / 私密空间 **user 10**）数据目录；可用 `scripts/export-phone-token.sh` 同源的思路自查（`grep -a accessToken shared_prefs/*.xml`） |
+| 它是密文，176 base64 字符 / **131 字节**，**不是 16 的整数倍** | 同上（所以不是 AES-CBC/ECB，与 GCM 或流模式一致） |
+| 密钥在硬件密钥库，**不可导出** | `classes.dex` 里有 `AndroidKeyStore` / `KeyGenParameterSpec$Builder` / `AES/GCM/NoPadding` / `KeyStore$SecretKeyEntry`；设备侧 `shared_prefs/native.xml` 有 `KEY_ALIAS` / `TOKEN_ALIAS`（两个随机 16 字符串 = **别名**，不是密钥） |
+
+旁证两条（都是观察，不是证明）：
+
+1. token 明文**实测 115 字符**，密文 131 字节 —— `131 = 115 + 16`，正好是 GCM 的 tag 长度。
+2. 我把两个别名、`accessKey`、`device_uuid` 及其 md5/sha256 派生 × CTR/CFB/OFB/CBC/ECB ×
+   4 种 IV 全试了一遍，`accessToken` 与 `urlDomain` 都**零命中**。也就是说密钥**不是设备上
+   任何一个可见字符串的简单派生** —— 与「密钥在 TEE 里」一致。
+
+> ⚠️ 这个发现**不要**顺手推广到 `urlDomain` / `backup_domains_data` 那两个 368 字节的
+> 域名 blob：`assets/.../data/data.txt` 是打进 APK 的，必须在任何设备上都能解，
+> 所以它的密钥一定是设备无关的静态密钥，不可能是 per-device 的 KeyStore 密钥。
+> 那两个 blob 的现状是「已知固定 IV（`242c494134750deac809ebb2e259a658`）、已知分组
+> 模式（`16 字节 IV || 352 字节密文`）、明文必为域名 JSON、只剩密钥派生待定」，
+> 下一步仍是逆 `libsecurity.so` 的 `_Z8decryptPcS_i` / `_Z11ScheduleKeyPhS_ii`
+> —— 对域名 blob **仍然有效**。（取证环境与两个 blob 的对照在本地 harness 的
+> `~/android-capture/FINDINGS.md` §8，不在本仓库里。该 harness 未开源，见下文“为什么不把
+> harness 也开源”。）
+
+### 那怎么拿 token：读**运行时内存**，不读文件
+
+「读文件」这条路彻底出界（离线解密在密码学上就不可能），但明文**一定**会在进程内存里
+出现一次 —— App 得把它放进 `authorization: Bearer <token>` 请求头。所以做法是
+在它活着的地方取：
+
+```bash
+./scripts/export-phone-token.sh --launch --user 10     # ~16s
+```
+
+脚本**在仓库里**（`scripts/export-phone-token.sh`），不依赖 `~/android-capture` 那套
+harness —— 任何人有 root 手机 + adb 就能跑。
+
+它做的事：`/proc/<pid>/maps` 逐个可读区 → `dd bs=4096 if=/proc/<pid>/mem` →
+一条**有界的** HS256 JWT 模式。四个刻意的选择：
+
+0. **放仓库里，不放 harness 里。** 第一版是 `~/android-capture/45-scan-token.sh`
+   （已删）。那个目录是私人机器上的，而且里面有 34 MB 的第三方 APK 与真实账号抓包；
+   把它当作「复跑做法」是**不合格**的，读者拿不到。工具搬进 `scripts/`，只有一处副本。
+
+1. **不需要 Frida。** 第一版是 Frida（内存扫描），能跑；但 `maps` + `dd` + `grep -a`
+   在 root 设备上同样够用，而它去掉了三个活动部件：往设备推 frida-server、客户端与
+   服务端版本对齐、用 uv 钉住客户端。纯 shell 也让它在「不想在手机上留一个 59 MB
+   插桩服务」时仍然可用。
+2. **模式必须有界**（`eyJ…{10,200}…{43}`）：无界会吃进后面恰好也像 base64 的字节，
+   而有界既卡死边界（HS256 的签名段恒为 43 字符），又保证不会匹配本 App 里另外那些
+   base64（话题列表、域名 blob）—— 它们**不含 `.`**，三段式根本对不上。
+3. **不用交替分支。** 同一件事写成 `A|B|C` 会让 toybox 的 grep 退化约 10 倍
+   （实测 6m09s vs 16s，因为在多 GB 的行上反复回溯）。
+
+判据不是「搜到了一个 `eyJ`」，而是**三段式 + 43 字符签名 + payload 解开是
+`{"id":…,"username":…}`**（脚本会把 payload 解出来并打印，让你能直接对）。
+实测命中且仅命中一条：
+
+```
+header  eyJhbGciOiJIUzI1NiJ9
+payload {"id":<数字>,"username":"<数字>"}   <- 与设备侧 flutter.userName 一致（具体值不必写进仓库）
+```
+
+**它不踢手机**：读的是 App 已经在用的那个会话，服务与手机从此共用同一串 token。
+对比之下 `javdb-rss login` 会挤掉手机上的会话（本文开头那条）。代价因此从
+「一轮逆向」变成了「一条命令」。
+
+### 什么时候仍然该用 `javdb-rss login`
+
+- **token 已经被顶掉、且你不想/不能碰手机**（导出这条路要求 App 处于登录状态、
+  且刚发过带凭据的请求）；
+- **这个账号纯给本服务用**、手机上不再登录它 —— 那自动续期（`JAVDB_PASSWORD`）
+  才开始有意义；
+- 手机没 root（这条路要求能读 `/proc/<pid>/mem`，那是 root-only）。
+
+### 复跑
+
+运行时侧（仓库内，任何人可跑，前置只有 root 手机 + adb）：
+
+```bash
+./scripts/export-phone-token.sh --serial 4b0350c4 --launch --user 10
+```
+
+文件侧（可选，只为确认「盘上确实只有密文」）：把数据目录弄到本机后 `grep -a accessToken`，
+或者用本地 harness 的 `~/android-capture/40-grab-token.sh`（它会在 `/data/user/*/<pkg>`
+里找 JWT，找不到时会把这层原因打出来）。
+
+不写盘、不碰网络。
+
+### 为什么不把 harness 也开源
+
+上面有些取证是在 `~/android-capture` 那套 harness（模拟器 + mitmproxy + Frida）里做的。
+它**不入库**，三个理由里前两个是仓库自己已经表过态的：
+
+1. **里面有 34 MB 的第三方 APK。** `.gitignore` 第 1–12 行已经写明这类文件不入库
+   （「第三方发行物，提交进 git 会永久留在历史里」），而且安装脚本是从官方 release
+   下载 + sha256 校验的 —— 别人不需要我们转发。
+2. **里面有 56 MB 的 `frida-server` 二进制**，同理：上游自己发布。
+3. **`logs/` 里是真实账号的抓包**（45 处 `Bearer`、推荐位、观看记录）。即使那些 token
+   早已失效，把一个人的浏览行为发布出去是另一类问题，不是本项目应该做的。
+
+结论：**harness 不开源**，但「可能被复跑的东西」尽量搬进仓库 —— 目前是
+`scripts/export-phone-token.sh`，而它的结论、证据与失败记录（这才是 harness 真正的价值）
+已经全在本文与 `docs/adr` 里。
 
 ## ✅ 已实测（2026-09-30）：`/collected` 的每页条数与上限
 
