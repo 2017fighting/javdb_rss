@@ -14,7 +14,7 @@
 
 | # | 票 | 阻塞于 |
 |---|---|---|
-| 01 | [home-ops 应用注册](issues/01-home-ops-registration.md) | 02 |
+| 01 | [home-ops 应用注册](issues/01-home-ops-registration.md) | ~~02~~ 已 resolved（2026-10-05） |
 | 02 | [app 侧 `/metrics`](issues/02-app-metrics-endpoint.md) | 无 |
 | 03 | [ADR 0002/0003 与文档](issues/03-docs-adr-0002-0003.md) | 01 |
 | 04 | [真实验收（含人工步骤）](issues/04-real-acceptance.md) | 01 02 03 |

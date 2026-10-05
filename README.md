@@ -169,6 +169,13 @@ qBittorrent 只会得到 404。
 | `deploy/docker-compose.yml` + `deploy/config.docker.yaml` | Docker Compose | 已发布的镜像 |
 | `deploy/k8s.yaml` | Kubernetes（含签名失效告警的 CronJob） | 同一个已发布的镜像 |
 
+⚠️ **这三套是示例，不是作者实际在跑的那一份。** 作者自己的实例跑在一个**私有**的
+Flux 仓库里（app-template 的 HelmRelease + Edge SSO + 一条对 `/metrics` 的 VMRule），
+因此这里不给链接 —— 给了也点不开。取样例与实例的分工是：**示例之间**不许漂
+（`deploy/docker-compose.yml` 与 `deploy/k8s.yaml` 由
+`internal/config/deploy_image_test.go` 守着钉同一个全量精度 tag），而**实例**由
+Renovate 盯着 GHCR 自动提 PR。取舍与理由见 [ADR-0002](docs/adr/0002-deploy-in-own-cluster.md)。
+
 两处容器部署拉的是 GHCR 上已发布的镜像（坐标与升级方式见下面
 「发版与拉取镜像」那一节）；systemd 那份跑的是**二进制** —— `make build` 产出它
 （部署机因此需要源码与 Go 工具链，但**不需要 Docker**），装到 `/usr/local/bin`。
@@ -779,6 +786,9 @@ javdb_rss_build_info{version="v1.1.0"}          1
 除了上面这些，`/metrics` 还带 **Go 运行时与进程收集器**（`go_*` / `process_*`）：
 本服务是「挂上就不管」的那一类，goroutine、内存、GC、fd 是排查时白拿的材料。
 
+这一组序列的取舍（为何引 exposition 库、为何每个 Server 用自己的 registry、
+为何 `build_info` 不算推翻 ticket 15）记在 [ADR-0003](docs/adr/0003-metrics-surface.md)。
+
 探针间隔由 `app_api.probe_interval` 控制，设 `0` 关闭。
 
 ## feed 的形状
@@ -828,9 +838,13 @@ CI（`.github/workflows/ci.yml`）跑的是同一组命令加容器构建 ——
 
 ## 这一版是怎么定下来的
 
-设计决策的依据不在这个 README 里，而在 `.scratch/javdb-rss/` ——
-那里有一张 wayfinder 地图、10 张决策票和 3 份逆向侦察笔记，
-记录了每个取舍、被否掉的方案和仍然未知的部分。改这个项目之前值得先读。
+设计决策的依据不在这个 README 里，而在 `.scratch/` ——
+`javdb-rss/`（一张 wayfinder 地图、10 张决策票和 3 份逆向侦察笔记，
+记录初次交付的每个取舍、被否掉的方案和仍然未知的部分）、
+`javdb-rss-followups/`（那轮 code review 里明确未修的 15 张）、
+`javdb-rss-ui/`（订阅链接生成器那个 effort）、
+`javdb-rss-deploy/`（部署进自家集群：入口、凭据、状态与告警）。
+改这个项目之前值得先读。真正定型的那些取舍另写成 [docs/adr/](docs/adr/)。
 
 签名算法来自 [javdb-cli](https://github.com/FlanChanXwO/javdb-cli)（MIT），
 归属与改动见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -5,7 +5,7 @@
 
 **Blocked by:** [02 — app 侧 `/metrics`](02-app-metrics-endpoint.md)（`VMPodScrape` 要有端点可打）
 
-**Status:** claimed（2026-10-05：清单已落地并通过本地校验；等推送 + reconcile + 健康）
+**Status:** resolved（2026-10-05：已落地并健康，见文末两节）
 
 - [x] `namespace.yaml` —— `prune: disabled` 标签**必须**有（少了它，将来一次 prune 就能删掉整个 namespace）
 - [x] `kustomization.yaml` —— resources 按创建顺序；`components: [../../infrastructure/components/edge-parentref]`；
@@ -54,14 +54,14 @@
       没有 media（**不要** `storage`，per-app 的 `truenas-nfs-retain` 不需要它 ——
       `bark`/`karakeep`/`lldap` 都没有这条 dep）
 - [x] edge-sso 一行（`clusters/home/edge-sso.yaml` 的 `inputs`，字母序）
-- [ ] 【已知竞态】首次部署：`<app>-workload-profile` ConfigMap 要落进还不存在的 namespace，
+- [x] 【已知竞态】首次部署：`<app>-workload-profile` ConfigMap 要落进还不存在的 namespace，
       operator 会中止整次施加（app-registry 报 `namespaces "javdb-rss" not found`）。
       处置：临时加 `clusters/home/javdb-rss-ns-bridge.yaml`（只含 namespace 文档，与 app 里的那份逐字一致）
       → `flux reconcile resourceset app-registry -n flux-system --force` → **健康后删掉桥文件**
       （root-sync 的 prune 会因为 `prune: disabled` 标签放过活着的 namespace）
 - [x] 本地验证：`kustomize build apps/javdb-rss`、`oxfmt --check`、`scripts/validate.sh`、
       `python3 -c "…valuesFrom 里有 javdb-rss-workload-profile…"`
-- [ ] 【同时改】`home-ops/CONTEXT.md` 的 **Edge SSO** 词条 Consumers 列表加 `javdb-rss`
+- [x] 【同时改】`home-ops/CONTEXT.md` 的 **Edge SSO** 词条 Consumers 列表加 `javdb-rss`
       —— 只在那一行真的落进 `edge-sso.yaml` 之后改（提前改就是宣称一件还没发生的事）
 
 ## 有意不做的
@@ -106,9 +106,36 @@
    `extra[@]: unbound variable` 警告），**都不影响结论**；跑法是 `JOBS=8 bash scripts/validate.sh`。
    没有顺手改它 —— 与本票无关。
 
-**还没做的（都等推送）**：bridge 文件已经**在提交里**（它必须先于 operator 那一轮落地），
-剩下的是它的**拆**：健康之后删掉它，再 reconcile 一次。加上 `flux reconcile resourceset
-app-registry` 与三处健康检查。推送是对 live 集群的变更，因此停在这里等确认。
+**还没做的**：无 —— 两项已于同日落地，见下面「落地（live）」。推送是对 live 集群的变更，
+因此当时停在那里等确认。
+
+## 落地（live，2026-10-05）
+
+**顺序与坐标**：`javdb_rss` 先推 main + `v1.1.0`（CI run `37266716472` 与 Release
+run `37266722480` 全绿，镜像 `1.1.0` 两个架构、`latest` 指向同一批 manifest），
+再用一个提交把 home-ops 钉到 `1.1.0`（`0551318`）—— 依赖那行字在**镜像真的存在**之后才写。
+
+**首次部署**：
+
+| 步 | 结果 |
+|---|---|
+| root-sync 应用新 revision | `0551318c`；bridge 文件先把 `javdb-rss` 命名空间建出来 |
+| 竞态 | **没发生** —— app-registry 渲染出的 Kustomization 一次就 Ready，没有 `namespaces "javdb-rss" not found` |
+| HelmRelease | `Ready=True`，`Helm install succeeded`（app-template 4.2.0） |
+| 镜像 | 实际拉的是 `harbor.raenzo.com:8443/ghcr/2017fighting/javdb-rss:1.1.0` —— Kyverno 改写与 pull-through 都对 |
+| profile 注入 | `javdb-rss-workload-profile` = `nodeSelector: {proxy: "true"}` |
+| 探针 | 1/1 Ready，`restarts=0`（首发与删 Pod 重建各一次） |
+| 拆 bridge | 命名空间**存活**，owner 标签从 `flux-system` 转成 `javdb-rss` 的 inventory |
+
+**两条与文档不完全一致的事实**（都不影响功能，但值得记）：
+
+1. **PVC 实际是 1Gi，不是请求的 64Mi。** `truenas-nfs-retain` 那边有最小/默认配额：
+   `spec.resources.requests.storage=64Mi` 而 PV 与 bound 容量都是 `1Gi`。pin 只有几 KB，
+   两种尺寸都远远够用 —— 但拿着这句去看 NAS 的人会发现它比清单里写的大。
+2. **`pin_file` 可写这件事在首启就自证了**：服务在状态目录不可写时会**拒绝启动**，
+   而它起来了 —— 所以 `fsGroup` 那一半（评审补的）至少在 NFS 这条路上是有效的。
+
+**真实验收（票 04）的关键几项已在本次跑完**，明细在 [04 的 Answer](04-real-acceptance.md)。
 
 ## 评审（两轴，2026-10-05）
 
