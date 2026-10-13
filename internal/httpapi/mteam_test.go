@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"github.com/2017fighting/javdb_rss/internal/mteam"
@@ -199,5 +201,69 @@ func TestTorrentEndpointRejectsNonGET(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST = %d, want 405", rec.Code)
+	}
+}
+
+// TestUpstreamDetailReportsMTeamCredential 钉住第二个来源的凭据信号。
+//
+// 它必须与「上游坏了」**分得开**：一个重试有用，一个要人去控制台换 key。
+// 而它**不改变状态码** —— M-Team 坏了不该让本实例被摘出 Service 端点。
+func TestUpstreamDetailReportsMTeamCredential(t *testing.T) {
+	store, err := mteam.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, store)
+	s.mteamHealth = store
+
+	// 还没查过：字段在，但为假（与 checked 那条既有判断同构 ——
+	// 「从未判定过」与「判定过且没坏」不是一回事，这里都表现为 false，
+	// 而真正的区分在 /metrics 的判定计数里，见票 06）。
+	var body map[string]any
+	rec := do(t, s.Handler(), "/healthz/upstream")
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("不是 JSON: %v", err)
+	}
+	m, ok := body["mteam"].(map[string]any)
+	if !ok {
+		t.Fatalf("响应里应当有一个单独命名的 mteam 段：%v", body)
+	}
+	if m["credential_broken"] != false {
+		t.Errorf("credential_broken = %v, want false", m["credential_broken"])
+	}
+
+	// 记一条凭据失败。
+	store.Put("w1", mteam.Verdict{
+		Outcome:     mteam.OutcomeFailed,
+		Failure:     "M-Team 凭据无效：key無效",
+		FailureKind: mteam.FailureCredential,
+		At:          time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC),
+	})
+
+	rec = do(t, s.Handler(), "/healthz/upstream")
+	body = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("不是 JSON: %v", err)
+	}
+	m = body["mteam"].(map[string]any)
+	if m["credential_broken"] != true {
+		t.Errorf("credential_broken = %v, want true", m["credential_broken"])
+	}
+	if m["next_step"] != mteam.CredentialGuidance {
+		t.Errorf("next_step = %v，应当是 mteam 包给出的处置", m["next_step"])
+	}
+	if !strings.Contains(m["error"].(string), "key無效") {
+		t.Errorf("error = %v，应当带上上游的原话", m["error"])
+	}
+
+	// ⚠️ 状态码不受它影响：M-Team 坏了不该把本实例摘出 Service 端点。
+	if rec.Code != http.StatusOK {
+		t.Errorf("状态码 = %d —— M-Team 的凭据问题不该改变它", rec.Code)
+	}
+	// 而 /readyz 也不该因此变 503。
+	if r := do(t, s.Handler(), "/readyz"); r.Code != http.StatusOK {
+		t.Errorf("/readyz = %d，M-Team 的凭据问题不该影响就绪", r.Code)
 	}
 }

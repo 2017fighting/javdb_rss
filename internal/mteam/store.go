@@ -47,6 +47,23 @@ type Candidate struct {
 	CreatedAt string `json:"created_at,omitempty"`
 }
 
+// FailureKind 是查询失败的**类别**。
+//
+// 它单独于 Failure（那句话是给人看的）而存在，因为机读的消费者需要能判定的东西 ——
+// 而「凭据失效」是其中唯一一个**重试无用**的：处置是去控制台换 key，不是重启、
+// 也不是重试。把它和网络抖动混成一类，告警就会把人指向错的方向。
+type FailureKind string
+
+const (
+	// FailureOther 是其它失败（网络、5xx、看不懂的响应）。
+	//
+	// 它仍然**不自动重试** —— 自动重试会在上游抖动时引发换源，也就是重复下载。
+	// 唯一的重试入口是「重置」。
+	FailureOther FailureKind = "other"
+	// FailureCredential 是凭据失效。重试**无用**。
+	FailureCredential FailureKind = "credential"
+)
+
 // Verdict 是一部作品的判定结果。
 //
 // 它只存**选中的那一条**，不存整份候选列表 —— 因为 M-Team 的候选
@@ -58,6 +75,10 @@ type Verdict struct {
 	Outcome Outcome `json:"outcome"`
 	// Chosen 是选中的那条（含 infohash）。Outcome 不是命中时它为空。
 	Chosen Candidate `json:"chosen,omitempty"`
+	// Failure 是查询失败的原因（给人看）；其它结果时为空。
+	Failure string `json:"failure,omitempty"`
+	// FailureKind 是查询失败的类别（给机器看）；只在 Outcome 是 failed 时有值。
+	FailureKind FailureKind `json:"failure_kind,omitempty"`
 	// At 是判定落地的时刻（人看日志用；它不参与任何判据）。
 	At time.Time `json:"at"`
 }
@@ -248,6 +269,27 @@ func (s *Store) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.verdicts)
+}
+
+// CredentialFailure 报告判定表里有没有一条「因凭据失效而失败」的记录。
+//
+// 它是从判定表**推导**出来的，不额外存一份状态：那条失败记录本身就是证据，
+// 而它也是「不要自动重试」的依据。好处是重启后仍然成立（判定表是持久的）——
+// 而一份只活在内存里的信号会在重启后消失，且因为失败已被缓存而**永远不会重新出现**。
+//
+// 它返回最近的一条（按判定时刻）。
+func (s *Store) CredentialFailure() (msg string, at time.Time, broken bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, v := range s.verdicts {
+		if v.Outcome != OutcomeFailed || v.FailureKind != FailureCredential {
+			continue
+		}
+		if !broken || v.At.After(at) {
+			msg, at, broken = v.Failure, v.At, true
+		}
+	}
+	return msg, at, broken
 }
 
 // Flush 把判定表落盘。无变更时零写入（qBittorrent 的常态轮询不碰磁盘）。

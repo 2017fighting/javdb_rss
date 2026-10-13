@@ -14,6 +14,13 @@ import (
 	"time"
 )
 
+// CredentialGuidance 是「凭据失效」的处置动作。
+//
+// ⚠️ 它**住在 mteam 包**，而不是写在 httpapi 的 JSON 里：那样才是「知道这个错误
+// 含义的那一方给出处置」，与 signature_broken 的 next_step 同一条约定。
+// httpapi 只负责转发，不认识任何一个具体错误名。
+const CredentialGuidance = "M-Team 的存取令牌已失效（重试无用）：去站点【控制台 → 實驗室 → 存取令牌】重新取一个，改配置后重启或发 SIGHUP"
+
 // 三种**重试无用**的失败。它们分开的理由都一样：处置方式与别的失败不同。
 //
 // 用哨兵错误而不是一个带 Action 字段的错误类型：调用方要判定的就是「是不是这一类」，

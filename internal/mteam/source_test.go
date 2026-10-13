@@ -1,6 +1,7 @@
 package mteam
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -498,5 +500,169 @@ func TestUnwritableStateDirRefusesToStart(t *testing.T) {
 	}
 	if _, err := Open(filepath.Join(dir, "state")); err == nil {
 		t.Fatal("不可写的状态目录必须拒绝启动")
+	}
+}
+
+// --- 票 03：负结果与查询失败 --------------------------------------------------
+
+// captureLogs 收下日志文本，供「措辞」类的断言用。
+func captureLogs() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
+}
+
+// TestMissIsPermanent 钉住「查过、没有」是**永久**判决。
+//
+// 不是优化：qBittorrent 每 15 分钟拉一次，而馒头的搜索配额是 1000 次/24 小时。
+// 一个 234 部的清单若每轮都重问，四轮就把配额烧光。
+func TestMissIsPermanent(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+	// 搜索有结果，但都不是这部作品 —— 于是「查过、没有」。
+	mt := &fakeMTeam{rows: hitRow("1", "ABP-123 别的片", true, "2021-01-01 00:00:00")}
+	src, store, _ := newFixture(t, inner, mt, nil)
+
+	for i := 0; i < 3; i++ {
+		if _, err := src.WantToWatch(context.Background()); err != nil {
+			t.Fatalf("第 %d 次: %v", i, err)
+		}
+	}
+	if got := mt.searchCalls.Load(); got != 1 {
+		t.Errorf("搜索了 %d 次 —— 负结果必须永久", got)
+	}
+	v, ok := store.Get("id-SSIS-001")
+	if !ok || v.Outcome != OutcomeMiss {
+		t.Errorf("判定表里应当是 miss，实际 %+v（存在=%v）", v, ok)
+	}
+}
+
+// TestFailureIsRecordedButIsNotAMiss 钉住「没查成」与「查过、没有」是两回事。
+//
+// 前者不是判决，后者是。混起来的话，一次网络抖动会让那部作品**永久**失去这个功能。
+func TestFailureIsRecordedButIsNotAMiss(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+	// 网络层的坏法：搜索返回一个我们看不懂的体。
+	mt := &fakeMTeam{errBody: `这不是 JSON`}
+	src, store, _ := newFixture(t, inner, mt, nil)
+
+	list, err := src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatalf("M-Team 失败不该让整条 feed 失败: %v", err)
+	}
+	if m := list.Works[0].Magnets[0]; m.Infohash != "u" {
+		t.Errorf("失败时应当降级成上游那条，实际 %+v", m)
+	}
+
+	v, ok := store.Get("id-SSIS-001")
+	if !ok {
+		t.Fatal("失败应当被记下来（否则每轮都会重问）")
+	}
+	if v.Outcome != OutcomeFailed {
+		t.Errorf("outcome = %q, want failed（它不是 miss —— 那是判决）", v.Outcome)
+	}
+	if v.Failure == "" {
+		t.Error("失败记录应当带上原因（给人看）")
+	}
+	if v.FailureKind != FailureOther {
+		t.Errorf("failureKind = %q, want %q", v.FailureKind, FailureOther)
+	}
+
+	// **不自动重试**：再渲染两次，一次都不该再问。
+	for i := 0; i < 2; i++ {
+		if _, err := src.WantToWatch(context.Background()); err != nil {
+			t.Fatalf("第 %d 次: %v", i, err)
+		}
+	}
+	if got := mt.searchCalls.Load(); got != 1 {
+		t.Errorf("搜索了 %d 次 —— 查询失败不自动重试", got)
+	}
+}
+
+// TestThreeOutcomesAreDistinguishable 钉住三种结果在判定表里分得开。
+//
+// 它们的处置**完全相反**：命中就用它；负结果永不重问；失败也不自动重试，
+// 但它是唯一一个「换掉 key 之后值得再试一次」的。
+func TestThreeOutcomesAreDistinguishable(t *testing.T) {
+	tests := []struct {
+		name string
+		mt   *fakeMTeam
+		want Outcome
+		kind FailureKind
+	}{
+		{"命中", &fakeMTeam{rows: hitRow("1", "SSIS-001 x", false, "2021-01-01 00:00:00"), torrent: torrentCanonical}, OutcomeHit, ""},
+		{"负结果", &fakeMTeam{rows: hitRow("1", "ABP-123 别的片", false, "2021-01-01 00:00:00")}, OutcomeMiss, ""},
+		{"查询失败（网络）", &fakeMTeam{errBody: `这不是 JSON`}, OutcomeFailed, FailureOther},
+		{"查询失败（凭据）", &fakeMTeam{errBody: `{"code":"1","message":"key無效"}`}, OutcomeFailed, FailureCredential},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+			src, store, _ := newFixture(t, inner, tt.mt, nil)
+			if _, err := src.WantToWatch(context.Background()); err != nil {
+				t.Fatalf("WantToWatch: %v", err)
+			}
+			v, ok := store.Get("id-SSIS-001")
+			if !ok {
+				t.Fatalf("没有留下判定")
+			}
+			if v.Outcome != tt.want {
+				t.Errorf("outcome = %q, want %q", v.Outcome, tt.want)
+			}
+			if v.FailureKind != tt.kind {
+				t.Errorf("failureKind = %q, want %q", v.FailureKind, tt.kind)
+			}
+		})
+	}
+}
+
+// TestCredentialFailureIsVisibleFromTheStore 钉住「凭据坏了」这件事是**推导**出来的，
+// 而不是额外存的一份状态 —— 因此重启之后仍然成立。
+func TestCredentialFailureIsVisibleFromTheStore(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+	mt := &fakeMTeam{errBody: `{"code":"1","message":"key無效"}`}
+	src, store, _ := newFixture(t, inner, mt, nil)
+
+	if _, _, broken := store.CredentialFailure(); broken {
+		t.Error("还没查过就不该报「凭据坏了」")
+	}
+	if _, err := src.WantToWatch(context.Background()); err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	msg, at, broken := store.CredentialFailure()
+	if !broken {
+		t.Fatal("凭据失效应当能从判定表里读出来")
+	}
+	if msg == "" || at.IsZero() {
+		t.Errorf("应当带上原因与时刻：msg=%q at=%v", msg, at)
+	}
+}
+
+// TestMissIsNotWordedAsFailure 钉住措辞。
+//
+// 「负结果」与「查询失败」的处置完全相反，把前者写成「失败」会让人去查一个
+// 根本不存在的故障 —— 而这条日志是排障时唯一会读的那条。
+func TestMissIsNotWordedAsFailure(t *testing.T) {
+	log, buf := captureLogs()
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+	mt := &fakeMTeam{rows: hitRow("1", "ABP-123 别的片", false, "2021-01-01 00:00:00")}
+
+	srv := httptest.NewServer(mt.handler(t))
+	defer srv.Close()
+	mt.base = srv.URL
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	src := New(inner, &Client{BaseURL: srv.URL, APIKey: "k", HTTP: srv.Client()}, store, fakePins{}, log)
+
+	if _, err := src.WantToWatch(context.Background()); err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "负结果") {
+		t.Errorf("日志里应当说清楚这是负结果：%s", out)
+	}
+	if strings.Contains(out, "失败") {
+		t.Errorf("负结果不该被写成「失败」—— 那是另一回事：%s", out)
 	}
 }

@@ -123,7 +123,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           httpapi.New(holder, src, log).WithUpstream(tracker).WithTorrents(mteamStore).Handler(),
+		Handler:           httpapi.New(holder, src, log).WithUpstream(tracker).WithTorrents(mteamStore).WithMTeamHealth(mteamStore).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

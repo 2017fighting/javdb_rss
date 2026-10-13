@@ -2,6 +2,7 @@ package mteam
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -103,24 +104,33 @@ func (s *Source) enrich(ctx context.Context, w *catalog.Work) {
 		}
 	}
 
-	if v, ok := s.store.Get(w.ID); ok && v.Outcome == OutcomeHit {
-		s.apply(w, v)
+	if v, ok := s.store.Get(w.ID); ok {
+		switch v.Outcome {
+		case OutcomeHit:
+			s.apply(w, v)
+		case OutcomeMiss:
+			// **负结果永久**：不再问。它不是一个错误，也不该被当成「失败」。
+		case OutcomeFailed:
+			// **不自动重试**：只有「重置」会再试。自动重试会在上游抖动时
+			// 引发换源，也就是重复下载。
+		}
 		return
 	}
 
 	hits, err := s.client.Search(ctx, w.Number)
 	if err != nil {
-		// 失败**不写判定**：它不是判决（「查过、没有」才是）。
-		// 记录这件事是票 03 的活；这里只保证不把 feed 弄坏。
-		s.log.WarnContext(ctx, "M-Team 查询失败，本次按上游下发",
-			"作品", w.Number, "err", err)
+		// 失败**不构成判决**（「查过、没有」才是）—— 但它也不自动重试。
+		s.recordFailure(ctx, w, err)
 		return
 	}
 
 	matches := matchCode(hits, w.Number)
 	if len(matches) == 0 {
-		// 「查过、没有」是**负结果**（永久）。记录它是票 03 的活。
-		s.log.DebugContext(ctx, "M-Team 上没有这部作品", "作品", w.Number, "候选", len(hits))
+		// 负结果：**永久**。它不重试、也不因为「也许以后有了」而重查。
+		// 措辞刻意不叫「失败」—— 那是另一回事，而两者处置完全相反。
+		s.store.Put(w.ID, Verdict{Outcome: OutcomeMiss, At: s.now()})
+		s.log.DebugContext(ctx, "M-Team 上没有这部作品（负结果，永久）",
+			"作品", w.Number, "候选", len(hits))
 		return
 	}
 
@@ -162,6 +172,34 @@ func (s *Source) enrich(ctx context.Context, w *catalog.Work) {
 	s.log.InfoContext(ctx, "M-Team 命中，本作品改发馒头那份",
 		"作品", w.Number, "种子", chosen.ID, "infohash", infohash,
 		"中字", chosen.CNSub, "候选", len(matches))
+}
+
+// recordFailure 记下一次**没查成**，并按类别决定日志的措辞。
+//
+// 它落盘，因此不会每轮重问 —— 但那条记录与「负结果」是**两回事**：
+// 负结果是「查过、没有」，失败是「没查成」。前者是判决，后者不是，
+// 因此只有后者会被「重置」再试一次。
+func (s *Source) recordFailure(ctx context.Context, w *catalog.Work, err error) {
+	kind := FailureOther
+	if errors.Is(err, ErrCredential) {
+		kind = FailureCredential
+	}
+	s.store.Put(w.ID, Verdict{
+		Outcome:     OutcomeFailed,
+		Failure:     err.Error(),
+		FailureKind: kind,
+		At:          s.now(),
+	})
+
+	// 两类失败的日志**必须不同**：一类要人去换 key，另一类等一等就好。
+	// 混成一条，告警就会把人指向错的方向。
+	if kind == FailureCredential {
+		s.log.ErrorContext(ctx, "M-Team 凭据失效 —— 重试无用，去控制台换一个存取令牌",
+			"作品", w.Number, "err", err)
+		return
+	}
+	s.log.WarnContext(ctx, "M-Team 查询失败，本次按上游下发（不自动重试）",
+		"作品", w.Number, "err", err)
 }
 
 // apply 把命中换成候选池 —— **整体替换**，不是合并。

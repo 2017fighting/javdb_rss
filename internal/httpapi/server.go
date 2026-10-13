@@ -22,6 +22,7 @@ import (
 	"github.com/2017fighting/javdb_rss/internal/config"
 	"github.com/2017fighting/javdb_rss/internal/feed"
 	"github.com/2017fighting/javdb_rss/internal/health"
+	"github.com/2017fighting/javdb_rss/internal/mteam"
 	"github.com/2017fighting/javdb_rss/internal/webui"
 )
 
@@ -48,6 +49,8 @@ type Server struct {
 	// 为 nil 表示本实例没有第二个来源（没配 key）—— 那时该端点 404，
 	// 而不是 500：它确实不存在，而不是坏了。
 	torrents TorrentStore
+	// mteamHealth 是第二个来源的凭据信号（可为 nil：没配那个来源）。
+	mteamHealth MTeamHealth
 }
 
 // New 构造 Server。log 为 nil 时使用 slog.Default()。
@@ -78,6 +81,22 @@ type TorrentStore interface {
 // 「确实不存在」与「坏了」在排查时是两件事。
 func (s *Server) WithTorrents(ts TorrentStore) *Server {
 	s.torrents = ts
+	return s
+}
+
+// MTeamHealth 是 `/healthz/upstream` 对第二个来源的**只读**需求。
+//
+// 它只回答一个问题：「M-Team 的凭据是不是失效了」。`*mteam.Store` 天然满足它。
+type MTeamHealth interface {
+	CredentialFailure() (msg string, at time.Time, broken bool)
+}
+
+// WithMTeamHealth 挂上第二个来源的凭据信号。
+//
+// ⚠️ 它**不进 `/readyz`**。理由与 signature_broken 同构：换 key 不是重启能解决的，
+// 而把实例从 Service 端点里摘掉只会让 feed 一起消失 —— 那时连「为什么」都看不到了。
+func (s *Server) WithMTeamHealth(h MTeamHealth) *Server {
+	s.mteamHealth = h
 	return s
 }
 
@@ -264,6 +283,23 @@ func (s *Server) handleUpstreamDetail(w http.ResponseWriter, _ *http.Request) {
 		code = http.StatusServiceUnavailable
 	} else {
 		body["signature_broken"] = false
+	}
+
+	// 第二个来源自己的信号，放在一个**单独命名的键**下。
+	//
+	// ⚠️ 不混进上面那几个字段：这个端点里的「上游」一律指 JavDB，
+	// 而两者的故障域完全不同（一个重试有用，一个要人去换 key）。
+	// ⚠️ 它也**不改变状态码**：M-Team 坏了不该让本实例被摘出 Service 端点。
+	if s.mteamHealth != nil {
+		msg, at, broken := s.mteamHealth.CredentialFailure()
+		m := map[string]any{"credential_broken": broken}
+		if broken {
+			m["error"] = msg
+			m["checked_at"] = at.UTC().Format(time.RFC3339)
+			// 处置动作由**知道这个错误含义的那一方**给出，这里只是转发。
+			m["next_step"] = mteam.CredentialGuidance
+		}
+		body["mteam"] = m
 	}
 
 	writeJSON(w, code, body)
