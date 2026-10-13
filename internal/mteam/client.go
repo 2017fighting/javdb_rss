@@ -202,10 +202,10 @@ func (c *Client) fetch(ctx context.Context, rawURL string) ([]byte, error) {
 		if err := classifyEnvelope(raw); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("取种子失败：上游返回了 JSON 而不是种子：%s", snippet(raw))
+		return nil, fmt.Errorf("取种子失败：M-Team 返回了 JSON 而不是种子：%s", snippet(raw))
 	}
 	if len(raw) == 0 {
-		return nil, errors.New("取种子失败：上游返回了空响应")
+		return nil, errors.New("取种子失败：M-Team 返回了空响应")
 	}
 	return raw, nil
 }

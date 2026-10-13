@@ -196,6 +196,14 @@ func newTestServer(t *testing.T, cfgYAML string, src catalog.Source) http.Handle
 // 供 /torrent/ 端点的测试用。为 nil 时那个端点 404（本实例没有第二个来源）。
 func newTestServerWithSource(t *testing.T, cfgYAML string, src catalog.Source, torrents TorrentStore) http.Handler {
 	t.Helper()
+	return newTestServerObj(t, cfgYAML, src, torrents).Handler()
+}
+
+// newTestServerObj 与上面两个一样，只是把 `*Server` 本体也交出来 ——
+// 少数测试需要**绕过 mux** 直接调 handler（mux 会先清洗路径，
+// 于是“路径穿越”那类输入根本到不了 handler）。
+func newTestServerObj(t *testing.T, cfgYAML string, src catalog.Source, torrents TorrentStore) *Server {
+	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(p, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
@@ -207,7 +215,7 @@ func newTestServerWithSource(t *testing.T, cfgYAML string, src catalog.Source, t
 	s := New(holder, src, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.now = func() time.Time { return time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC) }
 	s.torrents = torrents
-	return s.Handler()
+	return s
 }
 
 type parsedFeed struct {

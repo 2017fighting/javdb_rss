@@ -133,7 +133,7 @@ func (s *Source) enrich(ctx context.Context, w *catalog.Work) {
 	}
 	infohash, err := Infohash(data)
 	if err != nil {
-		// 这一条值得 WARN 而不是 Debug：它是**上游的契约变了**的信号
+		// 这一条值得 WARN 而不是 Debug：它是**M-Team 的契约变了**的信号
 		// （种子形状不再是我们认得的），而不是某一次网络抖动。
 		s.log.WarnContext(ctx, "M-Team 的种子认不出来，本次按上游下发",
 			"作品", w.Number, "种子", chosen.ID, "err", err)
@@ -233,7 +233,7 @@ func (s *Source) Browse(ctx context.Context, zone int, sel catalog.BrowseSelecto
 //
 // ⚠️ **不能**实现成「按非字母数字切词再比词元」：日文汉字不是字母数字，
 // 于是 `SONE-168 激イキ…` 会被切成 `SONE` + `168` + …，一条都匹配不上，
-// 而它的表现是「馒头没有」—— 看起来像上游没收录，其实是判据坏了。
+// 而它的表现是「馒头没有」—— 看起来像 M-Team 没收录，其实是判据坏了。
 //
 // ⚠️ 边界判断是**手工**做的，因为 Go 的 regexp（RE2）**不支持环视**
 // （`(?<!…)` / `(?=…)` 都会 panic）。别顺手把它改回环视写法。
@@ -251,10 +251,15 @@ func matchCode(hits []SearchHit, code string) []SearchHit {
 	return out
 }
 
+// codeSeparator 是番号里那些「不算字符」的分隔符。
+//
+// 提到包级是为了不在每次匹配时重新编译 —— 它在一轮渲染里会被调用上百次。
+var codeSeparator = regexp.MustCompile(`[^A-Za-z0-9]+`)
+
 // codePattern 把番号编成一条「分隔符可浮动」的正则。
 func codePattern(code string) *regexp.Regexp {
 	var parts []string
-	for _, p := range regexp.MustCompile(`[^A-Za-z0-9]+`).Split(code, -1) {
+	for _, p := range codeSeparator.Split(code, -1) {
 		if p != "" {
 			parts = append(parts, regexp.QuoteMeta(p))
 		}
@@ -293,7 +298,7 @@ func isAlnumAt(s string, i int) bool {
 // 选哪条必须发生在下载之前。这是「来源优先」这条设计的必然代价，不是疏漏。
 //
 // `created_at` 直接按字符串比：线格式是 `2021-02-22 15:19:51`（定宽、零填充），
-// 因此字典序与时间序一致。**不解析成 time.Time** —— 上游换格式时，
+// 因此字典序与时间序一致。**不解析成 time.Time** —— 线格式变时，
 // 解析失败会退化成「全都相等」，而字符串比较只会退化成「按字面排」，都还能用。
 func pickBest(hits []SearchHit) SearchHit {
 	best := hits[0]

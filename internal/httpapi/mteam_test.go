@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,36 +109,59 @@ func TestWantFeedServesMTorrentEndToEnd(t *testing.T) {
 
 // TestTorrentEndpointRejectsTraversal 钉住那个值会被拼进**文件路径**这件事。
 //
-// 不做白名单校验的话，`/torrent/../../etc/passwd.torrent` 就是一次目录穿越 ——
-// 而它读的还是本进程有权限的任意文件。
+// ⚠️ 两道防线，而**这条测试必须绕过 mux 才测得动第一道**：
 //
-// ⚠️ 两道防线，测试只钉**结果**（不泄露文件），不钉具体状态码：
+//	第一道：net/http 的 ServeMux 会先清洗路径并 307 重定向（于是 `..` 根本到不了 handler）。
+//	第二道：handler 自己的白名单（40 位十六进制）。
 //
-//	第一道：net/http 的 ServeMux 会先清洗路径并 307 重定向到清洗后的路径
-//	        （那里没有路由，于是 404）。
-//	第二道：本端点自己的白名单（40 位十六进制）。
-//
-// 只钉状态码会让这条测试在两道防线之间飘 —— 而真正要保证的是「拿不到文件」。
+// 只走 mux 的话，第一道已经把脏路径拦了 —— 就算把第二道整行删掉，测试照样绿
+// （因为 `/etc/passwd.torrent` 本来就不存在，os.ReadFile 也会 404）。
+// 评审指出了这个假阳性，所以这里直接调 handler，并**放一个金丝雀文件**：
+// 它在 `torrents/../canary.torrent`，也就是 `LoadTorrent("../canary")` 恰好能读到的地方。
+// 白名单真在工作时，那个文件是拿不到的。
 func TestTorrentEndpointRejectsTraversal(t *testing.T) {
-	store, err := mteam.Open(t.TempDir())
+	dir := t.TempDir()
+	store, err := mteam.Open(dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer func() { _ = store.Close() }()
-	h := newTestServerWithSource(t, "provider: stub\n", &recordingSource{}, store)
 
-	for _, target := range []string{
-		"/torrent/../../etc/passwd.torrent",
-		"/torrent/..%2f..%2fetc%2fpasswd.torrent",
-		"/torrent/不是十六进制.torrent",
-		"/torrent/" + strings.Repeat("a", 39) + ".torrent", // 短一位
-		"/torrent/" + strings.Repeat("a", 41) + ".torrent", // 长一位
-		"/torrent/" + strings.Repeat("z", 40) + ".torrent", // 不是十六进制字符
-	} {
-		rec := do(t, h, target)
-		if rec.Code == http.StatusOK {
-			t.Errorf("GET %s = 200，它不该端出任何文件（体：%q）", target, rec.Body.String()[:min(40, rec.Body.Len())])
-		}
+	// 金丝雀：一份“如果穿越成立就会被端出去”的种子。
+	canary := "金丝雀，不该被端出去"
+	canaryPath := filepath.Join(dir, "canary.torrent")
+	if err := os.WriteFile(canaryPath, []byte(canary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, store)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"相对路径穿越到金丝雀", "/torrent/../canary.torrent"},
+		{"编码过的穿越", "/torrent/..%2fcanary.torrent"},
+		{"非十六进制", "/torrent/不是十六进制.torrent"},
+		{"短一位", "/torrent/" + strings.Repeat("a", 39) + ".torrent"},
+		{"长一位", "/torrent/" + strings.Repeat("a", 41) + ".torrent"},
+		{"非十六进制字符", "/torrent/" + strings.Repeat("z", 40) + ".torrent"},
+		{"忘了 .torrent 后缀", "/torrent/" + strings.Repeat("a", 40)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 直接构造请求并调 handler —— 不过 mux，因为 mux 会先清洗路径。
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			rec := httptest.NewRecorder()
+			s.handleTorrent(rec, req)
+
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("GET %s = %d, want 404", tt.path, rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), canary) {
+				t.Errorf("GET %s 端出了金丝雀的内容 —— 目录穿越成立了", tt.path)
+			}
+		})
 	}
 }
 

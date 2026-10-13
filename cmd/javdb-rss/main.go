@@ -220,35 +220,46 @@ func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store, mt *m
 		// 落盘失败是**致命**的：OnFatal 让进程退出，而不是带着
 		//「内存已改、磁盘没改」的状态继续服务。退出后 systemd/k8s/compose
 		// 会把它重启，失败因此是可见的（CrashLoopBackOff）。
-		pinned := pin.New(client, st, nil)
+		// ⚠️ 装饰器顺序是**接线的正确性**，不是风格问题。两条同时要满足：
+		//
+		//   dedupe.New(pin.New(mteam.New(client)))   ✅
+		//   dedupe.New(mteam.New(pin.New(client)))   ❌ M-Team 永远不会被查
+		//
+		// 为什么 M-Team 必须在**内层**：它要看的输入是**上游刚返回的**候选，
+		// 而它要看的「这部作品下发过没有」是 pin 表**上一次**的状态。
+		//
+		// 反过来包的话（mteam 在外），`mteam.WantToWatch` 第一件事就是调
+		// `pin.WantToWatch` —— 而 pin 会当场把所有未钉住的作品选一条上游磁链
+		// 写进表。等控制流回到 mteam，`pins.Get` 已经**恒为真**，
+		// 「首发冻结」于是变成「永远冻结在上游磁链」，整个功能静默失效。
+		// 这个 bug 被两轴评审抓到，而单测没抓到 —— 因为单测用的是裸假 source。
+		//
+		// 为什么它必须在 dedupe **里面**：它和 pin 一样原地改写 works[i].Magnets。
+		var inner catalog.Source = client
+		if mt != nil {
+			m := mteam.New(inner, &mteam.Client{APIKey: cfg.MTeamKey()}, mt, st, slog.Default())
+			inner = m
+		}
+
+		pinned := pin.New(inner, st, nil)
 		pinned.OnFatal = func(err error) {
 			slog.Default().Error("pin 落盘失败，进程即将退出（交由编排器重启）", "err", err)
 			os.Exit(1)
 		}
-
-		// M-Team 装饰器坐在 pin **外面**（先于 pin 执行），并**读** pin 表。
-		//
-		//   dedupe.New(mteam.New(pin.New(client)))   ✅
-		//   dedupe.New(pin.New(mteam.New(client)))   ❌ 它拿不到「这部作品钉过没有」
-		//
-		// 为什么它必须在 pin 外面：「首发冻结」的判据是「这部作品下发过没有」，
-		// 而那正是 pin 表回答的问题。它改写完候选池之后，pin 再照常把它钉住。
-		//
-		// 为什么它必须在 dedupe 里面：它和 pin 一样**原地改写** works[i].Magnets。
-		var src catalog.Source = pinned
+		// 判定表落盘失败同样致命 —— 它由 mteam 层自己上报。
 		if mt != nil {
-			m := mteam.New(pinned, &mteam.Client{APIKey: cfg.MTeamKey()}, mt, st, slog.Default())
-			m.OnFatal = func(err error) {
-				slog.Default().Error("判定表落盘失败，进程即将退出（交由编排器重启）", "err", err)
-				os.Exit(1)
+			if m, ok := inner.(*mteam.Source); ok {
+				m.OnFatal = func(err error) {
+					slog.Default().Error("判定表落盘失败，进程即将退出（交由编排器重启）", "err", err)
+					os.Exit(1)
+				}
 			}
-			src = m
 		}
 
-		// 外层：合并并发的相同请求，只打一次上游。
+		// 最外层：合并并发的相同请求，只打一次上游。
 		//
 		// 它不存任何东西（不是缓存），因此不返回陈旧数据、重启无影响。
-		return dedupe.New(src), nil
+		return dedupe.New(pinned), nil
 	default:
 		return nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
 	}

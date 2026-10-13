@@ -179,7 +179,9 @@ func (s *Server) handleTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hash := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, feed.TorrentPathPrefix), ".torrent")
-	if !infohashPattern.MatchString(hash) {
+	// 后缀也要断言：否则 `/torrent/{40位十六进制}`（没带 .torrent）会同样返回 200，
+	// 而那个地址不在任何地方被生成 —— 一个「能跑但没声明过」的入口。
+	if !strings.HasSuffix(r.URL.Path, ".torrent") || !infohashPattern.MatchString(hash) {
 		// 不区分「格式不对」与「没有这个」：对外它们都是「这儿没有东西」，
 		// 而区分只会把「我们怎么校验的」免费告诉枚举的人。
 		writeError(w, http.StatusNotFound, "没有这个种子")

@@ -14,6 +14,13 @@
 #       app_api:
 #         pin_file: "/var/lib/javdb-rss/pin.json"
 #   那个目录由下面的 StateDirectory=javdb-rss 创建并已可写。
+#
+# ⚠️ 启用 M-Team 时还要改第二处：mteam.state_dir 同样默认落在配置文件旁边，
+#   而它也是必需可写的（不可写就拒绝启动）。改成：
+#       mteam:
+#         api_key: "…"
+#         state_dir: "/var/lib/javdb-rss/mteam"
+#   注意那个目录里的 torrents/ 子目录**带着你的账号凭据**（权限 0600）。
 #   # 若要读 App 里的收藏女优，需要 token。**以服务用户身份**登录，
 #   # 这样写出的 token.json（0600）属主就是它：
 #   sudo -u javdb-rss /usr/local/bin/javdb-rss login -config /etc/javdb-rss/config.yaml

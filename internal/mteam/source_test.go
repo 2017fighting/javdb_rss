@@ -353,7 +353,7 @@ func TestUnusableTorrentFallsBack(t *testing.T) {
 	if m := list.Works[0].Magnets[0]; m.Infohash != "u" {
 		t.Errorf("认不出的种子应当降级，实际 %+v", m)
 	}
-	// 而且**不该**留下一条判定 —— 否则它会被当成「查过、有」永久缓存下来。
+	// 而且**不该**留下一条判定 —— 否则它会被当成「查过、有」永久记下来。
 	if _, ok := store.Get("id-SSIS-001"); ok {
 		t.Error("认不出的种子不该留下判定")
 	}
@@ -412,6 +412,78 @@ func TestVerdictSurvivesRestart(t *testing.T) {
 
 	if got := mt.searchCalls.Load(); got != 1 {
 		t.Errorf("搜索了 %d 次，重启后应当从判定表里读", got)
+	}
+}
+
+// TestWiringOrderMTorrentBeatsPin 是**装配顺序**的钉子。
+//
+// 它存在的理由很具体：两轴评审在这里抓到一个 P0，而当时所有单测都是绿的 ——
+// 因为它们用裸假 source 当 inner，正好绕过了「mteam 与 pin 谁包谁」这条链。
+//
+// 正确的嵌套是 `pin.New(mteam.New(inner))`：
+//
+//	M-Team 要看的输入是**上游刚返回的**候选；
+//	而它要看的「下发过没有」是 pin 表**上一次**的状态。
+//
+// 反过来包（mteam 在外）的话，mteam 一上来就调 pin，而 pin 会当场把未钉住的作品
+// 全选一条上游磁链写进表 —— 等控制流回到 mteam，`pins.Get` 已经**恒为真**，
+// 「首发冻结」于是变成「永远冻结在上游磁链」，整个功能静默失效。
+func TestWiringOrderMTorrentBeatsPin(t *testing.T) {
+	dir := t.TempDir()
+	pinStore, err := pin.Open(filepath.Join(dir, "pin.json"))
+	if err != nil {
+		t.Fatalf("Open pin: %v", err)
+	}
+	defer func() { _ = pinStore.Close() }()
+
+	mtStore, err := Open(filepath.Join(dir, "mteam"))
+	if err != nil {
+		t.Fatalf("Open 判定表: %v", err)
+	}
+	defer func() { _ = mtStore.Close() }()
+
+	mt := &fakeMTeam{
+		rows:    hitRow("467487", "SSIS-001 一ヶ月間の…", true, "2021-02-22 15:19:51"),
+		torrent: torrentCanonical,
+	}
+	srv := httptest.NewServer(mt.handler(t))
+	defer srv.Close()
+	mt.base = srv.URL
+
+	inner := &fakeInner{want: []catalog.Work{
+		wantWork("SSIS-001", catalog.Magnet{Infohash: "upstream-hash", Name: "上游那条"}),
+	}}
+	client := &Client{BaseURL: srv.URL, APIKey: "k", HTTP: srv.Client()}
+
+	// 按**真实装配**的顺序包：mteam 在内，pin 在外。
+	mtSrc := New(inner, client, mtStore, pinStore, quietLogger())
+	src := pin.New(mtSrc, pinStore, nil) // 正确
+	_ = mtSrc
+
+	works, err := src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	if len(works.Works) != 1 || len(works.Works[0].Magnets) != 1 {
+		t.Fatalf("候选池应当是单元素，实际 %+v", works.Works)
+	}
+
+	// 一、M-Team 真的被查了（上游那条被换掉）。
+	m := works.Works[0].Magnets[0]
+	if m.Source != catalog.SourceMTeam {
+		t.Fatalf("下发的是 %v 那条 —— M-Team 根本没生效（装配顺序错了？）", m.Source)
+	}
+	if m.Infohash != "f875b7bedb38e072dde96440fb79e5fc55699d68" {
+		t.Errorf("infohash = %q", m.Infohash)
+	}
+
+	// 二、pin 钉住的是 **M-Team 那条**，而不是它先看到的上游那条。
+	rec, ok := pinStore.Get("id-SSIS-001")
+	if !ok {
+		t.Fatal("pin 表里没有这部作品")
+	}
+	if rec.Infohash != m.Infohash {
+		t.Errorf("pin 钉的是 %q，而下发的是 %q —— pin 与 feed 不一致", rec.Infohash, m.Infohash)
 	}
 }
 

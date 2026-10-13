@@ -206,11 +206,21 @@ func (s *Store) load() error {
 
 // Reload 重新从磁盘读判定表（SIGHUP 用）。
 //
+// ⚠️ **先刷盘再重读。** 反过来的话，一个「刚产生判定、还没落盘」的窗口里收到 SIGHUP，
+// 会把内存里的新判定直接用磁盘旧数据盖掉并清 dirty —— 那是**静默丢数据**。
+// （pin.Store.Reload 有同一条判断；这里当初抄漏了，被评审抓出来。）
+//
 // 失败时保留旧表：一个手滑改坏的文件不该让正在服务的实例失去状态。
 func (s *Store) Reload() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.flushLocked(); err != nil {
+		// 刷盘失败不覆盖旧表，也不继续重读：让运维先看见写盘的问题。
+		return err
+	}
+	old := s.verdicts
 	if err := s.load(); err != nil {
+		s.verdicts = old
 		return err
 	}
 	s.dirty = false
@@ -247,10 +257,16 @@ func (s *Store) Len() int {
 func (s *Store) Flush() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.flushLocked()
+}
+
+// flushLocked 是 Flush 的实现，要求调用方已持有 s.mu。
+// Reload 也用它（它需要「先刷盘再重读」）。
+func (s *Store) flushLocked() error {
+	// 无变更零写入 —— qBittorrent 的常态轮询不碰磁盘。
 	if !s.dirty {
 		return nil
 	}
-
 	raw, err := json.MarshalIndent(file{Version: CurrentVersion, Verdicts: s.verdicts}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化判定表: %w", err)
