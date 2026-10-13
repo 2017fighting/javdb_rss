@@ -490,3 +490,106 @@ func TestAllowsZone(t *testing.T) {
 		}
 	}
 }
+
+// --- M-Team（第二个数据来源）的配置 ------------------------------------------
+
+// TestMTeamKeyEnvWinsAndEmptyMeansUnset 钉住与 JAVDB_TOKEN 一字不差的同一套判断。
+//
+// 两条都不能少：env 优先（集群里凭据走 Secret + envFrom），而空值**不算设置**
+// （否则 compose 里一个写了但没填的 env 会把配置文件里可用的 key 顶掉）。
+func TestMTeamKeyEnvWinsAndEmptyMeansUnset(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfgKey  string
+		env     string
+		setEnv  bool
+		want    string
+		comment string
+	}{
+		{"只有配置文件", "from-file", "", false, "from-file", ""},
+		{"env 优先", "from-file", "from-env", true, "from-env", ""},
+		{"空 env 不算设置", "from-file", "   ", true, "from-file", "compose 里写了但没填就是这种"},
+		{"空 env 且没配文件", "", "", true, "", ""},
+		{"两边都没有", "", "", false, "", ""},
+		{"配置文件里的值也会 trim", "  spaced  ", "", false, "spaced", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setEnv {
+				t.Setenv(EnvMTeamKey, tt.env)
+			} else {
+				// 显式清掉，免得宿主环境的变量让这条测试变成空转。
+				t.Setenv(EnvMTeamKey, "")
+			}
+			c := &Config{MTeam: MTeamConfig{APIKey: tt.cfgKey}}
+			if got := c.MTeamKey(); got != tt.want {
+				t.Errorf("MTeamKey() = %q, want %q %s", got, tt.want, tt.comment)
+			}
+		})
+	}
+}
+
+// TestMTeamStateDirDefaultsNextToConfig 钉住与 pin.json / token.json 同一套解析规则。
+//
+// ⚠️ 它与那两个共用 `resolveAlongside`，因此这条测试同时守着「三份附属文件不会走偏」。
+// 偏离的后果在 token 上真实发生过一次（见 Holder.TokenPath 的注释）。
+func TestMTeamStateDirDefaultsNextToConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("provider: stub\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 它是一个**目录**（判定表 + 带凭据的种子都在里面），因此默认值是 mteam/ 而不是某个文件。
+	if got, want := h.MTeamStateDir(), filepath.Join(dir, "mteam"); got != want {
+		t.Errorf("MTeamStateDir() = %q, want %q", got, want)
+	}
+	// 顺带确认它没有与 pin 撞在同一个路径上 —— 两者可丢性不同，不该同处一室。
+	if h.MTeamStateDir() == h.PinPath() {
+		t.Error("判定表与 pin 落在了同一个位置")
+	}
+}
+
+// TestMTeamStateDirHonoursExplicitValue 确认显式配了就照用
+// （容器/k8s/systemd 靠它指向可写卷 —— 不配的话那些只读配置目录会让服务拒绝启动）。
+func TestMTeamStateDirHonoursExplicitValue(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := "provider: stub\nmteam:\n  api_key: \"k\"\n  state_dir: \"/state/mteam\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.MTeamStateDir(); got != "/state/mteam" {
+		t.Errorf("MTeamStateDir() = %q", got)
+	}
+	if got := h.Current().MTeamKey(); got != "k" {
+		t.Errorf("MTeamKey() = %q", got)
+	}
+}
+
+// TestMTeamIsOffWhenNoKey 钉住「没有开关」这条设计。
+//
+// 「配没配 api_key」就是开关 —— 再加一个 enabled 只会多出一种自相矛盾的状态
+// （开了但没 key），而那需要另一条判据去处理它。
+func TestMTeamIsOffWhenNoKey(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("provider: stub\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvMTeamKey, "")
+	if got := h.Current().MTeamKey(); got != "" {
+		t.Errorf("没配 key 时 MTeamKey() = %q —— 它应当就是「关」", got)
+	}
+}

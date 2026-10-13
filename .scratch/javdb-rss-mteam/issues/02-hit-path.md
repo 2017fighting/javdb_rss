@@ -124,6 +124,6 @@
 | P2 systemd unit 只提醒了 `pin_file` | 已补 `mteam.state_dir`（否则启用后因只读而拒绝启动） |
 | P2 `MTeamKey()` / `MTeamStateDir()` 缺单测 | **未做**，见下 |
 
-**未做的一项（照实记）**：`internal/config` 里 `MTeamKey()`（env 优先级与空值回退）与
-`MTeamStateDir()`（留空回退到配置文件同级 `mteam/`）还没有单测。两者的形状与
-`LoadToken` / `PinPath` 逐字同构（那两处已有测试），但「同构」不是「测过」。
+**已补（2026-10-13）**：`internal/config` 的 `MTeamKey()`（env 优先级、空值不算设置、
+两边都没有）与 `MTeamStateDir()`（留空回退到配置文件同级 `mteam/`、显式值照用、
+不与 pin 撞位置）都有单测了，并做了变异检验（把 env 那一段去掉 → 测试当场响）。
