@@ -18,6 +18,7 @@ import (
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"github.com/2017fighting/javdb_rss/internal/config"
+	"github.com/2017fighting/javdb_rss/internal/mteam"
 	"github.com/2017fighting/javdb_rss/internal/pin"
 )
 
@@ -791,5 +792,107 @@ func TestUpstreamCheckerCarriesGuidance(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBuildSourceWithMTeamUsesTheSecondSource 是**真装配**的冒烟。
+//
+// # 它为什么必须存在
+//
+// 本项目已经出过**三个**「测试全绿但生产会死」的 bug，全部在装配层：
+//
+//	① 装饰器装配倒置 —— mteam 包在 pin 外面，于是 pin 先把上游磁链全钉住，
+//	   mteam 再检查「钉过没有」时恒为真，M-Team 永远不会被查；
+//	② 类型化 nil —— 没配 key 时 main 传的是 `var st *mteam.Store`，而接口不为 nil，
+//	   于是每次 /torrent/ 请求都 SIGSEGV；
+//	③ 搜索命中之后的失败没记 —— 每轮重新下载（这条不在装配层，但同样漏了）。
+//
+// 前两个之所以漏掉，都是因为**测试用了比真实装配更弱的替身**：
+// 裸假 source、字面 nil。这条测试反过来：它走真正的 `buildSource`，
+// 且**传一个真的判定表**进去 —— 装配顺序错一位，它就会响。
+//
+// 它不需要假馒头：命中判定与种子字节都**预置**在判定表里，
+// 于是这条测试里没有任何 HTTP 请求会发出去（也就不依赖网络）。
+func TestBuildSourceWithMTeamUsesTheSecondSource(t *testing.T) {
+	fake := newFakeAPI()
+	srv := httptest.NewServer(fake.handler())
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token.json")
+	if err := config.SaveToken(tokenPath, oldToken); err != nil {
+		t.Fatal(err)
+	}
+	mtDir := filepath.Join(dir, "mteam")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf(
+		"provider: appapi\napp_api:\n  host: %q\n  token_file: %q\n  probe_interval: \"0\"\n"+
+			"mteam:\n  api_key: \"test-key\"\n  state_dir: %q\n",
+		srv.URL, tokenPath, mtDir)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvToken, "")
+	t.Setenv(config.EnvMTeamKey, "")
+	t.Setenv(config.EnvUsername, "alice")
+	t.Setenv(config.EnvPassword, "s3cret")
+
+	holder, err := config.NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinStore, err := pin.Open(holder.PinPath())
+	if err != nil {
+		t.Fatalf("打开 pin store: %v", err)
+	}
+	t.Cleanup(func() { _ = pinStore.Close() })
+
+	// 预置一条命中：与 internal/mteam 的测试用的是**同一个**夹具与 infohash。
+	// 那一份的 infohash 是用 python 独立算出来的（见那边的注释）。
+	const fixture = "d8:announce47:https://tra1.m-team.cc/announce?credential=YWJj13:creation datei1791873283e4:infod6:lengthi1024e4:name5:a.mp412:piece lengthi16384e6:pieces20:012345678901234567897:privatei1eee"
+	const hash = "f875b7bedb38e072dde96440fb79e5fc55699d68"
+
+	mtStore, err := mteam.Open(holder.MTeamStateDir())
+	if err != nil {
+		t.Fatalf("打开判定表: %v", err)
+	}
+	t.Cleanup(func() { _ = mtStore.Close() })
+	if err := mtStore.SaveTorrent(hash, []byte(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	mtStore.Put("m1", mteam.Verdict{
+		Outcome: mteam.OutcomeHit,
+		Chosen:  mteam.Candidate{ID: "467487", Infohash: hash, Name: "SSIS-001 x", CNSub: true},
+	})
+
+	src, err := buildSource(holder.Current(), holder, pinStore, mtStore)
+	if err != nil {
+		t.Fatalf("buildSource: %v", err)
+	}
+
+	list, err := src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	if len(list.Works) != 1 || len(list.Works[0].Magnets) != 1 {
+		t.Fatalf("候选池应当是单元素，实际 %+v", list.Works)
+	}
+
+	// 一、M-Team 真的生效了 —— 上游那条（infohash "def"）被换掉。
+	m := list.Works[0].Magnets[0]
+	if m.Source != catalog.SourceMTeam {
+		t.Fatalf("下发的是 %v 那条 —— 第二个来源根本没生效（装配顺序错了？）", m.Source)
+	}
+	if m.Infohash != hash {
+		t.Errorf("infohash = %q, want %q", m.Infohash, hash)
+	}
+
+	// 二、pin 钉住的是 **M-Team 那条**，而不是它先看到的上游那条。
+	rec, ok := pinStore.Get("m1")
+	if !ok {
+		t.Fatal("pin 表里没有这部作品")
+	}
+	if rec.Infohash != hash {
+		t.Errorf("pin 钉的是 %q，而下发的是 %q —— pin 与 feed 不一致", rec.Infohash, hash)
 	}
 }

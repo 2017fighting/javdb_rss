@@ -109,3 +109,25 @@ nil 接收者的方法，当场 panic。
 > 这是本轮第三个「测试比真实链路弱」的例子（前两个：票 02 的装配倒置、
 > 票 03 的类型化 nil）。票 04 开工前应当先看 `cmd/javdb-rss/main_test.go`
 > 能不能加一条「真装配 + 假上游」的冒烟。
+
+## 真装配冒烟（2026-10-13，票 04 开工前补的）
+
+本轮已经出过**三个**「测试全绿但生产会死/会烧配额」的 bug，而其中两个在装配层，
+两个都是因为**测试用了比真实装配更弱的替身**：
+
+| bug | 为什么测试漏了 |
+|---|---|
+| 装饰器装配倒置（票 02） | 测试用**裸假 source** 当 inner，绕过了「mteam 与 pin 谁包谁」 |
+| 类型化 nil（票 03） | 测试传**字面 nil**，不是 main 里那个 `var st *mteam.Store` |
+
+已补两条钉子：
+
+- `cmd/javdb-rss/main_test.go` 的 `TestBuildSourceWithMTeamUsesTheSecondSource`
+  —— 走**真正的** `buildSource` 且**传一个真的判定表**（命中与种子字节预置在表里，
+  因此这条测试不发任何 HTTP）。装配顺序错一位它就响；已做**变异检验**确认
+  （变异回去 → 报「第二个来源根本没生效（装配顺序错了？）」）。
+- `internal/httpapi` 的 `TestWithSecondSourceIgnoresNil`
+  —— 钉住类型化 nil 的**第一层**（`WithSecondSource` 的 nil 判断），
+  此前只有第二层（Store 读方法 nil-safe）有钉子。
+
+> 这两条补完之后，装配层那两类 bug 才算真的有网兜着。

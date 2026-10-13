@@ -304,3 +304,28 @@ func TestTypedNilStoreBehavesLikeNoStore(t *testing.T) {
 		t.Errorf("nil 的判定表不该报「凭据坏了」：%v", m)
 	}
 }
+
+// TestWithSecondSourceIgnoresNil 钉住类型化 nil 那件事的**第一层**。
+//
+// `TestTypedNilStoreBehavesLikeNoStore` 钉的是第二层（Store 的读方法对 nil 接收者
+// 安全）—— 但装配层那个 `if st == nil { return s }` 从来没被调用过（评审指出）。
+// 第一层被下一个改装配的人绕过时，第二层还得兜着；两层都该有自己的钉子。
+func TestWithSecondSourceIgnoresNil(t *testing.T) {
+	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, nil)
+	if s.torrents != nil || s.mteamHealth != nil {
+		t.Fatal("前置条件：刚构造的 Server 不该挂第二个来源")
+	}
+
+	var nilStore *mteam.Store
+	s.WithSecondSource(nilStore)
+
+	// ⚠️ 这里断言的是「**没有挂上**」。若 WithSecondSource 少写那个 nil 判断，
+	// 这两个接口会变成非 nil（Go 的类型化 nil），于是 /torrent/ 会去调
+	// nil 接收者的方法 —— 而那正是当初 SIGSEGV 的形状。
+	if s.torrents != nil {
+		t.Error("nil 的判定表不该被挂成种子来源（类型化 nil 会让接口非 nil）")
+	}
+	if s.mteamHealth != nil {
+		t.Error("nil 的判定表不该被挂成凭据信号来源")
+	}
+}
