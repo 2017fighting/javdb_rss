@@ -12,7 +12,6 @@
 「二手证据不能当依据，要标出来」。
 
 ## 1. 接口形态
-
 | 项 | 值 | 证据 |
 |---|---|---|
 | base | `https://api.m-team.cc` | ✅ |
@@ -20,6 +19,19 @@
 | 鉴权 | 请求头 `x-api-key: <存取令牌>`（36 字符 UUID 形） | ✅ |
 | 令牌从哪来 | 站点【控制台 → 實驗室 → 存取令牌】 | 📖 |
 | 成功判据 | `message == "SUCCESS"`（失败时 `code` 非 `"0"`） | ✅ |
+
+### ⚠️ 失败也是 **HTTP 200** —— 只看状态码的实现会把它当成功
+
+实测（2026-10-13）：
+
+```
+key 无效      -> HTTP 200  {"code":"1","message":"key無效","data":null}
+压根没带 key  -> HTTP 200  {"code":"401","message":"Full authentication is required to access this resource"}
+下载链接过期  -> HTTP 200  {"code":"1","message":"連結不可用！ 超出有效期","data":null}
+```
+
+⇒ 成功判据必须是 `code == "0"`，不是状态码。分类靠 `message` 的原话
+（唯一可用的信号），**认不出来的一律落到普通错误** —— 猜错分类比不分类更坏。
 
 ### ⚠️ 两条会让人白折腾半天的坑（都实测过）
 
@@ -107,6 +119,27 @@ https://tra1.m-team.cc/announce?credential=<base64>
 
 ⇒ **「把馒头自己的下载链接当 enclosure 交给 qBittorrent」这条路实测是死的**
 （qbt 是稍后才去取的）。ADR-0004 里否掉它的理由现在有证据了。
+
+### ⚠️ 下载链接**合法地** 302 到 CDN（与 API 端点恰好相反）
+
+`genDlToken` 给的链接直取会得到：
+
+```
+HTTP 302  Location: https://fr1.halomt.com?app_id=1&playload=<base64>&sign=…&t=…&v=v2
+```
+
+真正的种子在那一跳之后（跟随后 130736 字节、`application/x-bittorrent`）。
+
+⭐ **这条决定了客户端要开两个不同的重定向策略：**
+
+| 请求 | 跟随重定向？ | 因为 |
+|---|---|---|
+| API 端点（search / detail / genDlToken） | **不跟** | 那里任何 302 都是 Cloudflare 按 UA 拦人（见 §1） |
+| 下载链接（→ CDN） | **跟** | 那一跳是正常的分发 |
+
+两边共用一个客户端的话，必然有一边是错的。本轮真踩过：一开始为了认 WAF 给所有请求都
+禁了重定向，于是**每一次下载都被误判成「被 Cloudflare 拦掉」** ——
+而报错文案还振振有词。
 
 ### ✅ 已结（用户观测，2026-10-13）：那份**凭据**长期有效
 

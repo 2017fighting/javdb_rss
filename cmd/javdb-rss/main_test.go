@@ -487,7 +487,7 @@ func TestBuildSourceWiringIsUsable(t *testing.T) {
 		t.Fatalf("打开 pin store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	src, err := buildSource(holder.Current(), holder, st)
+	src, err := buildSource(holder.Current(), holder, st, nil)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}
@@ -540,7 +540,7 @@ func TestBuildSourcePinsSelections(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	src, err := buildSource(holder.Current(), holder, st)
+	src, err := buildSource(holder.Current(), holder, st, nil)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}
@@ -605,7 +605,7 @@ func TestBuildSourceWantListIsWiredAndPinned(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	src, err := buildSource(holder.Current(), holder, st)
+	src, err := buildSource(holder.Current(), holder, st, nil)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestBuildSourceHandlesConcurrentIdenticalRequests(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	src, err := buildSource(holder.Current(), holder, st)
+	src, err := buildSource(holder.Current(), holder, st, nil)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}

@@ -36,6 +36,7 @@ type Config struct {
 
 	Feed   FeedConfig   `yaml:"feed"`
 	AppAPI AppAPIConfig `yaml:"app_api"`
+	MTeam  MTeamConfig  `yaml:"mteam"`
 
 	// Feeds 是可选的白名单。
 	//
@@ -101,6 +102,26 @@ type AppAPIConfig struct {
 	// 默认关闭会让升级后静默退回有抖动的纯函数 —— 而那正是要消除的失败。
 	// 文件不可写时本服务拒绝启动（fail fast）。
 	PinFile string `yaml:"pin_file"`
+}
+
+// MTeamConfig 是第二个数据来源（M-Team）的接入参数。
+//
+// **没有开关。** 「配没配 api_key」就是开关 —— 再加一个 enabled 只会多出一种
+// 自相矛盾的状态（开了但没 key）。
+type MTeamConfig struct {
+	// APIKey 是存取令牌，在站点【控制台 → 實驗室 → 存取令牌】自助取得。
+	//
+	// 环境变量 MTEAM_API_KEY **优先于**它（见 Config.MTeamKey）。
+	// ⚠️ 它是**凭据**：站点明文规定第三方工具用它访问接口，泄了就是账号风险。
+	APIKey string `yaml:"api_key"`
+	// StateDir 是判定表与种子文件的存放**目录**。
+	//
+	// 留空是「用默认路径」（配置文件旁边的 mteam/），不是「禁用」。
+	// 目录不可写时本服务拒绝启动（fail fast，照 pin 的先例）。
+	//
+	// 它里面有两个东西，而两者敏感度不同：判定表本身不含凭据，
+	// 而 torrents/ 下的种子**带着账号凭据**。
+	StateDir string `yaml:"state_dir"`
 }
 
 // FeedsConfig 是订阅白名单。
@@ -352,6 +373,17 @@ func (h *Holder) PinPath() string {
 	return h.resolveAlongside(h.Current().AppAPI.PinFile, "pin.json")
 }
 
+// MTeamStateDir 返回 M-Team 判定表所在**目录**的实际路径。
+//
+// mteam.state_dir 留空时，默认是**配置文件旁边**的 mteam/ ——
+// 与 token.json / pin.json 同一套规则（共用 resolveAlongside）。
+//
+// 它是目录而不是文件，因为这一份状态有**两个**东西要放：判定表本身，
+// 以及带账号凭据的种子文件（单独一层 torrents/ 子目录）。
+func (h *Holder) MTeamStateDir() string {
+	return h.resolveAlongside(h.Current().MTeam.StateDir, "mteam")
+}
+
 // resolveAlongside 实现「配置在哪儿，它的附属文件就在哪儿」这条规则。
 //
 // token.json 与 pin.json 都按它落地。抽出来是因为这两份持久状态**必须**
@@ -392,7 +424,24 @@ const (
 	// EnvUsername / EnvPassword 启用**自动续期**（见 LoadCredentials）。
 	EnvUsername = "JAVDB_USERNAME"
 	EnvPassword = "JAVDB_PASSWORD"
+	// EnvMTeamKey 是 M-Team 的 API 存取令牌。它**优先于**配置里的 mteam.api_key。
+	//
+	// 与 JAVDB_TOKEN 同一个形状（env 优先、空值不算设置），因为集群里
+	// 两份凭据都走 Secret + envFrom。
+	EnvMTeamKey = "MTEAM_API_KEY"
 )
+
+// MTeamKey 返回 M-Team 的 API key，**环境变量优先于配置文件**。
+//
+// 空白的值（空字符串或全空白）一律当作「没设置」—— 否则一个空的 env
+// （比如 compose 里写了但没填）会把配置文件里本来可用的 key 顶掉。
+// 这条判断与 LoadToken 一字不差地同构，故意的。
+func (c *Config) MTeamKey() string {
+	if v := strings.TrimSpace(os.Getenv(EnvMTeamKey)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(c.MTeam.APIKey)
+}
 
 // LoadToken 解析 token，环境变量**优先于**文件。
 //

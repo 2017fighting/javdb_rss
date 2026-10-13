@@ -27,6 +27,7 @@ import (
 	"github.com/2017fighting/javdb_rss/internal/dedupe"
 	"github.com/2017fighting/javdb_rss/internal/health"
 	"github.com/2017fighting/javdb_rss/internal/httpapi"
+	"github.com/2017fighting/javdb_rss/internal/mteam"
 	"github.com/2017fighting/javdb_rss/internal/pin"
 	"github.com/2017fighting/javdb_rss/internal/stub"
 )
@@ -78,7 +79,21 @@ func run() error {
 	}
 	defer func() { _ = pinStore.Close() }()
 
-	src, err := buildSource(cfg, holder, pinStore)
+	// 判定表是第二份持久状态。它**只在配了 key 时**才打开 ——
+	// 没 key 就没有第二个来源，而一个用不上的可写目录不该成为启动的硬要求。
+	//
+	// 它与 pin 的**可丢性不同**（丢它不改 guid，只是要重查一遍），
+	// 因此不放在同一个文件里：那会让「可以丢的」有机会带走「不可以丢的」。
+	var mteamStore *mteam.Store
+	if cfg.MTeamKey() != "" {
+		mteamStore, err = mteam.Open(holder.MTeamStateDir())
+		if err != nil {
+			return fmt.Errorf("打开 M-Team 判定表: %w", err)
+		}
+		defer func() { _ = mteamStore.Close() }()
+	}
+
+	src, err := buildSource(cfg, holder, pinStore, mteamStore)
 	if err != nil {
 		return err
 	}
@@ -108,7 +123,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           httpapi.New(holder, src, log).WithUpstream(tracker).Handler(),
+		Handler:           httpapi.New(holder, src, log).WithUpstream(tracker).WithTorrents(mteamStore).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -132,6 +147,15 @@ func run() error {
 				log.Error("重读 pin 表失败，继续使用旧表", "path", pinStore.Path(), "err", err)
 			} else {
 				log.Info("pin 表已重载", "path", pinStore.Path(), "条数", pinStore.Len())
+			}
+
+			// 判定表也一样：运维手工删掉一条（「这部作品想重选」）是个合理操作。
+			if mteamStore != nil {
+				if err := mteamStore.Reload(); err != nil {
+					log.Error("重读判定表失败，继续使用旧表", "path", mteamStore.Path(), "err", err)
+				} else {
+					log.Info("M-Team 判定表已重载", "path", mteamStore.Path(), "条数", mteamStore.Len())
+				}
 			}
 		}
 	}()
@@ -163,7 +187,7 @@ func run() error {
 //
 // 返回的是「每次调用都重读配置」的包装，而不是一个固化了 host/token 的客户端 ——
 // 这样 SIGHUP 改了 host / lang / device_uuid / token 能立即生效。
-func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store) (catalog.Source, error) {
+func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store, mt *mteam.Store) (catalog.Source, error) {
 	switch cfg.Provider {
 	case config.ProviderStub:
 		slog.Default().Warn("正在使用固定数据源 stub —— 不会访问任何网络，仅用于跑通链路")
@@ -201,10 +225,30 @@ func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store) (cata
 			slog.Default().Error("pin 落盘失败，进程即将退出（交由编排器重启）", "err", err)
 			os.Exit(1)
 		}
+
+		// M-Team 装饰器坐在 pin **外面**（先于 pin 执行），并**读** pin 表。
+		//
+		//   dedupe.New(mteam.New(pin.New(client)))   ✅
+		//   dedupe.New(pin.New(mteam.New(client)))   ❌ 它拿不到「这部作品钉过没有」
+		//
+		// 为什么它必须在 pin 外面：「首发冻结」的判据是「这部作品下发过没有」，
+		// 而那正是 pin 表回答的问题。它改写完候选池之后，pin 再照常把它钉住。
+		//
+		// 为什么它必须在 dedupe 里面：它和 pin 一样**原地改写** works[i].Magnets。
+		var src catalog.Source = pinned
+		if mt != nil {
+			m := mteam.New(pinned, &mteam.Client{APIKey: cfg.MTeamKey()}, mt, st, slog.Default())
+			m.OnFatal = func(err error) {
+				slog.Default().Error("判定表落盘失败，进程即将退出（交由编排器重启）", "err", err)
+				os.Exit(1)
+			}
+			src = m
+		}
+
 		// 外层：合并并发的相同请求，只打一次上游。
 		//
 		// 它不存任何东西（不是缓存），因此不返回陈旧数据、重启无影响。
-		return dedupe.New(pinned), nil
+		return dedupe.New(src), nil
 	default:
 		return nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
 	}

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,11 @@ type Server struct {
 	// 零值即可用，因此不必在 New 里初始化。它只在进程内、重启即丢 ——
 	// 丢了的代价只是再提醒一次，而本服务的领域状态仍然只有 pin 那一个例外。
 	sinceWarned warnOnce
+	// torrents 是 M-Team 判定表的**只读**句柄，供 /torrent/ 端点取种子字节。
+	//
+	// 为 nil 表示本实例没有第二个来源（没配 key）—— 那时该端点 404，
+	// 而不是 500：它确实不存在，而不是坏了。
+	torrents TorrentStore
 }
 
 // New 构造 Server。log 为 nil 时使用 slog.Default()。
@@ -55,6 +61,23 @@ func New(cfg *config.Holder, src catalog.Source, log *slog.Logger) *Server {
 // WithUpstream 挂上上游健康跟踪器，启用 /readyz 与 /healthz/upstream。
 func (s *Server) WithUpstream(t *health.Tracker) *Server {
 	s.upstream = t
+	return s
+}
+
+// TorrentStore 是 `/torrent/` 端点对判定表的**只读**需求。
+//
+// 只声明这一个方法：路由层要的只是「按 infohash 取回那份字节」，
+// 而「谁在写这张表」不是它的事。`*mteam.Store` 天然满足它。
+type TorrentStore interface {
+	LoadTorrent(infohash string) ([]byte, error)
+}
+
+// WithTorrents 挂上种子来源，启用 /torrent/{infohash}.torrent。
+//
+// 不挂时该路径返回 404（本实例没有第二个来源），而不是 500 ——
+// 「确实不存在」与「坏了」在排查时是两件事。
+func (s *Server) WithTorrents(ts TorrentStore) *Server {
+	s.torrents = ts
 	return s
 }
 
@@ -105,6 +128,7 @@ func (s *Server) Handler() http.Handler {
 	// （你要订哪些番号/女优），而这张清单的边界由你在 App 里画 ——
 	// 一个会变的列表放不进配置。
 	mux.HandleFunc("GET /rss/want.xml", s.handleWant)
+	mux.HandleFunc("GET "+feed.TorrentPathPrefix, s.handleTorrent)
 
 	// 健康检查分两层，分别对应 k8s 的两种探针。这个区分很重要：
 	//
@@ -126,6 +150,55 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /version", s.handleVersion)
 
 	return mux
+}
+
+// infohashPattern 限定 infohash 的形态：40 位十六进制。
+//
+// ⚠️ 它不只是「格式校验」—— 那个值会被拼进**文件路径**，因此
+// `../../etc/passwd` 之类会变成一次目录穿越。允许的字符集必须是白名单，
+// 而不是「把坏字符滤掉」的黑名单。
+var infohashPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+
+// handleTorrent 服务 GET /torrent/{infohash}.torrent：把 M-Team 那份种子端出去。
+//
+// # 为什么是种子文件而不是磁力
+//
+// M-Team 是私种，announce 里那份按次签发的凭据**只存在于种子文件里**——
+// API key 换不到。因此不含 announce 的磁力是死链，而含 announce 的磁力
+// 会把一份账号维度的凭据写进 feed。完整取舍见 docs/adr/0004。
+//
+// # 为什么它没有鉴权
+//
+// 本服务整个都没有鉴权（它自己 deploy/k8s.yaml 里就写着这句）。
+// 但这一个端点比别的严重一档：**它交出的东西带着你的 tracker 凭据**。
+// 隔离靠集群内 Service 与 edge 的 authelia 提供，而 README 把这件事写在了明处。
+func (s *Server) handleTorrent(w http.ResponseWriter, r *http.Request) {
+	if s.torrents == nil {
+		writeError(w, http.StatusNotFound, "本实例没有配置第二个数据来源")
+		return
+	}
+
+	hash := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, feed.TorrentPathPrefix), ".torrent")
+	if !infohashPattern.MatchString(hash) {
+		// 不区分「格式不对」与「没有这个」：对外它们都是「这儿没有东西」，
+		// 而区分只会把「我们怎么校验的」免费告诉枚举的人。
+		writeError(w, http.StatusNotFound, "没有这个种子")
+		return
+	}
+
+	data, err := s.torrents.LoadTorrent(strings.ToLower(hash))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "没有这个种子")
+		return
+	}
+
+	// 必须是这个 MIME：qBittorrent 只在 type 等于它时才把地址当成种子来源。
+	w.Header().Set("content-type", "application/x-bittorrent")
+	w.Header().Set("content-length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(data); err != nil {
+		s.log.ErrorContext(r.Context(), "写种子响应失败", "infohash", hash, "err", err)
+	}
 }
 
 // handleLiveness 只回答「进程还活着吗」。永远 200。
