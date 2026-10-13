@@ -167,6 +167,8 @@ type fakeMTeam struct {
 	// base 是这个假服务器的地址，由 newFixture 在起服务之后填 ——
 	// 下载链接必须是**绝对**地址（真的馒头给的就是绝对的）。
 	base string
+	// downloadPath 非空时覆盖下载路径（用来模拟「取种子失败」）。
+	downloadPath string
 }
 
 func (f *fakeMTeam) handler(t *testing.T) http.HandlerFunc {
@@ -180,9 +182,15 @@ func (f *fakeMTeam) handler(t *testing.T) http.HandlerFunc {
 			}
 			_, _ = io.WriteString(w, `{"code":"0","message":"SUCCESS","data":{"data":[`+f.rows+`]}}`)
 		case "/api/torrent/genDlToken":
-			_, _ = io.WriteString(w, `{"code":"0","message":"SUCCESS","data":"`+f.base+`/api/rss/dlv2"}`)
+			link := f.base + "/api/rss/dlv2"
+			if f.downloadPath != "" {
+				link = f.base + f.downloadPath
+			}
+			_, _ = io.WriteString(w, `{"code":"0","message":"SUCCESS","data":"`+link+`"}`)
 		case "/api/rss/dlv2":
 			_, _ = io.WriteString(w, f.torrent)
+		case "/api/torrent/gone":
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Errorf("假馒头收到意外路径 %q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -313,14 +321,14 @@ func TestNoMatchLeavesTheUpstreamMagnet(t *testing.T) {
 
 // TestMTeamFailureDoesNotBreakTheFeed 钉住「第二个来源出问题不该让整条 feed 失败」。
 //
-// 三种坏法都试：凭据无效、网络层失败、上游给了看不懂的响应。
+// 三种坏法都试：凭据无效、网络层失败、M-Team 给了看不懂的响应。
 func TestMTeamFailureDoesNotBreakTheFeed(t *testing.T) {
 	tests := []struct {
 		name string
 		mt   *fakeMTeam
 	}{
 		{"凭据无效", &fakeMTeam{errBody: `{"code":"1","message":"key無效"}`}},
-		{"上游给了看不懂的响应", &fakeMTeam{errBody: `这不是 JSON`}},
+		{"M-Team 给了看不懂的响应", &fakeMTeam{errBody: `这不是 JSON`}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -355,9 +363,19 @@ func TestUnusableTorrentFallsBack(t *testing.T) {
 	if m := list.Works[0].Magnets[0]; m.Infohash != "u" {
 		t.Errorf("认不出的种子应当降级，实际 %+v", m)
 	}
-	// 而且**不该**留下一条判定 —— 否则它会被当成「查过、有」永久记下来。
-	if _, ok := store.Get("id-SSIS-001"); ok {
-		t.Error("认不出的种子不该留下判定")
+	// 而它要留下一条**失败**记录 —— 不是命中、也不是负结果。
+	//
+	// 这条断言被评审改过一次：原来写的是「不该留下判定」，理由是「否则会被当成
+	// 查过、有 永久记下来」。那个担心对，但处置错了 —— 不记的话，那部作品
+	// **每轮都会重新搜索、重新下载**，而下载配额是 100 个/小时。
+	// 正砸的写法是记成 failed：它不构成判决（不会把作品当成「查过」），
+	// 但也不自动重试。
+	v, ok := store.Get("id-SSIS-001")
+	if !ok {
+		t.Fatal("认不出的种子应当留下一条失败记录（否则每轮都会重下）")
+	}
+	if v.Outcome != OutcomeFailed {
+		t.Errorf("outcome = %q, want failed（它不是命中，也不是负结果）", v.Outcome)
 	}
 }
 
@@ -634,6 +652,23 @@ func TestCredentialFailureIsVisibleFromTheStore(t *testing.T) {
 	if msg == "" || at.IsZero() {
 		t.Errorf("应当带上原因与时刻：msg=%q at=%v", msg, at)
 	}
+
+	// ⚠️ 关掉再打开一次 —— 这条测试的卖点就是「重启之后仍然成立」，
+	// 不真的重启一遍的话，它只证明了内存里能读到（评审指出过这一点）。
+	if err := store.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	reopened, err := Open(store.dir)
+	if err != nil {
+		t.Fatalf("重新 Open: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if _, _, broken := reopened.CredentialFailure(); !broken {
+		t.Error("重启之后「凭据坏了」就丢了 —— 那正是推导式设计要避免的")
+	}
 }
 
 // TestMissIsNotWordedAsFailure 钉住措辞。
@@ -664,5 +699,67 @@ func TestMissIsNotWordedAsFailure(t *testing.T) {
 	}
 	if strings.Contains(out, "失败") {
 		t.Errorf("负结果不该被写成「失败」—— 那是另一回事：%s", out)
+	}
+}
+
+// TestDownloadFailureIsNotRetriedEveryRender 是评审抓出来的那个 P1 的钉子。
+//
+// 当时**搜索命中之后**的所有失败（下载、解析、落盘）都只打了一条日志就 return，
+// 什么都没记 —— 于是那部作品**每轮渲染都会重新搜索、重新下载**，
+// 而下载配额是 100 个/小时。这正是票面禁止的「自动重试」。
+func TestDownloadFailureIsNotRetriedEveryRender(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+	// 搜索命中，但下载链接指向一个不存在的路径 —— 取种子会失败。
+	mt := &fakeMTeam{
+		rows: hitRow("1", "SSIS-001 x", true, "2021-01-01 00:00:00"),
+		// torrent 留空 + 把下载路径指到 404：见 handler 的 default 分支。
+		downloadPath: "/api/torrent/gone",
+	}
+	src, store, _ := newFixture(t, inner, mt, nil)
+
+	for i := 0; i < 3; i++ {
+		if _, err := src.WantToWatch(context.Background()); err != nil {
+			t.Fatalf("第 %d 次: %v", i, err)
+		}
+	}
+	if got := mt.searchCalls.Load(); got != 1 {
+		t.Errorf("搜索了 %d 次 —— 取种子失败也不该每轮重来", got)
+	}
+	v, ok := store.Get("id-SSIS-001")
+	if !ok || v.Outcome != OutcomeFailed {
+		t.Errorf("应当留下一条失败记录，实际 %+v（存在=%v）", v, ok)
+	}
+}
+
+// TestDropFailuresClearsOnlyFailures 钉住自愈那条路的两半：
+// 失败会被清掉（换 key 之后它们该重查），而**负结果不会被清**（它是判决，永久）。
+func TestDropFailuresClearsOnlyFailures(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	store.Put("a", Verdict{Outcome: OutcomeMiss})
+	store.Put("b", Verdict{Outcome: OutcomeFailed, Failure: "网络", FailureKind: FailureOther})
+	store.Put("c", Verdict{Outcome: OutcomeFailed, Failure: "key無效", FailureKind: FailureCredential})
+	store.Put("d", Verdict{Outcome: OutcomeHit, Chosen: Candidate{Infohash: "h"}})
+
+	if n := store.DropFailures(); n != 2 {
+		t.Errorf("清掉了 %d 条，want 2（只有失败）", n)
+	}
+	for _, id := range []string{"a", "d"} {
+		if _, ok := store.Get(id); !ok {
+			t.Errorf("%q 被误删了 —— 负结果与命中都不是失败", id)
+		}
+	}
+	for _, id := range []string{"b", "c"} {
+		if _, ok := store.Get(id); ok {
+			t.Errorf("%q 应当被清掉（失败不是判决，换 key 后它该重查）", id)
+		}
+	}
+	// 清完之后「凭据坏了」就不再报了 —— 这正是它要解决的假警报。
+	if _, _, broken := store.CredentialFailure(); broken {
+		t.Error("失败被清掉之后不该再报「凭据坏了」")
 	}
 }

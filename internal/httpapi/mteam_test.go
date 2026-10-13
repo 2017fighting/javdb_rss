@@ -251,8 +251,14 @@ func TestUpstreamDetailReportsMTeamCredential(t *testing.T) {
 	if m["credential_broken"] != true {
 		t.Errorf("credential_broken = %v, want true", m["credential_broken"])
 	}
-	if m["next_step"] != mteam.CredentialGuidance {
-		t.Errorf("next_step = %v，应当是 mteam 包给出的处置", m["next_step"])
+	// ⚠️ 断言的是**文案里的关键词**，不是 `mteam.CredentialGuidance` 那个常量 ——
+	// 拿被测实现自己的常量当期望值是同义反复：那个常量被改成空字符串也照样绿。
+	// （本文件开头就写着这条标准，而它当时被我自己违反了。）
+	nextStep, _ := m["next_step"].(string)
+	for _, want := range []string{"控制台", "存取令牌", "重试无用"} {
+		if !strings.Contains(nextStep, want) {
+			t.Errorf("next_step 里应当有 %q，实际是 %q", want, nextStep)
+		}
 	}
 	if !strings.Contains(m["error"].(string), "key無效") {
 		t.Errorf("error = %v，应当带上上游的原话", m["error"])

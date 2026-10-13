@@ -212,7 +212,7 @@ func TestRedirectIsDistinguishable(t *testing.T) {
 //
 // 实测：链接生成后约 5 分钟就失效，返回 `{"code":"1","message":"連結不可用！ 超出有效期"}`。
 // 正常情况下不会碰到（我们是生成完立刻取），碰到就说明流程出了问题 ——
-// 所以它要和「普通上游故障」分开。
+// 所以它要和「普通故障」分开。
 func TestExpiredLinkIsDistinguishable(t *testing.T) {
 	var c *Client
 	c, _ = newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +245,7 @@ func TestUnknownFailureIsAPlainError(t *testing.T) {
 		}
 	}
 	if !strings.Contains(err.Error(), "没见过的错") {
-		t.Errorf("报错里应当带上上游的原话，实际是 %q", err)
+		t.Errorf("报错里应当带上 M-Team 的原话，实际是 %q", err)
 	}
 }
 

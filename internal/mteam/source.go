@@ -108,11 +108,17 @@ func (s *Source) enrich(ctx context.Context, w *catalog.Work) {
 		switch v.Outcome {
 		case OutcomeHit:
 			s.apply(w, v)
-		case OutcomeMiss:
-			// **负结果永久**：不再问。它不是一个错误，也不该被当成「失败」。
-		case OutcomeFailed:
-			// **不自动重试**：只有「重置」会再试。自动重试会在上游抖动时
-			// 引发换源，也就是重复下载。
+		case OutcomeMiss, OutcomeFailed:
+			// 两种都不动候选池：
+			//   负结果是**判决** —— 查过、没有，永不重问；
+			//   失败**不是判决** —— 但它也不自动重试（自动重试会在抖动时引发换源，
+			//   也就是重复下载），唯一的重试入口是「重置」。
+		default:
+			// 认不出的结果（判定表被手改，或者将来加了新值而这里忘了处理）。
+			// **说一声再跳过** —— 静默跳过会让那部作品永远拿不到 M-Team，
+			// 而且看不出原因。
+			s.log.ErrorContext(ctx, "判定表里有一个认不出的结果，本次跳过 M-Team",
+				"作品", w.Number, "outcome", string(v.Outcome))
 		}
 		return
 	}
@@ -137,6 +143,12 @@ func (s *Source) enrich(ctx context.Context, w *catalog.Work) {
 	chosen := pickBest(matches)
 	data, err := s.client.Download(ctx, chosen.ID)
 	if err != nil {
+		// ⚠️ **也要记失败**，不能只打日志就走。
+		//
+		// 不记的话，那部作品下一轮会**重新搜索、重新下载** —— 而下载配额是
+		// 100 个/小时。这是评审抓出来的一个真 bug：搜索命中之后的所有失败
+		// （下载、解析、落盘）当时都被漏掉了，于是它们每轮重来一遍。
+		s.recordFailure(ctx, w, err)
 		s.log.WarnContext(ctx, "取 M-Team 的种子失败，本次按上游下发",
 			"作品", w.Number, "种子", chosen.ID, "err", err)
 		return
@@ -145,11 +157,14 @@ func (s *Source) enrich(ctx context.Context, w *catalog.Work) {
 	if err != nil {
 		// 这一条值得 WARN 而不是 Debug：它是**M-Team 的契约变了**的信号
 		// （种子形状不再是我们认得的），而不是某一次网络抖动。
+		s.recordFailure(ctx, w, err)
 		s.log.WarnContext(ctx, "M-Team 的种子认不出来，本次按上游下发",
 			"作品", w.Number, "种子", chosen.ID, "err", err)
 		return
 	}
 	if err := s.store.SaveTorrent(infohash, data); err != nil {
+		// 落盘失败同样要记：不记的话它也会每轮重来一次。
+		s.recordFailure(ctx, w, err)
 		s.log.ErrorContext(ctx, "存 M-Team 的种子失败，本次按上游下发",
 			"作品", w.Number, "infohash", infohash, "err", err)
 		return

@@ -75,15 +75,6 @@ type TorrentStore interface {
 	LoadTorrent(infohash string) ([]byte, error)
 }
 
-// WithTorrents 挂上种子来源，启用 /torrent/{infohash}.torrent。
-//
-// 不挂时该路径返回 404（本实例没有第二个来源），而不是 500 ——
-// 「确实不存在」与「坏了」在排查时是两件事。
-func (s *Server) WithTorrents(ts TorrentStore) *Server {
-	s.torrents = ts
-	return s
-}
-
 // MTeamHealth 是 `/healthz/upstream` 对第二个来源的**只读**需求。
 //
 // 它只回答一个问题：「M-Team 的凭据是不是失效了」。`*mteam.Store` 天然满足它。

@@ -151,6 +151,15 @@ func run() error {
 
 			// 判定表也一样：运维手工删掉一条（「这部作品想重选」）是个合理操作。
 			if mteamStore != nil {
+				// ⚠️ 先丢掉「查询失败」的记录再重读。
+				//
+				// SIGHUP 是运维**显式**说「我改了东西」的信号，而换 M-Team 的 key
+				// 正是它最常见的用法。失败不是判决（负结果才是），所以把它们丢掉、
+				// 让它们重查一遍 —— 否则那条历史失败会让 /healthz/upstream 永远报
+				// credential_broken，即使新 key 完全正常。
+				if n := mteamStore.DropFailures(); n > 0 {
+					log.Info("已清掉 M-Team 的查询失败记录，它们会重查一遍", "条数", n)
+				}
 				if err := mteamStore.Reload(); err != nil {
 					log.Error("重读判定表失败，继续使用旧表", "path", mteamStore.Path(), "err", err)
 				} else {

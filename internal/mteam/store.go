@@ -275,14 +275,14 @@ func (s *Store) Len() int {
 //
 // 它是从判定表**推导**出来的，不额外存一份状态：那条失败记录本身就是证据，
 // 而它也是「不要自动重试」的依据。好处是重启后仍然成立（判定表是持久的）——
-// 而一份只活在内存里的信号会在重启后消失，且因为失败已被缓存而**永远不会重新出现**。
+// 而一份只活在内存里的信号会在重启后消失，且因为失败已被记下而**永远不会重新出现**。
 //
 // 它返回最近的一条（按判定时刻）。
 //
 // ⚠️ **接收者为 nil 时返回「没坏」**：一个 nil 的 Store 就是「本实例没有第二个来源」，
 // 而那与「有来源、凭据正常」在这个问题上给出同一个答案。
 // 这层保护是必需的，不是防御性编程：装配层传给接口的是一个**类型化 nil**
-// （`var st *Store; WithMTeamHealth(st)`），而那个接口**不是 nil** ——
+// （`var st *Store; WithSecondSource(st)`），而那个接口**不是 nil** ——
 // 没有这层就会在每次请求上 panic。（真踩过。）
 func (s *Store) CredentialFailure() (msg string, at time.Time, broken bool) {
 	if s == nil {
@@ -299,6 +299,38 @@ func (s *Store) CredentialFailure() (msg string, at time.Time, broken bool) {
 		}
 	}
 	return msg, at, broken
+}
+
+// DropFailures 删掉所有「查询失败」的记录，返回删了几条。
+//
+// # 它存在的理由：失败需要一条自愈的路
+//
+// 「凭据坏了」是从判定表**推导**出来的（见 CredentialFailure）。而失败记录**不会**
+// 自己消失 —— 所以换掉 key 之后，那条历史失败会让 `/healthz/upstream` 永远报
+// `credential_broken: true`，即使新的 key 完全正常。那是**假警报**，而假警报会让人
+// 学会忽略这个字段。
+//
+// 而「失败」本来就**不是判决**（负结果才是）。所以在一份显式的「我改了东西」信号上
+// （SIGHUP）把它们丢掉，让它们重查一遍 —— 那正是运维换完 key 后想要的事。
+//
+// ⚠️ 它**不碰负结果**：那是判决，永久。
+func (s *Store) DropFailures() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, v := range s.verdicts {
+		if v.Outcome == OutcomeFailed {
+			delete(s.verdicts, id)
+			n++
+		}
+	}
+	if n > 0 {
+		s.dirty = true
+	}
+	return n
 }
 
 // Flush 把判定表落盘。无变更时零写入（qBittorrent 的常态轮询不碰磁盘）。
