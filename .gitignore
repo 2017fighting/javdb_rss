@@ -53,6 +53,16 @@ config.yaml
 # 它可能含上游返回的账号维度数据（例如 /users/collected_* 的响应），
 # 因此和凭据一样一律不入库 —— 工具的产物是「结论」，不是这些转储。
 contractprobe-out/
+# M-Team 的 API 存取令牌（从控制台→實驗室→存取令牌 取，手工放在仓库根目录）。
+# 它与 JAVDB_TOKEN 一样是凭据，而且**站点明文规定**第三方工具用它访问接口 ——
+# 泄了就是账号风险。
+#
+# 两个名字都盖：`javdb-apikey` 是实际在用的那个（名字起得不好 —— 它是馒头的 key，
+# 不是 JavDB 的），`mteam-apikey` 是任何人重命名时的自然选择。
+javdb-apikey
+mteam-apikey
+# M-Team 复勘探针落盘的原始响应（含账号维度数据、以及私种那份按次签发的凭据）。
+mteamprobe-out/
 secrets.yaml
 secrets.yml
 config.local.yaml
