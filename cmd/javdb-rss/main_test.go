@@ -488,7 +488,7 @@ func TestBuildSourceWiringIsUsable(t *testing.T) {
 		t.Fatalf("打开 pin store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	src, err := buildSource(holder.Current(), holder, st, nil)
+	src, _, err := buildSource(holder.Current(), holder, st, nil)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}
@@ -541,7 +541,7 @@ func TestBuildSourcePinsSelections(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	src, err := buildSource(holder.Current(), holder, st, nil)
+	src, _, err := buildSource(holder.Current(), holder, st, nil)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestBuildSourceWantListIsWiredAndPinned(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	src, err := buildSource(holder.Current(), holder, st, nil)
+	src, _, err := buildSource(holder.Current(), holder, st, nil)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}
@@ -673,7 +673,7 @@ func TestBuildSourceHandlesConcurrentIdenticalRequests(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	src, err := buildSource(holder.Current(), holder, st, nil)
+	src, _, err := buildSource(holder.Current(), holder, st, nil)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}
@@ -865,7 +865,7 @@ func TestBuildSourceWithMTeamUsesTheSecondSource(t *testing.T) {
 		Chosen:  mteam.Candidate{ID: "467487", Infohash: hash, Name: "SSIS-001 x", CNSub: true},
 	})
 
-	src, err := buildSource(holder.Current(), holder, pinStore, mtStore)
+	src, _, err := buildSource(holder.Current(), holder, pinStore, mtStore)
 	if err != nil {
 		t.Fatalf("buildSource: %v", err)
 	}

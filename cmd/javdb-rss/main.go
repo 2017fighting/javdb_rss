@@ -93,7 +93,7 @@ func run() error {
 		defer func() { _ = mteamStore.Close() }()
 	}
 
-	src, err := buildSource(cfg, holder, pinStore, mteamStore)
+	src, mteamLoop, err := buildSource(cfg, holder, pinStore, mteamStore)
 	if err != nil {
 		return err
 	}
@@ -115,6 +115,12 @@ func run() error {
 	// stub 是离线调试通道，让它静默地发外网请求既不符预期，
 	// 也会在 CI 环境里莫名其妙地依赖网络。
 	if cfg.Provider != config.ProviderStub {
+		if mteamLoop != nil {
+			// 后台判定循环。它读清单 → 对没有判定的作品查 M-Team → 落盘；
+			// 限速与可续跑见 mteam.Loop 的注释。
+			go mteamLoop.Run(ctx)
+		}
+
 		go health.Run(ctx, upstreamChecker{holder: holder}, tracker,
 			func() time.Duration { return holder.Current().AppAPI.ProbeInterval }, log)
 	} else {
@@ -196,11 +202,11 @@ func run() error {
 //
 // 返回的是「每次调用都重读配置」的包装，而不是一个固化了 host/token 的客户端 ——
 // 这样 SIGHUP 改了 host / lang / device_uuid / token 能立即生效。
-func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store, mt *mteam.Store) (catalog.Source, error) {
+func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store, mt *mteam.Store) (catalog.Source, *mteam.Loop, error) {
 	switch cfg.Provider {
 	case config.ProviderStub:
 		slog.Default().Warn("正在使用固定数据源 stub —— 不会访问任何网络，仅用于跑通链路")
-		return &stub.Source{}, nil
+		return &stub.Source{}, nil, nil
 	case config.ProviderAppAPI:
 		// ⚠️ 装配顺序是**接线的正确性**，不是风格问题。
 		//
@@ -221,7 +227,7 @@ func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store, mt *m
 		}
 		// st == nil 只会出现在还没建好 store 的调用点，那时退化为不钉住。
 		if st == nil {
-			return dedupe.New(client), nil
+			return dedupe.New(client), nil, nil
 		}
 
 		// 内层：把选中的磁链钉住（ticket 08）。
@@ -244,10 +250,12 @@ func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store, mt *m
 		// 这个 bug 被两轴评审抓到，而单测没抓到 —— 因为单测用的是裸假 source。
 		//
 		// 为什么它必须在 dedupe **里面**：它和 pin 一样原地改写 works[i].Magnets。
+		// M-Team 的判定**不在请求路径里做**（票 04）：feed 侧的 Source 只读结果，
+		// 写者是后台的 Loop。它必须读**原始上游**（而不是被扣住过的清单），
+		// 因此这里拿的是 `client` 而不是包好的那层。
 		var inner catalog.Source = client
 		if mt != nil {
-			m := mteam.New(inner, &mteam.Client{APIKey: cfg.MTeamKey()}, mt, st, slog.Default())
-			inner = m
+			inner = mteam.New(inner, mt, st, slog.Default())
 		}
 
 		pinned := pin.New(inner, st, nil)
@@ -255,22 +263,26 @@ func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store, mt *m
 			slog.Default().Error("pin 落盘失败，进程即将退出（交由编排器重启）", "err", err)
 			os.Exit(1)
 		}
-		// 判定表落盘失败同样致命 —— 它由 mteam 层自己上报。
+
+		var loop *mteam.Loop
 		if mt != nil {
-			if m, ok := inner.(*mteam.Source); ok {
-				m.OnFatal = func(err error) {
-					slog.Default().Error("判定表落盘失败，进程即将退出（交由编排器重启）", "err", err)
-					os.Exit(1)
-				}
+			loop = mteam.NewLoop(client, &mteam.Client{APIKey: cfg.MTeamKey()}, mt, st,
+				func() time.Duration { return holder.Current().MTeam.ScanInterval },
+				cfg.MTeam.MaxDownloadsPerHour, slog.Default())
+			// 判定表落盘失败是**致命**的：带着「内存已改、磁盘没改」的状态继续服务，
+			// 会让重启后的行为与本次运行不一致，而那种差异没人能解释。
+			loop.OnFatal = func(err error) {
+				slog.Default().Error("判定表落盘失败，进程即将退出（交由编排器重启）", "err", err)
+				os.Exit(1)
 			}
 		}
 
 		// 最外层：合并并发的相同请求，只打一次上游。
 		//
 		// 它不存任何东西（不是缓存），因此不返回陈旧数据、重启无影响。
-		return dedupe.New(pinned), nil
+		return dedupe.New(pinned), loop, nil
 	default:
-		return nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
+		return nil, nil, fmt.Errorf("未知的 provider: %q", cfg.Provider)
 	}
 }
 

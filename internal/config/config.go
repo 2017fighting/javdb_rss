@@ -122,6 +122,21 @@ type MTeamConfig struct {
 	// 它里面有两个东西，而两者敏感度不同：判定表本身不含凭据，
 	// 而 torrents/ 下的种子**带着账号凭据**。
 	StateDir string `yaml:"state_dir"`
+	// MaxDownloadsPerHour 是判定循环里**种子下载**的每小时上限。
+	//
+	// 留空（0）用站点自标的建议值 100 —— 它是整个功能**唯一的瓶颈**：
+	// 搜索配额是 1000/24h，富余得多。调高它就是在拿账号冒险，而站点明文写着
+	// 第三方工具滥用可能停用账号。
+	MaxDownloadsPerHour int `yaml:"max_downloads_per_hour"`
+	// ScanInterval 是后台判定循环的周期（如 "15m" / "1h"）。
+	//
+	// 设 0 关闭 —— 关掉是**真正的空操作**（连清单都不去读），与
+	// app_api.probe_interval 同一套语义。
+	//
+	// 为什么判定不能留在请求路径里：`/rss/want.xml` 的一次渲染已经要 ~20 秒，
+	// 而 qBittorrent 在 30 秒无字节传输时就掐断 —— 判定是「搜索 + 下载种子」，
+	// 234 部就是分钟级。周期由这里给、SIGHUP 可改。
+	ScanInterval time.Duration `yaml:"scan_interval"`
 }
 
 // FeedsConfig 是订阅白名单。
@@ -184,6 +199,14 @@ func Default() *Config {
 			// 默认打开探针。k8s 下这是 /readyz 的数据来源；
 			// 单纯跑 go run 时它只是一次每 15 分钟的轻请求，代价可忽略。
 			ProbeInterval: 15 * time.Minute,
+		},
+		MTeam: MTeamConfig{
+			// 默认 15 分钟 —— 与 qBittorrent 的轮询间隔同一量级。
+			//
+			// ⚠️ 它**只在配了 api_key 时才有意义**（没 key 就没有第二个来源，
+			// 循环也不会被装起来）。给一个非零默认值是因为「配了 key 却忘了设周期」
+			// 会让功能静默地不工作 —— 而那是本项目最不愿出现的一类失败。
+			ScanInterval: 15 * time.Minute,
 		},
 	}
 }

@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,7 +77,13 @@ func TestWantFeedServesMTorrentEndToEnd(t *testing.T) {
 		wantWork("SSIS-001", catalog.Magnet{Infohash: "上游那条", Name: "上游那条"}),
 	}}}
 	client := &mteam.Client{BaseURL: mt.URL, APIKey: "k", HTTP: mt.Client()}
-	src := mteam.New(inner, client, store, pins, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	src := mteam.New(inner, store, pins, log)
+
+	// 判定由**后台**做（票 04）—— 请求路径不再查 M-Team。
+	loop := mteam.NewLoop(inner, client, store, pins,
+		func() time.Duration { return time.Minute }, 0, log)
+	loop.Once(context.Background())
 
 	const baseURL = "http://javdb-rss.javdb-rss.svc.cluster.local:8080"
 	h := newTestServerWithSource(t, "provider: stub\nfeed:\n  base_url: \""+baseURL+"\"\n", src, store)
@@ -327,5 +336,103 @@ func TestWithSecondSourceIgnoresNil(t *testing.T) {
 	}
 	if s.mteamHealth != nil {
 		t.Error("nil 的判定表不该被挂成凭据信号来源")
+	}
+}
+
+// TestWantFeedWithholdsPendingSourceAndSaysSo 钉住票 04 的扣住语义。
+//
+// 判定未就绪的作品**不发条目**，但**不是静默**：计数要进 channel 标题 ——
+// 因为实测 qBittorrent 的 RSS API 响应里根本没有 description 字段，
+// 而它正是这条 feed 的主要消费者。
+//
+// 它同时是「首屏 < 30 秒」的根据：handler 一次 M-Team 都不打。
+func TestWantFeedWithholdsPendingSourceAndSaysSo(t *testing.T) {
+	store, err := mteam.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// 三个作品：一个已判定（命中），两个没有判定。
+	store.Put("id-KV-1", mteam.Verdict{
+		Outcome: mteam.OutcomeHit,
+		Chosen:  mteam.Candidate{ID: "1", Infohash: e2eInfohash, Name: "KV-1", SizeMiB: 1024},
+	})
+
+	src := &recordingSource{want: &catalog.WantList{Works: []catalog.Work{
+		wantWork("KV-1", catalog.Magnet{Infohash: "u1"}),
+		wantWork("KV-2", catalog.Magnet{Infohash: "u2"}),
+		wantWork("KV-3", catalog.Magnet{Infohash: "u3"}),
+	}}}
+	const base = "http://x"
+	// 用真的装饰器，但判定表里只有一条命中。
+	h := newTestServerWithSource(t, "provider: stub\nfeed:\n  base_url: \""+base+"\"\n",
+		mteam.New(src, store, nil, slog.New(slog.NewTextHandler(io.Discard, nil))), store)
+
+	got := parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+
+	// 只发一条（那条已判定的）。
+	if len(got.Channel.Items) != 1 {
+		t.Fatalf("得到 %d 条条目，want 1（未判定的两条应当被扣住）", len(got.Channel.Items))
+	}
+	if got.Channel.Items[0].GUID != e2eInfohash {
+		t.Errorf("guid = %q", got.Channel.Items[0].GUID)
+	}
+	// ⚠️ 而扣住**必须说出来**：总数仍是 3 部（用户看到的是他在 App 里标了几部），
+	// 另加「2 部待定来源」。
+	if !strings.Contains(got.Channel.Title, "3 部") {
+		t.Errorf("标题里应当有全部 3 部：%q", got.Channel.Title)
+	}
+	if !strings.Contains(got.Channel.Title, "2 部待定来源") {
+		t.Errorf("标题里应当有「2 部待定来源」：%q", got.Channel.Title)
+	}
+	if !strings.Contains(got.Channel.Description, "2 部还在判定用哪个来源") {
+		t.Errorf("描述里应当给完整句子：%q", got.Channel.Description)
+	}
+}
+
+// TestWantFeedStaysFastWithALargePendingList 钉住「首屏仍在 30 秒内」这条硬约束。
+//
+// 一个 200+ 部的清单、且**一部都还没判定** —— 如果判定还在请求路径里，
+// 这里会是「200 次搜索 + 最多 200 次种子下载」，分钟级，而 qBittorrent
+// 在 30 秒无字节传输时就掐断了。
+//
+// 这条测试**故意不设超时断言**（墙钟断言在 CI 上很脆）：它断言的是
+// **handler 一次 M-Team 都没打**，而那才是首屏快的原因。
+func TestWantFeedStaysFastWithALargePendingList(t *testing.T) {
+	var calls atomic.Int64
+	mt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.WriteString(w, `{"code":"0","message":"SUCCESS","data":{"data":[]}}`)
+	}))
+	defer mt.Close()
+
+	works := make([]catalog.Work, 0, 240)
+	for i := 0; i < 240; i++ {
+		works = append(works, wantWork(fmt.Sprintf("KV-%03d", i), catalog.Magnet{Infohash: fmt.Sprintf("h%03d", i)}))
+	}
+	store, err := mteam.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	src := &recordingSource{want: &catalog.WantList{Works: works}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// ⚠️ 判定表是**空的**，而且这里**故意把循环装好了但不跑** ——
+	// 请求路径不该有任何东西可查。
+	_ = mteam.NewLoop(src, &mteam.Client{BaseURL: mt.URL, APIKey: "k"}, store, nil,
+		func() time.Duration { return time.Minute }, 0, log)
+	h := newTestServerWithSource(t, "provider: stub\n", mteam.New(src, store, nil, log), store)
+
+	got := parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+	if len(got.Channel.Items) != 0 {
+		t.Errorf("一部都没判定，不该发条目，实际 %d 条", len(got.Channel.Items))
+	}
+	if !strings.Contains(got.Channel.Title, "240 部待定来源") {
+		t.Errorf("标题里应当有「240 部待定来源」：%q", got.Channel.Title)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("请求路径打了 M-Team %d 次 —— 一次都不该打", got)
 	}
 }

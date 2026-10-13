@@ -855,11 +855,17 @@ func (s *Server) handleWant(w http.ResponseWriter, r *http.Request) {
 		s.log.WarnContext(r.Context(), "想看清单超过翻页上限，本 feed 可能不完整",
 			"已读页数", list.PagesFetched, "上限", list.MaxPages, "已读条数", len(list.Works))
 	}
-	if pending := summary.pending(); pending > 0 {
+	if pending := summary.pendingMagnets(); pending > 0 {
 		// debug 级：等磁链是常态而不是故障，因此不占 warn/error。
 		// 用户看的信号在标题与描述里（见下）。
 		s.log.DebugContext(r.Context(), "想看清单里有尚无磁链的作品，未列入 feed",
-			"想看", summary.total(), "待磁力", pending)
+			"想看", summary.total(), "待磁链", pending)
+	}
+	if pending := summary.pendingSource(); pending > 0 {
+		// 同样是 debug 级：判定未就绪是**正常的等待**，不是故障。
+		// 它会在后台自己推进（见 mteam.Loop），而推进的可见信号是标题里那个数字在降。
+		s.log.DebugContext(r.Context(), "想看清单里有判定未就绪的作品，未列入 feed",
+			"想看", summary.total(), "待定来源", pending)
 	}
 
 	s.renderItems(w, r, feed.Meta{
@@ -887,18 +893,31 @@ type wantSummary struct {
 }
 
 // total 是「想看」清单里的作品数。
-func (w wantSummary) total() int { return len(w.List.Works) }
+//
+// ⚠️ 它**包括**被扣住的那批：用户看到的是「我在 App 里标了多少部」，
+// 而不是「服务这次愿意发多少条」。两者混起来的话，扣住会看起来像清单缩水了。
+func (w wantSummary) total() int { return len(w.List.Works) + w.List.PendingSource }
 
-// pending 是尚无磁链候选、因而不会出现在 feed 里的作品数。
+// pendingMagnets 是尚无磁链候选、因而不会出现在 feed 里的作品数。
 //
 // 它就是 feed.Build 跳过的那些 —— 不另外判定一遍。
-func (w wantSummary) pending() int { return w.total() - w.Items }
+// 注意被扣住的那批**不在** Works 里（它们连磁链都不该被发），因此不会算到这里。
+func (w wantSummary) pendingMagnets() int { return len(w.List.Works) - w.Items }
+
+// pendingSource 是**判定还没就绪**、因而被扣住的作品数。
+//
+// 它与 pendingMagnets 是**两种不同的等待**：一个在等上游出种，一个在等服务判定来源。
+// 分开写是因为处置完全不同 —— 前者只能等，后者等一会儿就好（而且会自己推进）。
+func (w wantSummary) pendingSource() int { return w.List.PendingSource }
 
 // title 是 channel 标题：简短，适合 qBittorrent 的订阅列表。
 func (w wantSummary) title() string {
 	parts := []string{fmt.Sprintf("%d 部", w.total())}
-	if p := w.pending(); p > 0 {
+	if p := w.pendingMagnets(); p > 0 {
 		parts = append(parts, fmt.Sprintf("%d 部待磁链", p))
+	}
+	if p := w.pendingSource(); p > 0 {
+		parts = append(parts, fmt.Sprintf("%d 部待定来源", p))
 	}
 	if w.List.Truncated {
 		parts = append(parts, "列表可能不完整")
@@ -913,8 +932,12 @@ func (w wantSummary) title() string {
 func (w wantSummary) description() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "App 里「想看」的作品，共 %d 部", w.total())
-	if p := w.pending(); p > 0 {
+	if p := w.pendingMagnets(); p > 0 {
 		fmt.Fprintf(&b, "；其中 %d 部尚无磁链，未列入本 feed", p)
+	}
+	if p := w.pendingSource(); p > 0 {
+		// 刻意不说「失败」：这是**正常的等待**，不是错误。
+		fmt.Fprintf(&b, "；其中 %d 部还在判定用哪个来源，未列入本 feed", p)
 	}
 	if w.List.Truncated {
 		fmt.Fprintf(&b, "；清单在读取第 %d 页时触顶，可能不完整", w.List.MaxPages)

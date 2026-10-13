@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"github.com/2017fighting/javdb_rss/internal/pin"
@@ -95,7 +96,37 @@ func TestPickBest(t *testing.T) {
 	}
 }
 
-// --- 装饰器 -------------------------------------------------------------------
+// TestRateGateIsASlidingWindow 钉住限速闸门的形状。
+//
+// ⚠️ 它必须是**滑动**的一小时，而不是「整点清零」—— 后者会在整点前后各放行 100 个，
+// 也就是一小时里 200 个，而站点的建议值是 100 个/小时。
+func TestRateGateIsASlidingWindow(t *testing.T) {
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	g := &rateGate{max: 2, window: time.Hour, now: func() time.Time { return now }}
+
+	if !g.allow() {
+		t.Fatal("第一次应当放行")
+	}
+	// 把第二次放到半小时后，这样两个记录不会同时滑出窗口。
+	now = now.Add(30 * time.Minute)
+	if !g.allow() {
+		t.Fatal("第二次应当放行")
+	}
+	if g.allow() {
+		t.Error("第三次不该放行（上限 2）")
+	}
+
+	// 再推 31 分钟：第一次（12:00）滑出窗口，第二次（12:30）还在。
+	now = now.Add(31 * time.Minute)
+	if !g.allow() {
+		t.Error("最早那次滑出窗口之后应当放行")
+	}
+	if g.allow() {
+		t.Error("现在窗口里又满了（12:30 那次 + 新那次），不该放行")
+	}
+}
+
+// --- 夹具 ---------------------------------------------------------------------
 
 // fakePins 是一个可编程的钉住表。
 type fakePins struct{ pinned map[string]bool }
@@ -120,7 +151,7 @@ func (f *fakeInner) WantToWatch(context.Context) (catalog.WantList, error) {
 	if f.wantErr != nil {
 		return catalog.WantList{}, f.wantErr
 	}
-	// 每次都返回一份**新的**切片：装饰器会原地改写它。
+	// 每次都返回一份**新的**切片。
 	works := make([]catalog.Work, len(f.want))
 	copy(works, f.want)
 	return catalog.WantList{Works: works}, nil
@@ -160,11 +191,11 @@ type fakeMTeam struct {
 	searchCalls atomic.Int64
 	// rows 是搜索返回的原始行。
 	rows string
-	// err 非空时，搜索返回一个失败信封。
+	// errBody 非空时，搜索返回一个失败信封。
 	errBody string
 	// torrent 是下载返回的字节。
 	torrent string
-	// base 是这个假服务器的地址，由 newFixture 在起服务之后填 ——
+	// base 是这个假服务器的地址，由夹具在起服务之后填 ——
 	// 下载链接必须是**绝对**地址（真的馒头给的就是绝对的）。
 	base string
 	// downloadPath 非空时覆盖下载路径（用来模拟「取种子失败」）。
@@ -198,7 +229,23 @@ func (f *fakeMTeam) handler(t *testing.T) http.HandlerFunc {
 	}
 }
 
-func newFixture(t *testing.T, inner *fakeInner, mt *fakeMTeam, pinned map[string]bool) (*Source, *Store, *httptest.Server) {
+// fixture 把一次测试要用的两半凑齐：请求路径的 Source（只读）与后台的 Loop（写者）。
+type fixture struct {
+	src   *Source
+	loop  *Loop
+	store *Store
+	inner *fakeInner
+	mt    *fakeMTeam
+	log   *bytes.Buffer
+}
+
+// newFixture 造一个夹具。maxDownloadsPerHour ≤ 0 用默认值。
+func newFixture(t *testing.T, inner *fakeInner, mt *fakeMTeam, pinned map[string]bool) *fixture {
+	t.Helper()
+	return newFixtureLimited(t, inner, mt, pinned, 0)
+}
+
+func newFixtureLimited(t *testing.T, inner *fakeInner, mt *fakeMTeam, pinned map[string]bool, maxPerHour int) *fixture {
 	t.Helper()
 	srv := httptest.NewServer(mt.handler(t))
 	t.Cleanup(srv.Close)
@@ -210,11 +257,33 @@ func newFixture(t *testing.T, inner *fakeInner, mt *fakeMTeam, pinned map[string
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
+	log, buf := captureLogs()
 	client := &Client{BaseURL: srv.URL, APIKey: "k", HTTP: srv.Client()}
-	return New(inner, client, store, fakePins{pinned: pinned}, quietLogger()), store, srv
+	pins := fakePins{pinned: pinned}
+	return &fixture{
+		src:   New(inner, store, pins, log),
+		loop:  NewLoop(inner, client, store, pins, func() time.Duration { return time.Minute }, maxPerHour, log),
+		store: store,
+		inner: inner,
+		mt:    mt,
+		log:   buf,
+	}
 }
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+func captureLogs() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
+}
+
+// decide 让后台循环跑 n 轮。
+func (f *fixture) decide(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		f.loop.Once(context.Background())
+	}
+}
 
 // hitRow 造一行搜索命中。infohash 从缺 —— 线格式里它恒为 null。
 func hitRow(id, name string, cnsub bool, created string) string {
@@ -230,25 +299,63 @@ func wantWork(number string, magnets ...catalog.Magnet) catalog.Work {
 	return catalog.Work{ID: "id-" + number, Number: number, Title: "标题 " + number, Magnets: magnets}
 }
 
-// TestHitReplacesThePoolWithThisServicesTorrent 是本票的主路径。
-func TestHitReplacesThePoolWithThisServicesTorrent(t *testing.T) {
-	upstreamMagnet := catalog.Magnet{Infohash: "upstream-hash", Name: "上游那条"}
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet)}}
-	mt := &fakeMTeam{
-		rows:    hitRow("467487", "SSIS-001 一ヶ月間の…", true, "2021-02-22 15:19:51"),
-		torrent: torrentCanonical,
-	}
-	src, _, _ := newFixture(t, inner, mt, nil)
+// upstreamMagnet 是「上游那条」—— 断言里反复要用它。
+func upstreamMagnet() catalog.Magnet {
+	return catalog.Magnet{Infohash: "upstream-hash", Name: "上游那条"}
+}
 
-	list, err := src.WantToWatch(context.Background())
+// --- 请求路径：只读，而且绝不查 -----------------------------------------------
+
+// TestRequestPathNeverCallsMTeam 是票 04 最要紧的一条。
+//
+// 判定**不在请求路径里做**。理由不是审美：`/rss/want.xml` 的一次渲染已经要 ~20 秒
+// （24 页清单 + 222 次磁链请求），而 qBittorrent 在 30 秒无字节传输时就掐断请求 ——
+// 而 feed 是渲染完才写第一个字节。判定是「搜索 + 下载种子」，234 部就是分钟级。
+//
+// 所以：**未判定的作品被扣住不发，而不是当场去查**。
+func TestRequestPathNeverCallsMTeam(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", true, "2021-01-01 00:00:00"), torrent: torrentCanonical}
+	f := newFixture(t, inner, mt, nil)
+
+	for i := 0; i < 3; i++ {
+		list, err := f.src.WantToWatch(context.Background())
+		if err != nil {
+			t.Fatalf("第 %d 次: %v", i, err)
+		}
+		// 扣住：一个条目都不发……
+		if len(list.Works) != 0 {
+			t.Errorf("未判定的作品应当被扣住，实际发了 %d 条", len(list.Works))
+		}
+		// ……但**不是静默**：计数要交出去，好让标题说出来。
+		if list.PendingSource != 1 {
+			t.Errorf("PendingSource = %d, want 1", list.PendingSource)
+		}
+	}
+	if got := mt.searchCalls.Load(); got != 0 {
+		t.Errorf("请求路径打了 M-Team %d 次 —— 它一次都不该打", got)
+	}
+}
+
+// TestHitVerdictReplacesThePool 是主路径：后台判定命中之后，feed 交出馒头那份。
+func TestHitVerdictReplacesThePool(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	mt := &fakeMTeam{rows: hitRow("467487", "SSIS-001 一ヶ月間の…", true, "2021-02-22 15:19:51"), torrent: torrentCanonical}
+	f := newFixture(t, inner, mt, nil)
+
+	f.decide(t, 1)
+
+	list, err := f.src.WantToWatch(context.Background())
 	if err != nil {
 		t.Fatalf("WantToWatch: %v", err)
+	}
+	if list.PendingSource != 0 {
+		t.Errorf("判定已就绪，不该再扣住：%d", list.PendingSource)
 	}
 	if len(list.Works) != 1 || len(list.Works[0].Magnets) != 1 {
 		t.Fatalf("候选池应当是单元素，实际 %+v", list.Works)
 	}
 	m := list.Works[0].Magnets[0]
-
 	// 来源被换成 M-Team（这是「整体替换」的证据：上游那条没了）。
 	if m.Source != catalog.SourceMTeam {
 		t.Errorf("来源 = %v, want SourceMTeam", m.Source)
@@ -265,333 +372,249 @@ func TestHitReplacesThePoolWithThisServicesTorrent(t *testing.T) {
 	}
 }
 
-// TestHitIsCachedAcrossRenders 确认判定落地之后不再重问馒头。
+// TestMissAndFailurePassThroughAndAreNotRetried 钉住另外两种结果：
+// 它们都**原样发上游那条**，而且都不再重问。
 //
-// 这条不是优化：qBittorrent 每 15 分钟拉一次，而馒头的搜索配额是 1000 次/24 小时。
-func TestHitIsCachedAcrossRenders(t *testing.T) {
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", false, "2021-01-01 00:00:00"), torrent: torrentCanonical}
-	src, _, _ := newFixture(t, inner, mt, nil)
-
-	for i := 0; i < 3; i++ {
-		if _, err := src.WantToWatch(context.Background()); err != nil {
-			t.Fatalf("第 %d 次: %v", i, err)
-		}
+// 两者的区别是：负结果是**判决**（永久），失败不是判决但也不自动重试。
+func TestMissAndFailurePassThroughAndAreNotRetried(t *testing.T) {
+	tests := []struct {
+		name string
+		mt   *fakeMTeam
+		want Outcome
+	}{
+		{"负结果（搜索有结果，但都不是这部作品）",
+			&fakeMTeam{rows: hitRow("1", "ABP-123 别的片", false, "2021-01-01 00:00:00")}, OutcomeMiss},
+		{"查询失败（M-Team 给了看不懂的响应）",
+			&fakeMTeam{errBody: `这不是 JSON`}, OutcomeFailed},
 	}
-	if got := mt.searchCalls.Load(); got != 1 {
-		t.Errorf("搜索了 %d 次，判定落地后应当只搜一次", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+			f := newFixture(t, inner, tt.mt, nil)
+
+			f.decide(t, 3) // 三轮：只有第一轮该查
+
+			if got := tt.mt.searchCalls.Load(); got != 1 {
+				t.Errorf("查了 %d 次 —— %s 不该被重问", got, tt.want)
+			}
+			v, ok := f.store.Get("id-SSIS-001")
+			if !ok || v.Outcome != tt.want {
+				t.Errorf("判定 = %+v（存在=%v），want %s", v, ok, tt.want)
+			}
+
+			list, err := f.src.WantToWatch(context.Background())
+			if err != nil {
+				t.Fatalf("WantToWatch: %v", err)
+			}
+			if list.PendingSource != 0 {
+				t.Errorf("有判定就不该扣住：PendingSource=%d", list.PendingSource)
+			}
+			if m := list.Works[0].Magnets[0]; m.Infohash != "upstream-hash" {
+				t.Errorf("应当原样发上游那条，实际 %+v", m)
+			}
+		})
 	}
 }
 
-// TestPinnedWorkIsNotEvenQueried 钉住「首发冻结」。
+// TestPinnedIsNeverDecided 钉住「首发冻结」。
 //
-// 「有钉住 ⇒ 连问都不问」不只是省一次请求：它保证**已经下发过的作品不会换来源**，
-// 而换来源 = 磁盘上多一份。
-func TestPinnedWorkIsNotEvenQueried(t *testing.T) {
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+// 已下发的作品：后台**连问都不问**，feed 也**原样放行**。
+// 这是「来源永不自动更换」的落点 —— 换来源 = 磁盘上多一份。
+func TestPinnedIsNeverDecided(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
 	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", true, "2021-01-01 00:00:00"), torrent: torrentCanonical}
-	src, _, _ := newFixture(t, inner, mt, map[string]bool{"id-SSIS-001": true})
+	f := newFixture(t, inner, mt, map[string]bool{"id-SSIS-001": true})
 
-	list, err := src.WantToWatch(context.Background())
+	f.decide(t, 2)
+
+	if got := mt.searchCalls.Load(); got != 0 {
+		t.Errorf("已钉住的作品被查了 %d 次，应当一次都不查", got)
+	}
+	list, err := f.src.WantToWatch(context.Background())
 	if err != nil {
 		t.Fatalf("WantToWatch: %v", err)
 	}
-	if got := mt.searchCalls.Load(); got != 0 {
-		t.Errorf("已钉住的作品被查了 %d 次，应当一次都不查", got)
+	if list.PendingSource != 0 {
+		t.Errorf("已钉住的不该被扣住（它早就下发过了）：%d", list.PendingSource)
 	}
 	if m := list.Works[0].Magnets[0]; m.Source != catalog.SourceUpstream {
 		t.Errorf("已钉住的作品不该被换来源，实际 %v", m.Source)
 	}
 }
 
-// TestNoMatchLeavesTheUpstreamMagnet 确认「馒头没有」不改变任何东西。
-func TestNoMatchLeavesTheUpstreamMagnet(t *testing.T) {
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-	mt := &fakeMTeam{rows: hitRow("1", "ABP-123 别的片", true, "2021-01-01 00:00:00"), torrent: torrentCanonical}
-	src, _, _ := newFixture(t, inner, mt, nil)
-
-	list, err := src.WantToWatch(context.Background())
-	if err != nil {
-		t.Fatalf("WantToWatch: %v", err)
-	}
-	if m := list.Works[0].Magnets[0]; m.Infohash != "u" || m.Source != catalog.SourceUpstream {
-		t.Errorf("没有命中时应当原样发上游那条，实际 %+v", m)
-	}
-}
-
-// TestMTeamFailureDoesNotBreakTheFeed 钉住「第二个来源出问题不该让整条 feed 失败」。
+// TestLoopIsResumable 钉住「可续跑」：判定表**就是**进度。
 //
-// 三种坏法都试：凭据无效、网络层失败、M-Team 给了看不懂的响应。
-func TestMTeamFailureDoesNotBreakTheFeed(t *testing.T) {
-	tests := []struct {
-		name string
-		mt   *fakeMTeam
-	}{
-		{"凭据无效", &fakeMTeam{errBody: `{"code":"1","message":"key無效"}`}},
-		{"M-Team 给了看不懂的响应", &fakeMTeam{errBody: `这不是 JSON`}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-			tt.mt.torrent = torrentCanonical
-			src, _, _ := newFixture(t, inner, tt.mt, nil)
+// 第二轮的清单里同一部作品已经有判定 ⇒ 不再重问。
+// 这也正是配额能撑住的原因：一个 234 部的清单只会在**第一次**被问一遍。
+func TestLoopIsResumable(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{
+		wantWork("SSIS-001", upstreamMagnet()),
+		wantWork("SSIS-002", upstreamMagnet()),
+	}}
+	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", false, "2021-01-01 00:00:00"), torrent: torrentCanonical}
+	f := newFixture(t, inner, mt, nil)
 
-			list, err := src.WantToWatch(context.Background())
-			if err != nil {
-				t.Fatalf("M-Team 失败不该让整条 feed 失败，却得到 %v", err)
-			}
-			if m := list.Works[0].Magnets[0]; m.Infohash != "u" {
-				t.Errorf("失败时应当降级成上游那条，实际 %+v", m)
-			}
-		})
+	f.decide(t, 1)
+	if got := mt.searchCalls.Load(); got != 2 {
+		t.Errorf("第一轮查了 %d 次，want 2（两部都没判定）", got)
+	}
+	f.decide(t, 2)
+	if got := mt.searchCalls.Load(); got != 2 {
+		t.Errorf("后续轮次又查了 —— 判定表应当就是进度（总 %d 次）", got)
 	}
 }
 
-// TestUnusableTorrentFallsBack 确认「种子认不出来」也降级，而不是发出一个坏 guid。
-func TestUnusableTorrentFallsBack(t *testing.T) {
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+// TestLoopRateLimitsDownloads 钉住那个唯一的瓶颈：**种子下载 ≤ N/小时**。
+//
+// ⚠️ 闸门关掉时**不写判定** —— 「还没取到种子」不是任何一种结果。
+// 写进去就等于「永久不再试」，而它明明只是等下一轮。
+func TestLoopRateLimitsDownloads(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{
+		wantWork("SSIS-001", upstreamMagnet()),
+		wantWork("SSIS-002", upstreamMagnet()),
+	}}
+	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", false, "2021-01-01 00:00:00"), torrent: torrentCanonical}
+	// 搜索会命中两个番号（同一行匹配得上吗？匹配不上 —— 见下）。
+	// 因此这里让两个作品共用同一个番号前缀，保证两条都能命中。
+	inner.want[1] = wantWork("SSIS-001", upstreamMagnet())
+	f := newFixtureLimited(t, inner, mt, nil, 1) // 每小时只放行 1 个下载
+
+	f.decide(t, 3)
+
+	// 一个下载配额 → 只有一部拿到判定；另一部**没有判定**（留到下一轮）。
+	if got := f.store.Len(); got != 1 {
+		t.Errorf("判定表里有 %d 条，want 1（闸门只放行了一个下载）", got)
+	}
+	if got := f.mt.searchCalls.Load(); got != 1 {
+		t.Errorf("搜索了 %d 次 —— 闸门关了就该停下，而不是继续搜下一个", got)
+	}
+}
+
+// TestLoopSurvivesWantListFailure 钉住「不退出进程」。
+//
+// 读清单失败（没 token / 上游坏）⇒ 跳过本轮 + WARN。退出会把一次上游抖动
+// 变成一次重启循环，而它并没有那么严重。
+func TestLoopSurvivesWantListFailure(t *testing.T) {
+	inner := &fakeInner{wantErr: errors.New("上游炸了")}
+	f := newFixture(t, inner, &fakeMTeam{}, nil)
+
+	f.decide(t, 1) // 不 panic、不退出
+
+	if got := f.store.Len(); got != 0 {
+		t.Errorf("读不到清单时不该产生判定，实际 %d 条", got)
+	}
+	if !strings.Contains(f.log.String(), "跳过本轮") {
+		t.Errorf("日志里应当说清楚跳过了这一轮：%s", f.log.String())
+	}
+}
+
+// TestLoopOffWhenIntervalZero 钉住「0 表示关闭」，而且关闭是**真正的空操作**。
+//
+// ⚠️ 连清单都不去读 —— 否则「关掉」会先偷偷打一发上游请求
+// （health.Run 有同一条判断）。
+func TestLoopOffWhenIntervalZero(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", true, "2021-01-01 00:00:00"), torrent: torrentCanonical}
+	f := newFixture(t, inner, mt, nil)
+	f.loop.interval = func() time.Duration { return 0 }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { f.loop.Run(ctx); close(done) }()
+	time.Sleep(120 * time.Millisecond)
+	cancel()
+	<-done
+
+	if got := inner.wantCalls.Load(); got != 0 {
+		t.Errorf("关闭时读了 %d 次清单 —— 关闭应当是真正的空操作", got)
+	}
+	if got := mt.searchCalls.Load(); got != 0 {
+		t.Errorf("关闭时打了 %d 次 M-Team", got)
+	}
+}
+
+// TestDownloadFailureIsRecordedOnce 是票 03 评审那个 P1 的钉子（已随分工搬到 Loop）。
+//
+// 当时**搜索命中之后**的失败只打了一条日志就 return，什么都没记 ——
+// 于是那部作品每轮都会重新搜索、重新下载，而下载配额是 100 个/小时。
+func TestDownloadFailureIsRecordedOnce(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	mt := &fakeMTeam{
+		rows:         hitRow("1", "SSIS-001 x", true, "2021-01-01 00:00:00"),
+		downloadPath: "/api/torrent/gone", // 取种子会 404
+	}
+	f := newFixture(t, inner, mt, nil)
+
+	f.decide(t, 3)
+
+	if got := mt.searchCalls.Load(); got != 1 {
+		t.Errorf("搜索了 %d 次 —— 取种子失败也不该每轮重来", got)
+	}
+	v, ok := f.store.Get("id-SSIS-001")
+	if !ok || v.Outcome != OutcomeFailed {
+		t.Errorf("应当留下一条失败记录，实际 %+v（存在=%v）", v, ok)
+	}
+}
+
+// TestUnusableTorrentIsRecordedAsFailure 确认「种子认不出来」也降级 + 记失败，
+// 而不是发出一个坏 guid，也不是每轮重下。
+func TestUnusableTorrentIsRecordedAsFailure(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
 	mt := &fakeMTeam{
 		rows:    hitRow("1", "SSIS-001 x", false, "2021-01-01 00:00:00"),
 		torrent: torrentV2Only, // 认不出来的种子
 	}
-	src, store, _ := newFixture(t, inner, mt, nil)
+	f := newFixture(t, inner, mt, nil)
+	f.decide(t, 2)
 
-	list, err := src.WantToWatch(context.Background())
+	v, ok := f.store.Get("id-SSIS-001")
+	if !ok || v.Outcome != OutcomeFailed {
+		t.Fatalf("认不出的种子应当留下失败记录，实际 %+v（存在=%v）", v, ok)
+	}
+	list, err := f.src.WantToWatch(context.Background())
 	if err != nil {
 		t.Fatalf("WantToWatch: %v", err)
 	}
-	if m := list.Works[0].Magnets[0]; m.Infohash != "u" {
-		t.Errorf("认不出的种子应当降级，实际 %+v", m)
-	}
-	// 而它要留下一条**失败**记录 —— 不是命中、也不是负结果。
-	//
-	// 这条断言被评审改过一次：原来写的是「不该留下判定」，理由是「否则会被当成
-	// 查过、有 永久记下来」。那个担心对，但处置错了 —— 不记的话，那部作品
-	// **每轮都会重新搜索、重新下载**，而下载配额是 100 个/小时。
-	// 正砸的写法是记成 failed：它不构成判决（不会把作品当成「查过」），
-	// 但也不自动重试。
-	v, ok := store.Get("id-SSIS-001")
-	if !ok {
-		t.Fatal("认不出的种子应当留下一条失败记录（否则每轮都会重下）")
-	}
-	if v.Outcome != OutcomeFailed {
-		t.Errorf("outcome = %q, want failed（它不是命中，也不是负结果）", v.Outcome)
+	if m := list.Works[0].Magnets[0]; m.Infohash != "upstream-hash" {
+		t.Errorf("应当降级成上游那条，实际 %+v", m)
 	}
 }
 
-// TestInnerErrorPropagates 确认上游自己的错仍然照原样报出去。
-func TestInnerErrorPropagates(t *testing.T) {
-	inner := &fakeInner{wantErr: errors.New("上游炸了")}
-	src, _, _ := newFixture(t, inner, &fakeMTeam{}, nil)
-	if _, err := src.WantToWatch(context.Background()); err == nil {
-		t.Fatal("上游的错应当原样报出去")
+// TestCredentialFailureIsVisibleFromTheStore 钉住「凭据坏了」是**推导**出来的，
+// 而不是额外存的一份状态 —— 因此重启之后仍然成立。
+func TestCredentialFailureIsVisibleFromTheStore(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	mt := &fakeMTeam{errBody: `{"code":"1","message":"key無效"}`}
+	f := newFixture(t, inner, mt, nil)
+
+	if _, _, broken := f.store.CredentialFailure(); broken {
+		t.Error("还没查过就不该报「凭据坏了」")
 	}
-}
+	f.decide(t, 1)
 
-// TestOtherRoutesAreUntouched 钉住「只改一条路由」。
-func TestOtherRoutesAreUntouched(t *testing.T) {
-	inner := &fakeInner{}
-	mt := &fakeMTeam{rows: hitRow("1", "x", true, "2021-01-01 00:00:00"), torrent: torrentCanonical}
-	src, _, _ := newFixture(t, inner, mt, nil)
-
-	if _, err := src.Code(context.Background(), "SSIS-001"); err != nil {
-		t.Fatalf("Code: %v", err)
+	msg, at, broken := f.store.CredentialFailure()
+	if !broken {
+		t.Fatal("凭据失效应当能从判定表里读出来")
 	}
-	if got := mt.searchCalls.Load(); got != 0 {
-		t.Errorf("番号路由不该碰馒头，却查了 %d 次", got)
+	if msg == "" || at.IsZero() {
+		t.Errorf("应当带上原因与时刻：msg=%q at=%v", msg, at)
 	}
-	if got := inner.codeCalls.Load(); got != 1 {
-		t.Errorf("番号路由应当原样透传，实际调用 %d 次", got)
+
+	// ⚠️ 关掉再打开一次 —— 这条测试的卖点就是「重启之后仍然成立」，
+	// 不真的重启一遍的话，它只证明了内存里能读到（评审指出过这一点）。
+	if err := f.store.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
-}
-
-// TestVerdictSurvivesRestart 确认判定真的落了盘（不是只活在内存里）。
-func TestVerdictSurvivesRestart(t *testing.T) {
-	dir := t.TempDir()
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", true, "2021-01-01 00:00:00"), torrent: torrentCanonical}
-
-	srv := httptest.NewServer(mt.handler(t))
-	defer srv.Close()
-	mt.base = srv.URL
-
-	run := func() {
-		store, err := Open(dir)
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		defer func() { _ = store.Close() }()
-		client := &Client{BaseURL: srv.URL, APIKey: "k", HTTP: srv.Client()}
-		src := New(inner, client, store, fakePins{}, quietLogger())
-		if _, err := src.WantToWatch(context.Background()); err != nil {
-			t.Fatalf("WantToWatch: %v", err)
-		}
+	if err := f.store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
-	run()
-	run() // 第二次：判定应当来自磁盘，因此不再搜
-
-	if got := mt.searchCalls.Load(); got != 1 {
-		t.Errorf("搜索了 %d 次，重启后应当从判定表里读", got)
-	}
-}
-
-// TestWiringOrderMTorrentBeatsPin 是**装配顺序**的钉子。
-//
-// 它存在的理由很具体：两轴评审在这里抓到一个 P0，而当时所有单测都是绿的 ——
-// 因为它们用裸假 source 当 inner，正好绕过了「mteam 与 pin 谁包谁」这条链。
-//
-// 正确的嵌套是 `pin.New(mteam.New(inner))`：
-//
-//	M-Team 要看的输入是**上游刚返回的**候选；
-//	而它要看的「下发过没有」是 pin 表**上一次**的状态。
-//
-// 反过来包（mteam 在外）的话，mteam 一上来就调 pin，而 pin 会当场把未钉住的作品
-// 全选一条上游磁链写进表 —— 等控制流回到 mteam，`pins.Get` 已经**恒为真**，
-// 「首发冻结」于是变成「永远冻结在上游磁链」，整个功能静默失效。
-func TestWiringOrderMTorrentBeatsPin(t *testing.T) {
-	dir := t.TempDir()
-	pinStore, err := pin.Open(filepath.Join(dir, "pin.json"))
+	reopened, err := Open(f.store.dir)
 	if err != nil {
-		t.Fatalf("Open pin: %v", err)
+		t.Fatalf("重新 Open: %v", err)
 	}
-	defer func() { _ = pinStore.Close() }()
-
-	mtStore, err := Open(filepath.Join(dir, "mteam"))
-	if err != nil {
-		t.Fatalf("Open 判定表: %v", err)
-	}
-	defer func() { _ = mtStore.Close() }()
-
-	mt := &fakeMTeam{
-		rows:    hitRow("467487", "SSIS-001 一ヶ月間の…", true, "2021-02-22 15:19:51"),
-		torrent: torrentCanonical,
-	}
-	srv := httptest.NewServer(mt.handler(t))
-	defer srv.Close()
-	mt.base = srv.URL
-
-	inner := &fakeInner{want: []catalog.Work{
-		wantWork("SSIS-001", catalog.Magnet{Infohash: "upstream-hash", Name: "上游那条"}),
-	}}
-	client := &Client{BaseURL: srv.URL, APIKey: "k", HTTP: srv.Client()}
-
-	// 按**真实装配**的顺序包：mteam 在内，pin 在外。
-	mtSrc := New(inner, client, mtStore, pinStore, quietLogger())
-	src := pin.New(mtSrc, pinStore, nil) // 正确
-	_ = mtSrc
-
-	works, err := src.WantToWatch(context.Background())
-	if err != nil {
-		t.Fatalf("WantToWatch: %v", err)
-	}
-	if len(works.Works) != 1 || len(works.Works[0].Magnets) != 1 {
-		t.Fatalf("候选池应当是单元素，实际 %+v", works.Works)
-	}
-
-	// 一、M-Team 真的被查了（上游那条被换掉）。
-	m := works.Works[0].Magnets[0]
-	if m.Source != catalog.SourceMTeam {
-		t.Fatalf("下发的是 %v 那条 —— M-Team 根本没生效（装配顺序错了？）", m.Source)
-	}
-	if m.Infohash != "f875b7bedb38e072dde96440fb79e5fc55699d68" {
-		t.Errorf("infohash = %q", m.Infohash)
-	}
-
-	// 二、pin 钉住的是 **M-Team 那条**，而不是它先看到的上游那条。
-	rec, ok := pinStore.Get("id-SSIS-001")
-	if !ok {
-		t.Fatal("pin 表里没有这部作品")
-	}
-	if rec.Infohash != m.Infohash {
-		t.Errorf("pin 钉的是 %q，而下发的是 %q —— pin 与 feed 不一致", rec.Infohash, m.Infohash)
-	}
-}
-
-// TestUnwritableStateDirRefusesToStart 钉住 fail fast：判定表目录不可写就拒绝启动。
-func TestUnwritableStateDirRefusesToStart(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("以 root 跑时目录权限拦不住写入")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(filepath.Join(dir, "state")); err == nil {
-		t.Fatal("不可写的状态目录必须拒绝启动")
-	}
-}
-
-// --- 票 03：负结果与查询失败 --------------------------------------------------
-
-// captureLogs 收下日志文本，供「措辞」类的断言用。
-func captureLogs() (*slog.Logger, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
-}
-
-// TestMissIsPermanent 钉住「查过、没有」是**永久**判决。
-//
-// 不是优化：qBittorrent 每 15 分钟拉一次，而馒头的搜索配额是 1000 次/24 小时。
-// 一个 234 部的清单若每轮都重问，四轮就把配额烧光。
-func TestMissIsPermanent(t *testing.T) {
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-	// 搜索有结果，但都不是这部作品 —— 于是「查过、没有」。
-	mt := &fakeMTeam{rows: hitRow("1", "ABP-123 别的片", true, "2021-01-01 00:00:00")}
-	src, store, _ := newFixture(t, inner, mt, nil)
-
-	for i := 0; i < 3; i++ {
-		if _, err := src.WantToWatch(context.Background()); err != nil {
-			t.Fatalf("第 %d 次: %v", i, err)
-		}
-	}
-	if got := mt.searchCalls.Load(); got != 1 {
-		t.Errorf("搜索了 %d 次 —— 负结果必须永久", got)
-	}
-	v, ok := store.Get("id-SSIS-001")
-	if !ok || v.Outcome != OutcomeMiss {
-		t.Errorf("判定表里应当是 miss，实际 %+v（存在=%v）", v, ok)
-	}
-}
-
-// TestFailureIsRecordedButIsNotAMiss 钉住「没查成」与「查过、没有」是两回事。
-//
-// 前者不是判决，后者是。混起来的话，一次网络抖动会让那部作品**永久**失去这个功能。
-func TestFailureIsRecordedButIsNotAMiss(t *testing.T) {
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-	// 网络层的坏法：搜索返回一个我们看不懂的体。
-	mt := &fakeMTeam{errBody: `这不是 JSON`}
-	src, store, _ := newFixture(t, inner, mt, nil)
-
-	list, err := src.WantToWatch(context.Background())
-	if err != nil {
-		t.Fatalf("M-Team 失败不该让整条 feed 失败: %v", err)
-	}
-	if m := list.Works[0].Magnets[0]; m.Infohash != "u" {
-		t.Errorf("失败时应当降级成上游那条，实际 %+v", m)
-	}
-
-	v, ok := store.Get("id-SSIS-001")
-	if !ok {
-		t.Fatal("失败应当被记下来（否则每轮都会重问）")
-	}
-	if v.Outcome != OutcomeFailed {
-		t.Errorf("outcome = %q, want failed（它不是 miss —— 那是判决）", v.Outcome)
-	}
-	if v.Failure == "" {
-		t.Error("失败记录应当带上原因（给人看）")
-	}
-	if v.FailureKind != FailureOther {
-		t.Errorf("failureKind = %q, want %q", v.FailureKind, FailureOther)
-	}
-
-	// **不自动重试**：再渲染两次，一次都不该再问。
-	for i := 0; i < 2; i++ {
-		if _, err := src.WantToWatch(context.Background()); err != nil {
-			t.Fatalf("第 %d 次: %v", i, err)
-		}
-	}
-	if got := mt.searchCalls.Load(); got != 1 {
-		t.Errorf("搜索了 %d 次 —— 查询失败不自动重试", got)
+	defer func() { _ = reopened.Close() }()
+	if _, _, broken := reopened.CredentialFailure(); !broken {
+		t.Error("重启之后「凭据坏了」就丢了 —— 那正是推导式设计要避免的")
 	}
 }
 
@@ -613,12 +636,11 @@ func TestThreeOutcomesAreDistinguishable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-			src, store, _ := newFixture(t, inner, tt.mt, nil)
-			if _, err := src.WantToWatch(context.Background()); err != nil {
-				t.Fatalf("WantToWatch: %v", err)
-			}
-			v, ok := store.Get("id-SSIS-001")
+			inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+			f := newFixture(t, inner, tt.mt, nil)
+			f.decide(t, 1)
+
+			v, ok := f.store.Get("id-SSIS-001")
 			if !ok {
 				t.Fatalf("没有留下判定")
 			}
@@ -632,102 +654,23 @@ func TestThreeOutcomesAreDistinguishable(t *testing.T) {
 	}
 }
 
-// TestCredentialFailureIsVisibleFromTheStore 钉住「凭据坏了」这件事是**推导**出来的，
-// 而不是额外存的一份状态 —— 因此重启之后仍然成立。
-func TestCredentialFailureIsVisibleFromTheStore(t *testing.T) {
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-	mt := &fakeMTeam{errBody: `{"code":"1","message":"key無效"}`}
-	src, store, _ := newFixture(t, inner, mt, nil)
-
-	if _, _, broken := store.CredentialFailure(); broken {
-		t.Error("还没查过就不该报「凭据坏了」")
-	}
-	if _, err := src.WantToWatch(context.Background()); err != nil {
-		t.Fatalf("WantToWatch: %v", err)
-	}
-	msg, at, broken := store.CredentialFailure()
-	if !broken {
-		t.Fatal("凭据失效应当能从判定表里读出来")
-	}
-	if msg == "" || at.IsZero() {
-		t.Errorf("应当带上原因与时刻：msg=%q at=%v", msg, at)
-	}
-
-	// ⚠️ 关掉再打开一次 —— 这条测试的卖点就是「重启之后仍然成立」，
-	// 不真的重启一遍的话，它只证明了内存里能读到（评审指出过这一点）。
-	if err := store.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	reopened, err := Open(store.dir)
-	if err != nil {
-		t.Fatalf("重新 Open: %v", err)
-	}
-	defer func() { _ = reopened.Close() }()
-	if _, _, broken := reopened.CredentialFailure(); !broken {
-		t.Error("重启之后「凭据坏了」就丢了 —— 那正是推导式设计要避免的")
-	}
-}
-
 // TestMissIsNotWordedAsFailure 钉住措辞。
 //
 // 「负结果」与「查询失败」的处置完全相反，把前者写成「失败」会让人去查一个
 // 根本不存在的故障 —— 而这条日志是排障时唯一会读的那条。
 func TestMissIsNotWordedAsFailure(t *testing.T) {
-	log, buf := captureLogs()
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
 	mt := &fakeMTeam{rows: hitRow("1", "ABP-123 别的片", false, "2021-01-01 00:00:00")}
+	f := newFixture(t, inner, mt, nil)
 
-	srv := httptest.NewServer(mt.handler(t))
-	defer srv.Close()
-	mt.base = srv.URL
-	store, err := Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = store.Close() }()
-	src := New(inner, &Client{BaseURL: srv.URL, APIKey: "k", HTTP: srv.Client()}, store, fakePins{}, log)
+	f.decide(t, 1)
 
-	if _, err := src.WantToWatch(context.Background()); err != nil {
-		t.Fatalf("WantToWatch: %v", err)
-	}
-	out := buf.String()
+	out := f.log.String()
 	if !strings.Contains(out, "负结果") {
 		t.Errorf("日志里应当说清楚这是负结果：%s", out)
 	}
 	if strings.Contains(out, "失败") {
 		t.Errorf("负结果不该被写成「失败」—— 那是另一回事：%s", out)
-	}
-}
-
-// TestDownloadFailureIsNotRetriedEveryRender 是评审抓出来的那个 P1 的钉子。
-//
-// 当时**搜索命中之后**的所有失败（下载、解析、落盘）都只打了一条日志就 return，
-// 什么都没记 —— 于是那部作品**每轮渲染都会重新搜索、重新下载**，
-// 而下载配额是 100 个/小时。这正是票面禁止的「自动重试」。
-func TestDownloadFailureIsNotRetriedEveryRender(t *testing.T) {
-	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", catalog.Magnet{Infohash: "u"})}}
-	// 搜索命中，但下载链接指向一个不存在的路径 —— 取种子会失败。
-	mt := &fakeMTeam{
-		rows: hitRow("1", "SSIS-001 x", true, "2021-01-01 00:00:00"),
-		// torrent 留空 + 把下载路径指到 404：见 handler 的 default 分支。
-		downloadPath: "/api/torrent/gone",
-	}
-	src, store, _ := newFixture(t, inner, mt, nil)
-
-	for i := 0; i < 3; i++ {
-		if _, err := src.WantToWatch(context.Background()); err != nil {
-			t.Fatalf("第 %d 次: %v", i, err)
-		}
-	}
-	if got := mt.searchCalls.Load(); got != 1 {
-		t.Errorf("搜索了 %d 次 —— 取种子失败也不该每轮重来", got)
-	}
-	v, ok := store.Get("id-SSIS-001")
-	if !ok || v.Outcome != OutcomeFailed {
-		t.Errorf("应当留下一条失败记录，实际 %+v（存在=%v）", v, ok)
 	}
 }
 
@@ -758,8 +701,138 @@ func TestDropFailuresClearsOnlyFailures(t *testing.T) {
 			t.Errorf("%q 应当被清掉（失败不是判决，换 key 后它该重查）", id)
 		}
 	}
-	// 清完之后「凭据坏了」就不再报了 —— 这正是它要解决的假警报。
 	if _, _, broken := store.CredentialFailure(); broken {
 		t.Error("失败被清掉之后不该再报「凭据坏了」")
+	}
+}
+
+// --- 装配与身份 ---------------------------------------------------------------
+
+// TestWiringOrderMTorrentBeatsPin 是**装配顺序**的钉子。
+//
+// 正确的嵌套是 `pin.New(Source(inner))`：
+//
+//	Source 要看的输入是**上游刚返回的**候选；
+//	而它要看的「下发过没有」是 pin 表**上一次**的状态。
+//
+// 反过来包的话（Source 在外），它第一件事就是调 pin，而 pin 会当场把未钉住的作品
+// 全选一条上游磁链写进表 —— 等控制流回来，`pins.Get` 已经**恒为真**，
+// 「首发冻结」于是变成「永远冻结在上游磁链」，整个功能静默失效。
+// 这个 bug 被两轴评审抓到，而当时的单测没抓到（它们用的是裸假 source）。
+func TestWiringOrderMTorrentBeatsPin(t *testing.T) {
+	dir := t.TempDir()
+	pinStore, err := pin.Open(filepath.Join(dir, "pin.json"))
+	if err != nil {
+		t.Fatalf("Open pin: %v", err)
+	}
+	defer func() { _ = pinStore.Close() }()
+
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	mt := &fakeMTeam{rows: hitRow("467487", "SSIS-001 一ヶ月間の…", true, "2021-02-22 15:19:51"), torrent: torrentCanonical}
+	f := newFixture(t, inner, mt, nil)
+	f.decide(t, 1) // 先让后台把判定做出来
+
+	// 按**真实装配**的顺序包：mteam 在内，pin 在外。
+	src := pin.New(New(inner, f.store, pinStore, quietLogger()), pinStore, nil)
+
+	works, err := src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	if len(works.Works) != 1 || len(works.Works[0].Magnets) != 1 {
+		t.Fatalf("候选池应当是单元素，实际 %+v", works.Works)
+	}
+
+	// 一、M-Team 真的生效了（上游那条被换掉）。
+	m := works.Works[0].Magnets[0]
+	if m.Source != catalog.SourceMTeam {
+		t.Fatalf("下发的是 %v 那条 —— M-Team 根本没生效（装配顺序错了？）", m.Source)
+	}
+	// 二、pin 钉住的是 **M-Team 那条**，而不是它先看到的上游那条。
+	rec, ok := pinStore.Get("id-SSIS-001")
+	if !ok {
+		t.Fatal("pin 表里没有这部作品")
+	}
+	if rec.Infohash != m.Infohash {
+		t.Errorf("pin 钉的是 %q，而下发的是 %q —— pin 与 feed 不一致", rec.Infohash, m.Infohash)
+	}
+}
+
+// TestVerdictSurvivesRestart 确认判定真的落了盘（不是只活在内存里）。
+func TestVerdictSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", true, "2021-01-01 00:00:00"), torrent: torrentCanonical}
+	srv := httptest.NewServer(mt.handler(t))
+	defer srv.Close()
+	mt.base = srv.URL
+
+	run := func() {
+		store, err := Open(dir)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		defer func() { _ = store.Close() }()
+		client := &Client{BaseURL: srv.URL, APIKey: "k", HTTP: srv.Client()}
+		loop := NewLoop(inner, client, store, fakePins{}, func() time.Duration { return time.Minute }, 0, quietLogger())
+		loop.Once(context.Background())
+	}
+	run()
+	run() // 第二次：判定应当来自磁盘，因此不再搜
+
+	if got := mt.searchCalls.Load(); got != 1 {
+		t.Errorf("搜索了 %d 次，重启后应当从判定表里读", got)
+	}
+}
+
+// TestOtherRoutesAreUntouched 钉住「只改一条路由」。
+func TestOtherRoutesAreUntouched(t *testing.T) {
+	inner := &fakeInner{}
+	mt := &fakeMTeam{rows: hitRow("1", "x", true, "2021-01-01 00:00:00"), torrent: torrentCanonical}
+	f := newFixture(t, inner, mt, nil)
+
+	if _, err := f.src.Code(context.Background(), "SSIS-001"); err != nil {
+		t.Fatalf("Code: %v", err)
+	}
+	if got := mt.searchCalls.Load(); got != 0 {
+		t.Errorf("番号路由不该碰馒头，却查了 %d 次", got)
+	}
+	if got := inner.codeCalls.Load(); got != 1 {
+		t.Errorf("番号路由应当原样透传，实际调用 %d 次", got)
+	}
+}
+
+// TestUnknownOutcomeIsNotSilentlySkipped 钉住「认不出的结果要说一声」。
+//
+// 静默跳过会让那部作品永远拿不到 M-Team，而且看不出原因。
+func TestUnknownOutcomeIsNotSilentlySkipped(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	f := newFixture(t, inner, &fakeMTeam{}, nil)
+	f.store.Put("id-SSIS-001", Verdict{Outcome: Outcome("手改的")})
+
+	list, err := f.src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	// 按「未判定」处理：扣住，并计入待定来源。
+	if list.PendingSource != 1 {
+		t.Errorf("PendingSource = %d, want 1", list.PendingSource)
+	}
+	if !strings.Contains(f.log.String(), "认不出") {
+		t.Errorf("日志里应当说一声：%s", f.log.String())
+	}
+}
+
+// TestUnwritableStateDirRefusesToStart 钉住 fail fast：判定表目录不可写就拒绝启动。
+func TestUnwritableStateDirRefusesToStart(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("以 root 跑时目录权限拦不住写入")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(filepath.Join(dir, "state")); err == nil {
+		t.Fatal("不可写的状态目录必须拒绝启动")
 	}
 }
