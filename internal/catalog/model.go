@@ -7,10 +7,38 @@
 // 这样线格式改名时只需要改一处映射，领域模型不受影响。
 package catalog
 
+// MagnetSource 是磁链候选的**数据来源**。
+//
+// 它存在的理由很具体：**交付物由来源决定**。上游的候选以磁力交付，
+// 而 M-Team 的候选不能 —— 私种的裸磁力是死链（announce 里那份按次签发的凭据
+// 只存在于种子文件里），所以后者交给客户端的是本服务端出的种子文件。
+//
+// ⚠️ 名字不能叫 Source：那个名字在本包里已经被 `catalog.Source`（端口接口）占了。
+// 两个东西层次不同（一个是「候选从哪来」，一个是「数据从哪取」），但混用会很难读。
+type MagnetSource uint8
+
+const (
+	// SourceUpstream 是 JavDB 官方 App 的私有 API —— 也是**零值**。
+	//
+	// 零值必须是它：Magnet 的既有构造点（appapi、stub、各层测试）
+	// 一行都不用改，而「行为零变化」是引入第二个来源时的硬前提。
+	SourceUpstream MagnetSource = iota
+	// SourceMTeam 是 M-Team。
+	SourceMTeam
+)
+
 // Magnet 是一条可下载的磁链候选。
 //
-// 它对应 App API `/api/v1/movies/{id}/magnets` 返回的 magnets[] 元素。
+// 它对应 App API `/api/v1/movies/{id}/magnets` 返回的 magnets[] 元素 ——
+// 但自从有了第二个数据来源，它不再只对应那一个端点：
+// M-Team 侧的候选由搜索接口投影而来（字段不同，语义要对齐）。
 type Magnet struct {
+	// Source 是这条候选来自哪个数据来源。零值 = 上游。
+	//
+	// 它**不参与身份**：feed 条目的 guid 永远是纯 infohash，与来源无关。
+	// 它只决定交付物（磁力还是种子文件）。
+	Source MagnetSource
+
 	// Infohash 是 BitTorrent infohash（对应线格式的 hash 字段）。
 	//
 	// 它是本服务里唯一被信任的作品身份标识：feed item 的 guid 直接用它。

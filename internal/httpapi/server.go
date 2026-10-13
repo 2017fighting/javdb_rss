@@ -1029,6 +1029,13 @@ func (s *Server) renderItems(w http.ResponseWriter, r *http.Request, meta feed.M
 	// 上游真坏时的可见性是靠 502 + /readyz 503 + CronJob 告警三者共同保证的。
 
 	w.Header().Set("content-type", "application/rss+xml; charset=utf-8")
+
+	// 条目的交付物可能是一个**本服务的绝对地址**（M-Team 来源的候选发种子文件），
+	// 而那个地址只能由这里填 —— 五个调用点（番号/女优/清单/标签/想看）
+	// 各写一遍的话，漏一处就是「那个 feed 的种子地址是相对的」，
+	// 而它在客户端表现为**静默加不上**。漏斗里填一次，漏不掉。
+	meta.BaseURL = s.baseURL()
+
 	w.WriteHeader(http.StatusOK)
 	if err := feed.Render(w, meta, items, s.now()); err != nil {
 		// 响应头已经发出，无法再改状态码；只能记录。
@@ -1036,9 +1043,17 @@ func (s *Server) renderItems(w http.ResponseWriter, r *http.Request, meta feed.M
 	}
 }
 
+// baseURL 是本服务的对外地址（配置里的 feed.base_url），末尾斜杠已去掉。
+//
+// 去斜杠在这里做一次，而不是在每个拼地址的地方做：
+// 部署里那个值就带斜杠，而 `//torrent` 这种地址有的客户端能容、有的不能。
+func (s *Server) baseURL() string {
+	return strings.TrimRight(s.cfg.Current().Feed.BaseURL, "/")
+}
+
 // feedURL 尽力重建本 feed 的对外地址，用作 channel 的 <link>。
 func (s *Server) feedURL(r *http.Request) string {
-	if base := strings.TrimRight(s.cfg.Current().Feed.BaseURL, "/"); base != "" {
+	if base := s.baseURL(); base != "" {
 		return base + r.URL.RequestURI()
 	}
 	return r.URL.RequestURI()

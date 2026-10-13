@@ -14,8 +14,12 @@ var fixedNow = time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 
 func render(t *testing.T, items []Item) string {
 	t.Helper()
+	return renderWith(t, Meta{Title: "T", Link: "http://x/rss", Description: "D", Language: "zh-CN"}, items)
+}
+
+func renderWith(t *testing.T, meta Meta, items []Item) string {
+	t.Helper()
 	var buf bytes.Buffer
-	meta := Meta{Title: "T", Link: "http://x/rss", Description: "D", Language: "zh-CN"}
 	if err := Render(&buf, meta, items, fixedNow); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -191,6 +195,152 @@ func TestRenderPubDateFallsBackToNow(t *testing.T) {
 	}
 	if !strings.Contains(doc.Channel.Items[0].PubDate, "28 Sep 2026") {
 		t.Errorf("pubDate 未退化为 now: %q", doc.Channel.Items[0].PubDate)
+	}
+}
+
+// TestEnclosureURLFollowsSource 钉住票 01 开出来的那条缝：
+// **交付物由候选的来源决定**，而身份（guid）与它无关。
+//
+// 上游的候选以磁力交付（现状，一字不改）；M-Team 的候选**不以磁力交付** ——
+// 私种的裸磁力是死链（announce 里那份按次签发的凭据只存在于种子文件里），
+// 所以它交给客户端的是**本服务端出的那份种子文件**。
+//
+// 期望值是写死的字面量，不是把实现再算一遍：这个函数是「谁决定交付物」的
+// 唯一表述，它的输出形状就是契约。
+func TestEnclosureURLFollowsSource(t *testing.T) {
+	const base = "http://javdb-rss.javdb-rss.svc.cluster.local:8080"
+	tests := []struct {
+		name   string
+		magnet catalog.Magnet
+		base   string
+		want   string
+	}{
+		{
+			"上游来源发磁链",
+			catalog.Magnet{Infohash: "abc123", Source: catalog.SourceUpstream},
+			base,
+			"magnet:?xt=urn:btih:abc123&dn=T",
+		},
+		{
+			// 零值必须是上游 —— 否则既有的每一个构造点都要改，
+			// 而那正是「行为零变化」这个前提最容易被破坏的地方。
+			"零值就是上游",
+			catalog.Magnet{Infohash: "abc123"},
+			base,
+			"magnet:?xt=urn:btih:abc123&dn=T",
+		},
+		{
+			"M-Team 来源发本服务的种子地址",
+			catalog.Magnet{Infohash: "abc123", Source: catalog.SourceMTeam},
+			base,
+			base + "/torrent/abc123.torrent",
+		},
+		{
+			// 配置里带上末尾斜杠是常见手滑（部署文档里的地址就长这样），
+			// 而 `//torrent` 这种地址有的客户端能容、有的不能 —— 不赌。
+			"末尾斜杠不会拼出双斜杠",
+			catalog.Magnet{Infohash: "abc123", Source: catalog.SourceMTeam},
+			base + "/",
+			base + "/torrent/abc123.torrent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			it := Item{Work: catalog.Work{Number: "A-1", Title: "T"}, Magnet: tt.magnet}
+			if got := it.EnclosureURL(tt.base); got != tt.want {
+				t.Errorf("EnclosureURL() = %q, want %q", got, tt.want)
+			}
+			// 身份与交付物无关：两种来源的 guid 都是纯 infohash。
+			// 这一条是票 01 存在的前提 —— 换交付物不动 guid，
+			// 所以客户端不会因为换来源而重复下载（换来源会，但那是另一件事）。
+			if got := it.GUID(); got != "abc123" {
+				t.Errorf("GUID() = %q，它必须与来源无关", got)
+			}
+		})
+	}
+}
+
+// TestRenderMTorrentEnclosure 钉住渲染层的三件事必须**同时**成立：
+//
+//  1. 客户端靠 `guid` 去重 —— 它与来源无关，永远是纯 infohash；
+//  2. 客户端靠 `enclosure` 取种子 —— 它与来源有关，M-Team 来源要拿本服务那份；
+//  3. 客户端靠 `type` 认出「这是个种子来源」—— 两种来源共用同一个值。
+//
+// 三件事分属不同的关心点，但任意一条错了都表现为**静默失败**：
+// guid 错了是重复下载，enclosure 错了是加不上，type 错了是根本不认。
+func TestRenderMTorrentEnclosure(t *testing.T) {
+	const base = "http://javdb-rss.javdb-rss.svc.cluster.local:8080"
+	const hash = "0e8f4789bdcab713effc3a07d1309a776c867b3e"
+	wantURL := base + "/torrent/" + hash + ".torrent"
+
+	items := []Item{{
+		Work:   catalog.Work{Number: "KV-328", Title: "标题"},
+		Magnet: catalog.Magnet{Infohash: hash, SizeMiB: 3110, Source: catalog.SourceMTeam},
+	}}
+	meta := Meta{Title: "T", Link: "http://x/rss", Description: "D", BaseURL: base}
+
+	var doc rss
+	if err := xml.Unmarshal([]byte(renderWith(t, meta, items)), &doc); err != nil {
+		t.Fatalf("不是合法 XML: %v", err)
+	}
+	it := doc.Channel.Items[0]
+
+	if it.GUID.Value != hash {
+		t.Errorf("guid = %q，它必须与来源无关", it.GUID.Value)
+	}
+	if it.Enclosure.URL != wantURL {
+		t.Errorf("enclosure url = %q, want %q", it.Enclosure.URL, wantURL)
+	}
+	if strings.HasPrefix(it.Enclosure.URL, "magnet:") {
+		t.Error("M-Team 来源不能发磁力 —— 私种的裸磁力是死链")
+	}
+	if it.Link != it.Enclosure.URL {
+		t.Error("link 与 enclosure url 应当一致 —— 覆盖更多客户端的取链方式")
+	}
+	if it.Enclosure.Type != "application/x-bittorrent" {
+		t.Errorf("enclosure type = %q，qBittorrent 只认这个值", it.Enclosure.Type)
+	}
+	if it.Enclosure.Length != 3110*1024*1024 {
+		t.Errorf("enclosure length = %d", it.Enclosure.Length)
+	}
+}
+
+// TestRenderUpstreamEnclosureIsByteForByteUnchanged 是引入第二个来源时的
+// **回归网**：上游来源的渲染结果必须与改动前**逐字节相同**。
+//
+// 为什么值得用一个黄金串而不是继续做结构断言：这一票的全部风险就是
+// 「为了支持第二种交付物而顺手改动了第一种」。结构断言对那种改动是敏感的
+// （字段还在、值还对，顺序/缩进/转义变了它看不出来），而字节比对会当场抦下。
+// 代码里那句「稳定的输出顺序让测试能直接做字节比对」就是这个意思。
+func TestRenderUpstreamEnclosureIsByteForByteUnchanged(t *testing.T) {
+	items := []Item{{
+		Work: catalog.Work{Number: "KV-328", Title: "标题"},
+		Magnet: catalog.Magnet{
+			Infohash: "0e8f4789bdcab713effc3a07d1309a776c867b3e",
+			SizeMiB:  3110, CreatedAt: "09/27/2026",
+		},
+	}}
+	want := `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>T</title>
+    <link>http://x/rss</link>
+    <description>D</description>
+    <language>zh-CN</language>
+    <lastBuildDate>Mon, 28 Sep 2026 12:00:00 +0000</lastBuildDate>
+    <item>
+      <title>[KV-328] 标题</title>
+      <link>magnet:?xt=urn:btih:0e8f4789bdcab713effc3a07d1309a776c867b3e&amp;dn=%E6%A0%87%E9%A2%98</link>
+      <guid isPermaLink="false">0e8f4789bdcab713effc3a07d1309a776c867b3e</guid>
+      <pubDate>Sun, 27 Sep 2026 00:00:00 +0000</pubDate>
+      <category>KV-328</category>
+      <enclosure url="magnet:?xt=urn:btih:0e8f4789bdcab713effc3a07d1309a776c867b3e&amp;dn=%E6%A0%87%E9%A2%98" length="3261071360" type="application/x-bittorrent"></enclosure>
+    </item>
+  </channel>
+</rss>
+`
+	if got := renderWith(t, Meta{Title: "T", Link: "http://x/rss", Description: "D", Language: "zh-CN", BaseURL: "http://ignored"}, items); got != want {
+		t.Errorf("上游来源的渲染结果变了：\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 

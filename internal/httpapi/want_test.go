@@ -149,6 +149,54 @@ func TestWantFeedReportsTruncation(t *testing.T) {
 	}
 }
 
+// TestWantFeedServesMTorrentFromThisService 钉住票 01 在**最高接缝**上的效果：
+// 一部 M-Team 来源的作品，其条目的交付物是**本服务的绝对地址**，而 guid 仍是纯 infohash。
+//
+// 为什么必须在 HTTP 接缝上断言，而不是只在 feed 里：那个地址有一半来自**配置**
+// （`feed.base_url`），而配置是在 handler 层拼进去的 —— feed 的单测看不到它。
+// 漏了那一半的表现是「地址是相对的」，客户端只会说加不上，**没有任何地方会响**。
+func TestWantFeedServesMTorrentFromThisService(t *testing.T) {
+	const base = "http://javdb-rss.javdb-rss.svc.cluster.local:8080"
+	src := &recordingSource{want: &catalog.WantList{Works: []catalog.Work{
+		wantWork("KV-1", catalog.Magnet{
+			Infohash: wantHash, Name: "KV-1", Source: catalog.SourceMTeam,
+		}),
+	}}}
+	h := newTestServer(t, "provider: stub\nfeed:\n  base_url: \""+base+"\"\n", src)
+
+	got := parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+	if len(got.Channel.Items) != 1 {
+		t.Fatalf("得到 %d 条条目，want 1", len(got.Channel.Items))
+	}
+	item := got.Channel.Items[0]
+	if want := base + "/torrent/" + wantHash + ".torrent"; item.Enclosure.URL != want {
+		t.Errorf("enclosure = %q, want %q", item.Enclosure.URL, want)
+	}
+	// 交付物变了，身份不能变 —— 否则换来源会被客户端当成新内容。
+	if item.GUID != wantHash {
+		t.Errorf("guid = %q，它必须与来源无关", item.GUID)
+	}
+}
+
+// TestWantFeedServesUpstreamMagnet 是上一条的对照：同一张清单里上游来源的作品
+// 仍然发磁链。两张图摆在一起才是「交付物由来源决定」这句话的完整表述 ——
+// 只测一边的话，一个「不管来源都发种子地址」的实现也能通过。
+func TestWantFeedServesUpstreamMagnet(t *testing.T) {
+	src := &recordingSource{want: &catalog.WantList{Works: []catalog.Work{
+		wantWork("KV-1", catalog.Magnet{Infohash: wantHash, Name: "KV-1"}),
+	}}}
+	h := newTestServer(t, "provider: stub\nfeed:\n  base_url: \"http://x\"\n", src)
+
+	got := parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+	if len(got.Channel.Items) != 1 {
+		t.Fatalf("得到 %d 条条目，want 1", len(got.Channel.Items))
+	}
+	item := got.Channel.Items[0]
+	if !strings.HasPrefix(item.Enclosure.URL, "magnet:?xt=urn:btih:"+wantHash) {
+		t.Errorf("上游来源应当发磁链，实际是 %q", item.Enclosure.URL)
+	}
+}
+
 // TestWantFeedWithoutTokenReturns503 确认没配 token 时**不是**一个空 feed。
 //
 // 200 + 空 feed 会被理解成「我没标过任何想看」；真相是「服务读不到」。

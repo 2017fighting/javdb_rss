@@ -23,9 +23,40 @@ type Item struct {
 //
 // dn 参数用与标题相同的基名，好处是 qBittorrent 会拿它给下载任务命名，
 // 而不是显示一个光秃秃的 infohash。注意 dn 只影响显示 —— 身份仍然是 infohash（见 guid 规则）。
+//
+// ⚠️ 它**只对上游来源的候选成立**。要拿「这条条目到底交给客户端什么」
+// 请用 EnclosureURL —— 那才是唯一的入口。
 func (i Item) MagnetURI() string {
 	return fmt.Sprintf("magnet:?xt=urn:btih:%s&dn=%s",
 		i.Magnet.Infohash, urlEncode(baseName(i)))
+}
+
+// TorrentPathPrefix 是本服务端出种子文件的路径前缀。
+//
+// 它导出是为了给路由注册用：生成 URL 的地方（这里）与注册路由的地方（httpapi）
+// 必须一致，而两处各写一遍字符串的失败方式是**静默的** ——
+// feed 发出一个指向 404 的地址，客户端只会说「加不上」，没有任何地方会响。
+const TorrentPathPrefix = "/torrent/"
+
+// EnclosureURL 是这条条目的**交付物地址** —— 客户端去哪儿取交付物。
+//
+// 它由候选的**来源**决定，而不是由身份决定：
+//
+//	上游来源    → 磁力链接（现状，一字不改）
+//	M-Team 来源 → 本服务端出的那份种子文件
+//
+// 为什么 M-Team 侧不能发磁力：它是私种，announce 里带的是一份按种子、按次签发的凭据
+// （不是 passkey），而那份凭据**只存在于种子文件里** —— API key 换不到。
+// 因此：不含 announce 的磁力是死链；含 announce 的磁力会把一份账号维度的凭据写进 feed。
+// 完整取舍见 docs/adr/0004。
+//
+// baseURL 是本服务的对外地址（配置里的 feed.base_url）。末尾斜杠会被容忍 ——
+// 部署里那个地址就带斜杠，而 `//torrent` 这种地址有的客户端能容、有的不能，不值得赌。
+func (i Item) EnclosureURL(baseURL string) string {
+	if i.Magnet.Source == catalog.SourceMTeam {
+		return strings.TrimRight(baseURL, "/") + TorrentPathPrefix + i.Magnet.Infohash + ".torrent"
+	}
+	return i.MagnetURI()
 }
 
 // GUID 是这条 Item 的稳定身份标识 —— **纯 infohash**。

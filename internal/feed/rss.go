@@ -26,6 +26,12 @@ type Meta struct {
 	Link        string
 	Description string
 	Language    string
+	// BaseURL 是本服务的对外地址（配置里的 feed.base_url），**不带**路径。
+	//
+	// 它存在是因为条目的交付物可能是一个本服务的地址（M-Team 来源的候选发种子文件），
+	// 而那个地址必须是绝对的 —— 相对的 URL 在 RSS 阅读器里无处可依。
+	// 它为空时条目的地址退化成相对路径，与既有行为一致（<link> 本来就这样）。
+	BaseURL string
 }
 
 // RSS 2.0 的线格式。字段顺序即输出顺序，qBittorrent 与主流阅读器对此不敏感，
@@ -73,10 +79,15 @@ type enclosure struct {
 	Type   string `xml:"type,attr"`
 }
 
-// magnetType 是磁力链接的 enclosure MIME 类型。
+// enclosureMIMEType 是交付物的 enclosure MIME 类型。
+//
 // 用 application/x-bittorrent 而不是规范的 application/x-bittorrent.magnet，
 // 因为前者是 qBittorrent 与主流客户端实际识别的那个。
-const magnetType = "application/x-bittorrent"
+//
+// ⚠️ 它**两种来源共用**：qBittorrent 只在 type 等于这个值时才把 enclosure 当成种子来源
+// （type 为空会落到它的备选字段，别的值**直接忽略**）—— 所以 M-Team 来源的条目
+// 也不能换成 application/x-bittorrent.torrent 之类「更准确」的名字。
+const enclosureMIMEType = "application/x-bittorrent"
 
 // Render 写出一个完整的 RSS 2.0 文档。
 //
@@ -100,14 +111,16 @@ func Render(w io.Writer, meta Meta, items []Item, now time.Time) error {
 	}
 
 	for _, it := range items {
-		magnet := it.MagnetURI()
+		// 交付物由**来源**决定（上游→磁链，M-Team→本服务端出的种子文件），
+		// 而 <link> 与 <enclosure url> 取同一个值：覆盖更多客户端的取链方式。
+		delivery := it.EnclosureURL(meta.BaseURL)
 		out.Channel.Items = append(out.Channel.Items, item{
 			Title:     it.Title(),
-			Link:      magnet,
+			Link:      delivery,
 			GUID:      guid{IsPermaLink: false, Value: it.GUID()},
 			PubDate:   itemPubDate(it, now),
 			Category:  it.Work.Number,
-			Enclosure: enclosure{URL: magnet, Length: it.Magnet.SizeMiB * 1024 * 1024, Type: magnetType},
+			Enclosure: enclosure{URL: delivery, Length: it.Magnet.SizeMiB * 1024 * 1024, Type: enclosureMIMEType},
 		})
 	}
 
