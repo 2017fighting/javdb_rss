@@ -43,3 +43,22 @@
 1 条（`mteam.credential_broken` + `next_step`，且 `/readyz` 与状态码**不受影响**）。
 
 **已知边界**：判定仍然同步发生在请求内（票 04）；`/metrics` 的形状是票 06。
+
+## 自查抓到的一个 P0（2026-10-13，在写装配时）
+
+⚠️ **没配 M-Team 时，每一次 `/torrent/` 请求都会 SIGSEGV。**
+
+`WithTorrents(mteamStore)` 里传的是 `var st *mteam.Store`（nil）—— 而把它交给一个
+**接口**参数，得到的接口**不是 nil**。于是 `s.torrents != nil` 为真，handler 去调一个
+nil 接收者的方法，当场 panic。
+
+当时的测试全绿，因为 `newTestServer` 传的是**字面 nil**，不是类型化 nil。
+
+两层都修：装配层合成一个入口 `WithSecondSource(st *mteam.Store)`（nil 时什么都不挂），
+`mteam.Store` 的读方法对 nil 接收者返回「没有」而不是崩。测试
+`TestTypedNilStoreBehavesLikeNoStore` 钉住第二层。
+
+> 这是本轮第二个「测试全绿但生产会死」的 bug（第一个是票 02 的装配倒置）。
+> 两个都是**装配层**的，而两个都因为测试用了比真实装配更弱的替身而漏掉。
+> 票 04 开工前应当先看一眼 `cmd/javdb-rss/main_test.go` 能不能加一条
+> 「真装配 + 假上游」的冒烟 —— 那类 bug 只在那里才看得见。
