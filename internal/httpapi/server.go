@@ -87,16 +87,27 @@ func (s *Server) WithTorrents(ts TorrentStore) *Server {
 // MTeamHealth 是 `/healthz/upstream` 对第二个来源的**只读**需求。
 //
 // 它只回答一个问题：「M-Team 的凭据是不是失效了」。`*mteam.Store` 天然满足它。
+//
+// ⚠️ 它**不进 `/readyz`**：换 key 不是重启能解决的，而把实例从 Service 端点里摘掉
+// 只会让 feed 一起消失 —— 那时连「为什么」都看不到了。
 type MTeamHealth interface {
 	CredentialFailure() (msg string, at time.Time, broken bool)
 }
 
-// WithMTeamHealth 挂上第二个来源的凭据信号。
+// WithSecondSource 挂上第二个来源（M-Team）的两个只读句柄：种子与凭据信号。
 //
-// ⚠️ 它**不进 `/readyz`**。理由与 signature_broken 同构：换 key 不是重启能解决的，
-// 而把实例从 Service 端点里摘掉只会让 feed 一起消失 —— 那时连「为什么」都看不到了。
-func (s *Server) WithMTeamHealth(h MTeamHealth) *Server {
-	s.mteamHealth = h
+// ⚠️ **一个入口而不是两个**，因为「配了 M-Team」与「没配」是同一件事的两面 ——
+// 分成两个 setter，迟早有人只挂一个。
+//
+// ⚠️ `st == nil` 时**什么都不挂**。这不是防御性编程：把 `var st *mteam.Store`（nil）
+// 交给一个接口参数，得到的接口**不是 nil**，于是 `s.torrents != nil` 为真，
+// handler 会去调 nil 接收者的方法而**崩在每一次请求上**。（真踩过。）
+func (s *Server) WithSecondSource(st *mteam.Store) *Server {
+	if st == nil {
+		return s
+	}
+	s.torrents = st
+	s.mteamHealth = st
 	return s
 }
 

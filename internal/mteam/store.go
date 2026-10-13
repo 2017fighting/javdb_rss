@@ -278,7 +278,16 @@ func (s *Store) Len() int {
 // 而一份只活在内存里的信号会在重启后消失，且因为失败已被缓存而**永远不会重新出现**。
 //
 // 它返回最近的一条（按判定时刻）。
+//
+// ⚠️ **接收者为 nil 时返回「没坏」**：一个 nil 的 Store 就是「本实例没有第二个来源」，
+// 而那与「有来源、凭据正常」在这个问题上给出同一个答案。
+// 这层保护是必需的，不是防御性编程：装配层传给接口的是一个**类型化 nil**
+// （`var st *Store; WithMTeamHealth(st)`），而那个接口**不是 nil** ——
+// 没有这层就会在每次请求上 panic。（真踩过。）
 func (s *Store) CredentialFailure() (msg string, at time.Time, broken bool) {
+	if s == nil {
+		return "", time.Time{}, false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, v := range s.verdicts {
@@ -355,7 +364,13 @@ func (s *Store) TorrentPath(infohash string) string {
 }
 
 // LoadTorrent 取回某个 infohash 的种子字节。
+//
+// ⚠️ **接收者为 nil 时报错而不是 panic**：一个 nil 的 Store 就是「本实例没有第二个来源」，
+// 而那是端点应当变成 404 的情形。理由同 CredentialFailure（装配层的类型化 nil）。
 func (s *Store) LoadTorrent(infohash string) ([]byte, error) {
+	if s == nil {
+		return nil, errors.New("本实例没有第二个来源")
+	}
 	return os.ReadFile(s.TorrentPath(infohash))
 }
 

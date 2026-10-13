@@ -267,3 +267,34 @@ func TestUpstreamDetailReportsMTeamCredential(t *testing.T) {
 		t.Errorf("/readyz = %d，M-Team 的凭据问题不该影响就绪", r.Code)
 	}
 }
+
+// TestTypedNilStoreBehavesLikeNoStore 钉住一个 Go 的陷阱，而它**真的崩过**。
+//
+// 没配 M-Team 时 main 传下来的是 `var st *mteam.Store`（nil）——
+// 但把它交给一个**接口**参数，得到的接口**不是 nil**。于是
+// `s.torrents != nil` 为真，handler 会去调一个 nil 接收者的方法 → SIGSEGV，
+// 每一次 `/torrent/` 请求都崩。
+//
+// 修法是两层的：装配层不再挂 nil（`WithSecondSource`），而 mteam.Store 的读方法
+// 对 nil 接收者返回「没有」而不是崩。这条测试钉的是**第二层** ——
+// 因为第一层随时可能被下一个改装配的人绕过。
+func TestTypedNilStoreBehavesLikeNoStore(t *testing.T) {
+	var nilStore *mteam.Store
+	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, nilStore)
+	s.mteamHealth = nilStore
+
+	if rec := do(t, s.Handler(), "/torrent/"+e2eInfohash+".torrent"); rec.Code != http.StatusNotFound {
+		t.Errorf("/torrent/ = %d, want 404（nil 的判定表就是「没有第二个来源」）", rec.Code)
+	}
+	rec := do(t, s.Handler(), "/healthz/upstream")
+	if rec.Code != http.StatusOK {
+		t.Errorf("/healthz/upstream = %d, want 200", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("不是 JSON: %v", err)
+	}
+	if m, ok := body["mteam"].(map[string]any); ok && m["credential_broken"] != false {
+		t.Errorf("nil 的判定表不该报「凭据坏了」：%v", m)
+	}
+}
