@@ -266,7 +266,7 @@ func buildSource(cfg *config.Config, holder *config.Holder, st *pin.Store, mt *m
 
 		var loop *mteam.Loop
 		if mt != nil {
-			loop = mteam.NewLoop(client, &mteam.Client{APIKey: cfg.MTeamKey()}, mt, st,
+			loop = mteam.NewLoop(client, &mteam.Client{BaseURL: holder.Current().MTeam.APIBase, APIKeyFunc: func() string { return holder.Current().MTeamKey() }}, mt, st,
 				func() time.Duration { return holder.Current().MTeam.ScanInterval },
 				cfg.MTeam.MaxDownloadsPerHour, slog.Default())
 			// 判定表落盘失败是**致命**的：带着「内存已改、磁盘没改」的状态继续服务，

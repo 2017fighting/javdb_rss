@@ -111,27 +111,33 @@ func (l *Loop) Once(ctx context.Context) {
 		return
 	}
 
-	var decided, hits, pending int
+	// 先把「这一轮有几部需要判定」数出来。
+	//
+	// ⚠️ 不能拿「循环里数到几部」当余量：闸门满时会中途 break，于是那个数
+	// 只能表达 0 或 1，与清单里真正还剩多少毫无关系（评审抓出来的）。
+	todo := 0
+	for i := range list.Works {
+		if !l.skip(list.Works[i]) {
+			todo++
+		}
+	}
+
+	var decided, hits int
 	for i := range list.Works {
 		w := &list.Works[i]
 		if ctx.Err() != nil {
 			break
 		}
-		// 首发冻结：下发过的不动，连问都不问。
-		if l.pins != nil {
-			if _, ok := l.pins.Get(w.ID); ok {
-				continue
-			}
-		}
-		// 可续跑：判定表就是进度。
-		if _, ok := l.store.Get(w.ID); ok {
+		if l.skip(*w) {
 			continue
 		}
-		pending++
 		outcome, err := l.decide(ctx, w)
 		if err != nil {
-			// decide 已经把失败写进表了（或按致命路径退出），这里只记账。
-			l.log.WarnContext(ctx, "判定失败，本轮到此为止", "作品", w.Number, "err", err)
+			// decide **唯一**的错误是「闸门满了」—— 那是「稍后再来」，不是失败。
+			// 剩下的留到下一轮；措辞与级别都要跟得上这个语义：
+			// 常态的流控回退不该报成 WARN，那会让人去查一个不存在的故障。
+			l.log.InfoContext(ctx, "种子下载已达本小时上限，剩下的留到下一轮",
+				"本轮已完成", decided, "还剩", todo-decided, "err", err)
 			break
 		}
 		decided++
@@ -151,11 +157,22 @@ func (l *Loop) Once(ctx context.Context) {
 
 	// 只在**有进展或还有欠账**时打一条 INFO —— 常态下（全部已判定）这一轮是空的，
 	// 而每 15 分钟刷一条「本轮 0 部」正是让人学会忽略日志的那种噪音。
-	if decided > 0 || pending > 0 {
+	if decided > 0 || todo > 0 {
 		l.log.InfoContext(ctx, "判定循环跑完一轮",
 			"清单", len(list.Works), "新判定", decided, "命中", hits,
-			"待判定", pending-decided, "判定表总数", l.store.Len())
+			"待判定", todo-decided, "判定表总数", l.store.Len())
 	}
+}
+
+// skip 报告这部作品这一轮**不用管**：已经下发过（首发冻结），或者已经有判定（可续跑）。
+func (l *Loop) skip(w catalog.Work) bool {
+	if l.pins != nil {
+		if _, ok := l.pins.Get(w.ID); ok {
+			return true
+		}
+	}
+	_, ok := l.store.Get(w.ID)
+	return ok
 }
 
 // decide 对一部作品做一次判定并落盘。返回结果（命中 / 负结果）。

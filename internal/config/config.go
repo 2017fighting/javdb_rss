@@ -122,6 +122,12 @@ type MTeamConfig struct {
 	// 它里面有两个东西，而两者敏感度不同：判定表本身不含凭据，
 	// 而 torrents/ 下的种子**带着账号凭据**。
 	StateDir string `yaml:"state_dir"`
+	// APIBase 是 M-Team 的 API 入口（如 "https://api.m-team.cc"）。
+	//
+	// 留空用内置默认值。它可配是因为**站点的域名在轮换**
+	// （kp / xp / ob / tp / io …），而 API 入口由站点域名派生 ——
+	// 站点换域名时不必改代码、重新发版。
+	APIBase string `yaml:"api_base"`
 	// MaxDownloadsPerHour 是判定循环里**种子下载**的每小时上限。
 	//
 	// 留空（0）用站点自标的建议值 100 —— 它是整个功能**唯一的瓶颈**：
@@ -201,6 +207,11 @@ func Default() *Config {
 			ProbeInterval: 15 * time.Minute,
 		},
 		MTeam: MTeamConfig{
+			// 显式写出来，而不是依赖 mteam 包内部的兜底 ——
+			// 与 MagnetConcurrency 同一条判断：字段注释写了默认值，
+			// 这里就该真的是它，否则「配置里的默认值」与「实际生效的默认值」是两回事。
+			APIBase:             "https://api.m-team.cc",
+			MaxDownloadsPerHour: 100,
 			// 默认 15 分钟 —— 与 qBittorrent 的轮询间隔同一量级。
 			//
 			// ⚠️ 它**只在配了 api_key 时才有意义**（没 key 就没有第二个来源，

@@ -593,3 +593,44 @@ func TestMTeamIsOffWhenNoKey(t *testing.T) {
 		t.Errorf("没配 key 时 MTeamKey() = %q —— 它应当就是「关」", got)
 	}
 }
+
+// TestMTeamLoopKnobs 钉住判定循环那两个旋钮的解析与默认值。
+//
+// 它们的默认值刻意**显式写在 Default() 里**，而不是靠 mteam 包内部的兜底 ——
+// 与 MagnetConcurrency 同一条判断：字段注释写了默认值，配置里就该真的是它，
+// 否则「配置里的默认值」与「实际生效的默认值」是两回事。
+func TestMTeamLoopKnobs(t *testing.T) {
+	// 默认值。
+	d := Default()
+	if d.MTeam.ScanInterval != 15*time.Minute {
+		t.Errorf("默认 ScanInterval = %v, want 15m", d.MTeam.ScanInterval)
+	}
+	if d.MTeam.MaxDownloadsPerHour != 100 {
+		t.Errorf("默认 MaxDownloadsPerHour = %d, want 100（站点自标的建议值）", d.MTeam.MaxDownloadsPerHour)
+	}
+	if d.MTeam.APIBase != "https://api.m-team.cc" {
+		t.Errorf("默认 APIBase = %q", d.MTeam.APIBase)
+	}
+
+	// 显式配了就照用，包括 0（关闭循环）。
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := "provider: stub\nmteam:\n  scan_interval: \"0\"\n  max_downloads_per_hour: 7\n  api_base: \"https://api.example.test\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHolder(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := h.Current().MTeam
+	if got.ScanInterval != 0 {
+		t.Errorf("ScanInterval = %v, want 0（0 表示关闭，不是「用默认值」）", got.ScanInterval)
+	}
+	if got.MaxDownloadsPerHour != 7 {
+		t.Errorf("MaxDownloadsPerHour = %d, want 7", got.MaxDownloadsPerHour)
+	}
+	if got.APIBase != "https://api.example.test" {
+		t.Errorf("APIBase = %q", got.APIBase)
+	}
+}

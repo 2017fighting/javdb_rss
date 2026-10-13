@@ -466,27 +466,49 @@ func TestLoopIsResumable(t *testing.T) {
 
 // TestLoopRateLimitsDownloads 钉住那个唯一的瓶颈：**种子下载 ≤ N/小时**。
 //
-// ⚠️ 闸门关掉时**不写判定** —— 「还没取到种子」不是任何一种结果。
-// 写进去就等于「永久不再试」，而它明明只是等下一轮。
+// ⚠️ 这条测试被两轴评审指出过是**假阳性**：原来两个作品都写成
+// `wantWork("SSIS-001")`，于是它们**同 ID** —— 第二个在「已判定就跳过」那一步
+// 被 `continue` 掉了，**限速闸门根本没被走到**，而断言却「通过」了。
+// 现在两个作品**番号相同、ID 不同**：两条都能搜到，第二条会真的撞上闸门。
+//
+// ⚠️ 另一条同样要紧的语义：闸门关掉时**不写判定** ——
+// 「还没取到种子」不是任何一种结果，写进去就等于「永久不再试」。
 func TestLoopRateLimitsDownloads(t *testing.T) {
+	// 番号相同（两条都能搜到），但 ID 不同（是两部不同的作品）。
 	inner := &fakeInner{want: []catalog.Work{
-		wantWork("SSIS-001", upstreamMagnet()),
-		wantWork("SSIS-002", upstreamMagnet()),
+		{ID: "id-1", Number: "SSIS-001", Title: "甲", Magnets: []catalog.Magnet{upstreamMagnet()}},
+		{ID: "id-2", Number: "SSIS-001", Title: "乙", Magnets: []catalog.Magnet{upstreamMagnet()}},
 	}}
 	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", false, "2021-01-01 00:00:00"), torrent: torrentCanonical}
-	// 搜索会命中两个番号（同一行匹配得上吗？匹配不上 —— 见下）。
-	// 因此这里让两个作品共用同一个番号前缀，保证两条都能命中。
-	inner.want[1] = wantWork("SSIS-001", upstreamMagnet())
 	f := newFixtureLimited(t, inner, mt, nil, 1) // 每小时只放行 1 个下载
 
-	f.decide(t, 3)
+	// 把闸门的时钟拿在手里，好把「下一个小时」推出来。
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	f.loop.downloads.now = func() time.Time { return now }
 
-	// 一个下载配额 → 只有一部拿到判定；另一部**没有判定**（留到下一轮）。
+	f.decide(t, 1)
+
+	// 一、只有一个下载配额 ⇒ 只有一部拿到判定；另一部**没有判定**（留到下一轮）。
 	if got := f.store.Len(); got != 1 {
-		t.Errorf("判定表里有 %d 条，want 1（闸门只放行了一个下载）", got)
+		t.Fatalf("判定表里有 %d 条，want 1（闸门只放行了一个下载）", got)
 	}
-	if got := f.mt.searchCalls.Load(); got != 1 {
-		t.Errorf("搜索了 %d 次 —— 闸门关了就该停下，而不是继续搜下一个", got)
+	// 二、搜索发生了两次（搜索便宜，闸门在下载那一步），但**只有一次下载**。
+	if got := mt.searchCalls.Load(); got != 2 {
+		t.Errorf("搜索了 %d 次，want 2（两条都该被搜到，闸门在下载那一步）", got)
+	}
+	// 三、撞上闸门的那部**没有被写进判定表** —— 它不是任何一种结果。
+	if _, ok := f.store.Get("id-2"); ok {
+		t.Error("撞上闸门的作品不该留下判定（那等于「永久不再试」）")
+	}
+
+	// 四、把时钟推过一个小时：它应当被补上。
+	now = now.Add(61 * time.Minute)
+	f.decide(t, 1)
+	if _, ok := f.store.Get("id-2"); !ok {
+		t.Error("下一个小时窗口里它应当被判定")
+	}
+	if got := f.store.Len(); got != 2 {
+		t.Errorf("判定表里有 %d 条，want 2", got)
 	}
 }
 

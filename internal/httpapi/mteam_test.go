@@ -419,10 +419,6 @@ func TestWantFeedStaysFastWithALargePendingList(t *testing.T) {
 
 	src := &recordingSource{want: &catalog.WantList{Works: works}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// ⚠️ 判定表是**空的**，而且这里**故意把循环装好了但不跑** ——
-	// 请求路径不该有任何东西可查。
-	_ = mteam.NewLoop(src, &mteam.Client{BaseURL: mt.URL, APIKey: "k"}, store, nil,
-		func() time.Duration { return time.Minute }, 0, log)
 	h := newTestServerWithSource(t, "provider: stub\n", mteam.New(src, store, nil, log), store)
 
 	got := parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
@@ -432,7 +428,65 @@ func TestWantFeedStaysFastWithALargePendingList(t *testing.T) {
 	if !strings.Contains(got.Channel.Title, "240 部待定来源") {
 		t.Errorf("标题里应当有「240 部待定来源」：%q", got.Channel.Title)
 	}
+	// ⚠️ 这条断言现在是**结构性**的：`mteam.Source` 里根本没有客户端，
+	// 它发不出 M-Team 请求。它的价值不在「跑出 0」，而在**钉住这条设计** ——
+	// 哪天有人为了「顺手补一下」把客户端塞回 Source，它就会变成非零。
+	// （评审指出原版还挂了一个没人用的 Loop，那是仪式性的，已删。）
 	if got := calls.Load(); got != 0 {
 		t.Errorf("请求路径打了 M-Team %d 次 —— 一次都不该打", got)
+	}
+}
+
+// TestPendingSourceCountDropsAsTheLoopProgresses 钉住票面那条「计数随时间下降」。
+//
+// 它是「扣住」这套设计的**可观察收尾**：未判定的作品先被扣住、计数写在标题里，
+// 后台推进一轮之后它们变成有判定的，于是计数降下来、条目发出去。
+// 没有这条，前一条测试只证明了「空判定表下扣住 240 部」——
+// 而扣住本身可以是**永久**的（那才是真正的故障）。
+func TestPendingSourceCountDropsAsTheLoopProgresses(t *testing.T) {
+	// 假馒头：搜索**没有**任何命中 ⇒ 两部都会拿到「负结果」。
+	mt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"code":"0","message":"SUCCESS","data":{"data":[]}}`)
+	}))
+	defer mt.Close()
+
+	store, err := mteam.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	src := &recordingSource{want: &catalog.WantList{Works: []catalog.Work{
+		wantWork("KV-1", catalog.Magnet{Infohash: "u1"}),
+		wantWork("KV-2", catalog.Magnet{Infohash: "u2"}),
+	}}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dec := mteam.New(src, store, nil, log)
+	h := newTestServerWithSource(t, "provider: stub\n", dec, store)
+
+	// 一、还没判定：两部都被扣住，标题里说出来。
+	got := parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+	if len(got.Channel.Items) != 0 {
+		t.Fatalf("还没判定就不该发条目，实际 %d 条", len(got.Channel.Items))
+	}
+	if !strings.Contains(got.Channel.Title, "2 部待定来源") {
+		t.Fatalf("标题里应当有「2 部待定来源」：%q", got.Channel.Title)
+	}
+
+	// 二、后台跑一轮（两部都会被判成负结果）。
+	loop := mteam.NewLoop(src, &mteam.Client{BaseURL: mt.URL, APIKey: "k"}, store, nil,
+		func() time.Duration { return time.Minute }, 0, log)
+	loop.Once(context.Background())
+
+	// 三、计数降下来了，而条目发出来了（负结果按上游下发）。
+	got = parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+	if strings.Contains(got.Channel.Title, "待定来源") {
+		t.Errorf("判定完成之后不该再有待定来源：%q", got.Channel.Title)
+	}
+	if len(got.Channel.Items) != 2 {
+		t.Errorf("得到 %d 条条目，want 2（负结果照常发上游那条）", len(got.Channel.Items))
+	}
+	if !strings.Contains(got.Channel.Title, "2 部") {
+		t.Errorf("总数仍是 2 部：%q", got.Channel.Title)
 	}
 }

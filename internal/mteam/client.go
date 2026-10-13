@@ -65,6 +65,12 @@ type Client struct {
 	BaseURL string
 	// APIKey 是【控制台 → 實驗室 → 存取令牌】取到的存取令牌。
 	APIKey string
+	// APIKeyFunc 在**每次请求时**取一次 key；为 nil 时用 APIKey。
+	//
+	// ⚠️ 它存在的理由很具体：本服务给运维的处置文案写着「改配置后重启或发 SIGHUP」，
+	// 而**启动时捕获的 key 会让 SIGHUP 失效** —— 运维照做之后仍用旧 key，
+	// 于是「换 key」这个动作看起来没生效（评审抓出来的）。
+	APIKeyFunc func() string
 	// HTTP 可注入（测试用）。为 nil 时用默认客户端。
 	HTTP *http.Client
 }
@@ -263,13 +269,21 @@ func (c *Client) do(ctx context.Context, path, contentType string, body io.Reade
 // ⚠️ 三样都不能少：`x-api-key` 是鉴权，`User-Agent` 是躲 WAF（见 userAgent），
 // `Origin` 是站点对 CORS 的校验。
 func (c *Client) setHeaders(req *http.Request, contentType string) {
-	req.Header.Set("x-api-key", c.APIKey)
+	req.Header.Set("x-api-key", c.apiKey())
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Origin", originHeader)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+}
+
+// apiKey 每次请求取一次 key —— 因此 SIGHUP 改了配置能生效。
+func (c *Client) apiKey() string {
+	if c.APIKeyFunc != nil {
+		return c.APIKeyFunc()
+	}
+	return c.APIKey
 }
 
 // classifyStatus 把 HTTP 状态码映射成错误。
