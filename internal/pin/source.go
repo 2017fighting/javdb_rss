@@ -229,7 +229,16 @@ func (s *Source) pinOne(w *catalog.Work) (added, switched bool) {
 	// 这里读的 w.Magnets 还是**上游**给的候选，改写放在日志之后。
 	switch {
 	case switched:
-		s.log.Info("pin 切换",
+		// ⚠️ WARN 而不是 INFO：**切换就是 guid 变化，也就是客户端会多下一份。**
+		// 这件事值得被看见 —— 它既可能是规则按设计做的（上游出现了中文字幕版），
+		// 也可能是运维刚手工重置过一部作品。服务分不出这两种（见下），
+		// 但它们对磁盘的后果是同一个，而那个后果是本项目一直在消灭的那类静默失败。
+		//
+		// ⚠️ **手工重置本身在这里是看不见的**：重置要删掉 pin 与判定两处，
+		// 而删掉的那条 pin 就是唯一的证据 —— 删完之后，服务眼里的它与
+		// 「第一次见到这部作品」一模一样（`added`，不是 `switched`）。
+		// 所以那条提醒只能由文档给出，而不是由日志给出。详见 README 的「重置」一节。
+		s.log.Warn("pin 切换 —— 客户端会多下一份（新的 infohash 就是新的 guid）",
 			"作品", w.ID,
 			"旧磁链", pinned.Infohash, "新磁链", chosen.Infohash,
 			"旧日期", pinned.CreatedAt, "新日期", chosen.CreatedAt)

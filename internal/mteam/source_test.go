@@ -3,6 +3,7 @@ package mteam
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -856,5 +857,163 @@ func TestUnwritableStateDirRefusesToStart(t *testing.T) {
 	}
 	if _, err := Open(filepath.Join(dir, "state")); err == nil {
 		t.Fatal("不可写的状态目录必须拒绝启动")
+	}
+}
+
+// --- 票 05：重置（唯一的换源出口） --------------------------------------------
+
+// handEdit 模拟运维**手工改 JSON**：删掉某个键，然后重读。
+//
+// 两个表都没有「单条删除」的方法 —— 重置就是手改文件 + `kill -HUP`，
+// 而 `Reload` 正是 HUP 做的事。测试照着那条路走，不另造一条。
+func handEdit(t *testing.T, path, topKey, id string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读 %s: %v", path, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("解析 %s: %v", path, err)
+	}
+	entries, _ := doc[topKey].(map[string]any)
+	delete(entries, id)
+	doc[topKey] = entries
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestResetSwitchesTheSource 是票 05 的主路径。
+//
+// 一部已经按上游下发过的作品（pin 住），手工**删掉两处**（判定 + pin）再重读，
+// 后台会重新判定，而**来源真的会换** —— 这是「首发冻结」唯一的出口。
+func TestResetSwitchesTheSource(t *testing.T) {
+	dir := t.TempDir()
+	pinStore, err := pin.Open(filepath.Join(dir, "pin.json"))
+	if err != nil {
+		t.Fatalf("Open pin: %v", err)
+	}
+	defer func() { _ = pinStore.Close() }()
+
+	inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+	// 第一轮：馒头**没有**这部作品 ⇒ 负结果 ⇒ 照上游下发并被 pin 住。
+	mt := &fakeMTeam{rows: ""}
+	f := newFixture(t, inner, mt, nil)
+	src := pin.New(New(inner, f.store, pinStore, quietLogger()), pinStore, nil)
+
+	f.decide(t, 1)
+	works, err := src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	if len(works.Works) != 1 || works.Works[0].Magnets[0].Source != catalog.SourceUpstream {
+		t.Fatalf("前置条件：这一轮应当发上游那条，实际 %+v", works.Works)
+	}
+	before, ok := pinStore.Get("id-SSIS-001")
+	if !ok {
+		t.Fatal("前置条件：应当已经 pin 住")
+	}
+
+	// 馒头上后来有了这部作品。
+	mt.rows = hitRow("467487", "SSIS-001 一ヶ月間の…", true, "2021-02-22 15:19:51")
+	mt.torrent = torrentCanonical
+
+	// 重置：删掉两处，然后重读（= `kill -HUP`）。
+	handEdit(t, f.store.Path(), "verdicts", "id-SSIS-001")
+	handEdit(t, pinStore.Path(), "pins", "id-SSIS-001")
+	if err := f.store.Reload(); err != nil {
+		t.Fatalf("重读判定表: %v", err)
+	}
+	if err := pinStore.Reload(); err != nil {
+		t.Fatalf("重读 pin: %v", err)
+	}
+
+	// 后台重新判定 —— 这次命中。
+	f.decide(t, 1)
+
+	works, err = src.WantToWatch(context.Background())
+	if err != nil {
+		t.Fatalf("WantToWatch: %v", err)
+	}
+	m := works.Works[0].Magnets[0]
+	if m.Source != catalog.SourceMTeam {
+		t.Fatalf("重置之后来源没换 —— 它还是 %v", m.Source)
+	}
+	if m.Infohash == before.Infohash {
+		t.Errorf("infohash 没变（%q）—— 那就不叫换源了", m.Infohash)
+	}
+	// 而 pin 也换成了新的那条（下一次渲染起就稳定了）。
+	after, ok := pinStore.Get("id-SSIS-001")
+	if !ok || after.Infohash != m.Infohash {
+		t.Errorf("pin 没跟上：%+v vs %q", after, m.Infohash)
+	}
+}
+
+// TestResetNeedsBothEntriesDeleted 钉住票面那句「只删一处不算」。
+//
+// ⚠️ 这一条容易被误以为多余 —— 它其实是最容易踩的：运维删了判定、忘了删 pin，
+// 然后「换了 key 却什么都没发生」，而没有任何地方会告诉他为什么。
+func TestResetNeedsBothEntriesDeleted(t *testing.T) {
+	tests := []struct {
+		name         string
+		dropVerdict  bool
+		dropPin      bool
+		wantSwitched bool
+		why          string
+	}{
+		{"只删判定", true, false, false, "pin 还在 ⇒ 来源仍被冻结（而循环也不会重判）"},
+		{"只删 pin", false, true, false, "判定还在 ⇒ 循环按「已判定」跳过，重读 pin 什么也没变"},
+		{"两处都删", true, true, true, "这才是重置"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			pinStore, err := pin.Open(filepath.Join(dir, "pin.json"))
+			if err != nil {
+				t.Fatalf("Open pin: %v", err)
+			}
+			defer func() { _ = pinStore.Close() }()
+
+			inner := &fakeInner{want: []catalog.Work{wantWork("SSIS-001", upstreamMagnet())}}
+			mt := &fakeMTeam{rows: ""}
+			f := newFixture(t, inner, mt, nil)
+			src := pin.New(New(inner, f.store, pinStore, quietLogger()), pinStore, nil)
+			f.decide(t, 1)
+			if _, err := src.WantToWatch(context.Background()); err != nil {
+				t.Fatalf("WantToWatch: %v", err)
+			}
+
+			// 馒头上后来有了。
+			mt.rows = hitRow("467487", "SSIS-001 一ヶ月間の…", true, "2021-02-22 15:19:51")
+			mt.torrent = torrentCanonical
+
+			if tt.dropVerdict {
+				handEdit(t, f.store.Path(), "verdicts", "id-SSIS-001")
+			}
+			if tt.dropPin {
+				handEdit(t, pinStore.Path(), "pins", "id-SSIS-001")
+			}
+			if err := f.store.Reload(); err != nil {
+				t.Fatalf("重读判定表: %v", err)
+			}
+			if err := pinStore.Reload(); err != nil {
+				t.Fatalf("重读 pin: %v", err)
+			}
+			f.decide(t, 1)
+
+			works, err := src.WantToWatch(context.Background())
+			if err != nil {
+				t.Fatalf("WantToWatch: %v", err)
+			}
+			switched := works.Works[0].Magnets[0].Source == catalog.SourceMTeam
+			if switched != tt.wantSwitched {
+				t.Errorf("换源 = %v, want %v —— %s", switched, tt.wantSwitched, tt.why)
+			}
+		})
 	}
 }
