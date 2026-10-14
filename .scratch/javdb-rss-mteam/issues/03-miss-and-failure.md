@@ -15,8 +15,9 @@
       + `next_step`（自然语言，去控制台换 key），且**不**进 `/readyz`
       （照 `signature_broken` 的先例：重试无用的东西不该让人去重启）
 - [x] 「上游坏了」与「M-Team 凭据失效」是两条不同的日志消息
-- [ ] 端到端：假 M-Team 分别返回空结果 / 401 / 网络错误 ⇒ 三种结果各自落地，feed 行为各自正确
-      ⚠️ **评审后改回未完成**：现在它们只在 `catalog.Source` 接缝上验过，HTTP 层还没有。
+- [x] 端到端：假 M-Team 分别返回空结果 / 401 / 网络错误 ⇒ 三种结果各自落地，feed 行为各自正确
+      ✅ **2026-10-13 补上**（票 06 之后）：`TestWantFeedRendersAllThreeOutcomesEndToEnd`
+      一次穿过五层，三种结果各走一遍。
 - [x] `make check` 与 `make race` 全绿
 
 ## Answer（2026-10-13）
