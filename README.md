@@ -59,7 +59,7 @@ pin 就是一个可读的 JSON 文件，可以直接看、直接改、直接备�
 | 清单订阅（自己的片单） | ✅ 可用（`GET /rss/list/{id}.xml` 与发现端点 `GET /collected_lists`，2026-10-04 用真 token 对着 5 份真实清单验收） |
 | 全站订阅：标签 + 年份 + 月份 + 时长 | ✅ 可用（`GET /rss/tags/{片库号}.xml`，2026-10-04 用真机抓包反推出掩码语法后逐槽位验收） |
 | 订阅链接生成器页面 | ✅ 可用（浏览器打开 `GET /`，见下面「[打开页面](#打开页面)」） |
-| M-Team 优先（可选，默认关） | ⚠️ **代码完成、未在真实部署验收**：见下面「[M-Team 优先](#m-team-优先可选)」。打开后「想看」里馒头也有的作品改发馒头那份 |
+| M-Team 优先（可选，默认关） | ✅ 可用（2026-10-14 用真 key + 真 M-Team + **真 qBittorrent v5.2.4** 验收：qbt 算出的 hash 与 feed 的 `guid` 逐位一致）。见下面「[M-Team 优先](#m-team-优先可选)」。⚠️ 集群里那份部署与**你自己的 qbt** 没被这次验收覆盖 |
 | 主动推送（推给 qBittorrent + 回写「看过」） | ⛔ 本次不做（2026-10-04 用户决定）；已定的形状与 qbt/App API 契约留在 [`notes/want-push-deferred.md`](.scratch/javdb-rss/notes/want-push-deferred.md) |
 
 数据源是**真实的 JavDB App 私有 API**。`provider: stub` 是离线调试通道。
@@ -248,7 +248,7 @@ git push origin v1.0.0
 两个平台是否真的都推上去了，写在那次 Actions run 的摘要里。
 
 ```bash
-docker pull ghcr.io/2017fighting/javdb-rss:1.1.0
+docker pull ghcr.io/2017fighting/javdb-rss:1.2.0
 ```
 
 包是 **public** 的（与仓库一致：用仓库自己的 `GITHUB_TOKEN` 推的包会继承仓库的
@@ -260,10 +260,10 @@ docker pull ghcr.io/2017fighting/javdb-rss:1.1.0
 [`docs/adr/0001-release-images-to-ghcr.md`](docs/adr/0001-release-images-to-ghcr.md)。
 
 `deploy/docker-compose.yml` 与 `deploy/k8s.yaml` 都钉着同一个**全量精度 tag**
-（当前的坐标是 `ghcr.io/2017fighting/javdb-rss:1.1.0`）：
+（当前的坐标是 `ghcr.io/2017fighting/javdb-rss:1.2.0`）：
 
 ```yaml
-image: ghcr.io/2017fighting/javdb-rss:1.1.0
+image: ghcr.io/2017fighting/javdb-rss:1.2.0
 ```
 
 **升级＝改这一行**，然后 `docker compose up -d`（或 `kubectl apply -f deploy/k8s.yaml`，
@@ -916,7 +916,7 @@ javdb_rss_upstream_ok                          0      # 最近一次是否成功
 javdb_rss_upstream_signature_broken            1      # 是否「要改代码」那一类
 javdb_rss_upstream_last_check_timestamp_seconds …
 javdb_rss_upstream_check_latency_seconds       …
-javdb_rss_build_info{version="v1.1.0"}          1
+javdb_rss_build_info{version="v1.2.0"}          1
 ```
 
 ⚠️ **告警要匹配 `signature_broken == 1`，不要用 `ok == 0`。** `ok == 0` 有两种含义：
