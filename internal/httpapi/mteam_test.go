@@ -727,3 +727,95 @@ func TestWantFeedRendersAllThreeOutcomesEndToEnd(t *testing.T) {
 		})
 	}
 }
+
+// TestMTorrentSourceSurvivesASecondRender 是票 09 的端到端钉子 ——
+// 它复现的正是 Docker 验收在**真 M-Team** 上抓到的那个 P0。
+//
+// 当初的现象：第一次渲染把馒头那条钉住了（enclosure 是我们的种子地址），
+// **第二次渲染又把它换回了上游**（enclosure 变回磁链、guid 抖回去），
+// 机制是「M-Team 层对已钉住的作品原样放行上游那个候选池，而 pin 的策略
+// 按 cnsub/日期判定上游更好」。
+//
+// 所以这条测试的关键动作就一个：**渲染两次**，并断言第二次仍然是馒头那条。
+// 只渲染一次的话，这个 bug 完全看不见（而当时所有测试都只渲染一次）。
+func TestMTorrentSourceSurvivesASecondRender(t *testing.T) {
+	var base string
+	mt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/torrent/search":
+			// 命中一条**没有**中字的馒头种子 —— 而上游那条是 cnsub。
+			// 这正是当初被策略判成「上游更好」的形状。
+			_, _ = io.WriteString(w, `{"code":"0","message":"SUCCESS","data":{"data":[
+				{"id":"467487","name":"KV-1 馒头那条","size":"1073741824",
+				 "labelsNew":[],"createdDate":"2021-02-22 15:19:51","infoHash":null}
+			]}}`)
+		case "/api/torrent/genDlToken":
+			_, _ = io.WriteString(w, `{"code":"0","message":"SUCCESS","data":"`+base+`/api/rss/dlv2"}`)
+		case "/api/rss/dlv2":
+			_, _ = io.WriteString(w, e2eTorrent)
+		default:
+			t.Errorf("假馒头收到意外路径 %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mt.Close()
+	base = mt.URL
+
+	store, err := mteam.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open 判定表: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	pinStore, err := pin.Open(filepath.Join(t.TempDir(), "pin.json"))
+	if err != nil {
+		t.Fatalf("Open pin: %v", err)
+	}
+	defer func() { _ = pinStore.Close() }()
+
+	// 上游那条是 **cnsub 且更新** —— 策略会认为它更好（这就是陷阱）。
+	src := &recordingSource{want: &catalog.WantList{Works: []catalog.Work{
+		wantWork("KV-1", catalog.Magnet{Infohash: "upstream-hash", Name: "上游那条", CNSub: true}),
+	}}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &mteam.Client{BaseURL: mt.URL, APIKey: "k", HTTP: mt.Client()}
+	loop := mteam.NewLoop(src, client, store, pinStore, func() time.Duration { return time.Minute }, 0, log)
+
+	// 真实的装饰器链：mteam 在内、pin 在外（票 02 定的顺序）。
+	dec := pin.New(mteam.New(src, store, pinStore, log), pinStore, nil)
+	h := newTestServerWithSource(t, "provider: stub\nfeed:\n  base_url: \"http://x\"\n", dec, store)
+
+	loop.Once(context.Background()) // 后台判定：命中馒头那条
+
+	render := func() wantFeedResponse {
+		t.Helper()
+		return parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+	}
+
+	first := render()
+	if len(first.Channel.Items) != 1 {
+		t.Fatalf("第一次渲染得到 %d 条条目，want 1", len(first.Channel.Items))
+	}
+	wantURL := "http://x/torrent/" + e2eInfohash + ".torrent"
+	if first.Channel.Items[0].Enclosure.URL != wantURL {
+		t.Fatalf("第一次渲染的 enclosure = %q，want %q", first.Channel.Items[0].Enclosure.URL, wantURL)
+	}
+
+	// ⚠️ **第二次渲染** —— 当初就是在这里被换回上游的。
+	second := render()
+	if len(second.Channel.Items) != 1 {
+		t.Fatalf("第二次渲染得到 %d 条条目，want 1", len(second.Channel.Items))
+	}
+	if got := second.Channel.Items[0].Enclosure.URL; got != wantURL {
+		t.Errorf("第二次渲染的 enclosure = %q，want %q —— 来源被换回去了"+
+			"（guid 抖回去 = 客户端多下一份，而且馒头从此再也不生效）", got, wantURL)
+	}
+	if got, want := second.Channel.Items[0].GUID, first.Channel.Items[0].GUID; got != want {
+		t.Errorf("guid 变了：%q -> %q", want, got)
+	}
+
+	// 第三次也一样（它不是「抖动一次就稳」，而是**一直**是馒头那条）。
+	third := render()
+	if got := third.Channel.Items[0].Enclosure.URL; got != wantURL {
+		t.Errorf("第三次渲染的 enclosure = %q，want %q", got, wantURL)
+	}
+}

@@ -7,6 +7,8 @@
 // 这样线格式改名时只需要改一处映射，领域模型不受影响。
 package catalog
 
+import "fmt"
+
 // MagnetSource 是磁链候选的**数据来源**。
 //
 // 它存在的理由很具体：**交付物由来源决定**。上游的候选以磁力交付，
@@ -26,6 +28,45 @@ const (
 	// SourceMTeam 是 M-Team。
 	SourceMTeam
 )
+
+// 名字用于序列化与日志。
+const (
+	sourceUpstreamName = "upstream"
+	sourceMTeamName    = "mteam"
+)
+
+// String 让 %v / %s 打出名字而不是数字。
+func (s MagnetSource) String() string {
+	if s == SourceMTeam {
+		return sourceMTeamName
+	}
+	return sourceUpstreamName
+}
+
+// MarshalText 让它在 JSON 里是**可读的名字**而不是数字。
+//
+// ⚠️ 这不是为了好看：`pin.json` 是一份**给人手工改的**文件（README 把「删掉某一条」
+// 当成正式的运维手段），而一个数字位会让那件事变成猜谜 —— 猜错的后果是
+// 一条 pin 的来源被读成上游，于是它的 enclosure 从种子文件退回**磁力**，
+// 而私种的裸磁力是死链。
+func (s MagnetSource) MarshalText() ([]byte, error) { return []byte(s.String()), nil }
+
+// UnmarshalText 读回名字。
+//
+// ⚠️ **认不出的名字报错**，不静默当上游：手滑写错一个字母就该当场看见，
+// 而不是让那部作品的来源悄悄变成上游（那会让它的种子地址变成死链）。
+func (s *MagnetSource) UnmarshalText(b []byte) error {
+	switch string(b) {
+	case "", sourceUpstreamName:
+		*s = SourceUpstream
+	case sourceMTeamName:
+		*s = SourceMTeam
+	default:
+		return fmt.Errorf("认不出的来源 %q（只认 %q / %q）",
+			string(b), sourceUpstreamName, sourceMTeamName)
+	}
+	return nil
+}
 
 // Magnet 是一条可下载的磁链候选。
 //

@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/2017fighting/javdb_rss/internal/catalog"
 	"time"
 )
 
@@ -40,6 +42,14 @@ type Record struct {
 	CNSub     bool      `json:"cnsub,omitempty"`
 	CreatedAt string    `json:"created_at,omitempty"`
 	PinnedAt  time.Time `json:"pinned_at"`
+	// Source 是这条磁链来自哪个数据来源（零值 = 上游）。
+	//
+	// ⚠️ **它不是为了好看才加的，它是「首发冻结」成立的前提。**
+	// 真正决定最终发哪条的是**策略**（`DefaultPolicy.KeepOrSwitch`），
+	// 而策略只有在知道来源的前提下才可能尊重来源。
+	// 没有它的时候验收实测踩到过：馒头那条 pin 会在下一次渲染被策略换回上游 ——
+	// guid 抖回去（客户端多下一份），而且馒头从此再也不生效。
+	Source catalog.MagnetSource `json:"source,omitempty"`
 
 	// LegacySizeMB 读旧版本写下的 `size_mb` 键。
 	//

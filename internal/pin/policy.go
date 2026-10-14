@@ -41,6 +41,12 @@ type Policy interface {
 //
 // 「只有普通候选变了」永远不触发切换 —— 这正是 pin 要消除的抖动。
 //
+// # 跨来源永不切换（首发冻结）
+//
+// 候选的来源与 pin 的来源不同 ⇒ **不切**，无论 cnsub 与日期怎么比。
+// 理由：换来源必然换 infohash，也就是客户端多下一份；而换来源的唯一出口是
+// 运维显式做的「重置」（删掉两处 + HUP）。
+//
 // 两条刻意的边界：
 //
 //   - **同日不切**（第三行要求严格更新）。created_at 是日粒度，同日多条靠
@@ -68,6 +74,19 @@ func (DefaultPolicy) KeepOrSwitch(pinned Record, pinnedOK bool, desired catalog.
 
 	current := magnetOf(pinned)
 
+	// ⚠️ **来源不同 ⇒ 永不切换。**
+	//
+	// 这是「首发冻结」真正落地的地方，而它必须在**策略**里 ——
+	// 因为决定最终发哪条的是这里，不是上层的装饰器。
+	//
+	// 验收实测踩到过：M-Team 层对已钉住的作品「原样放行」上游那个候选池
+	// （它以为那是个中立动作），而这里按下面的 cnsub/日期规则判定上游那条更好，
+	// 于是把 pin 从馒头换回了上游 —— guid 抖回去（客户端多下一份），
+	// 而且**馒头从此再也不生效**。有了这一条，「原样放行」才真的是中立的。
+	if desired.Source != current.Source {
+		return current, false
+	}
+
 	// 没有 cnsub 就没有切换的理由 —— 普通候选的变化不该动 guid。
 	if !desired.CNSub {
 		return current, false
@@ -89,6 +108,7 @@ func (DefaultPolicy) KeepOrSwitch(pinned Record, pinnedOK bool, desired catalog.
 // （上游删了/换了），我们仍能渲染出一条完整的 feed item。
 func magnetOf(r Record) catalog.Magnet {
 	return catalog.Magnet{
+		Source:    r.Source,
 		Infohash:  r.Infohash,
 		Name:      r.Name,
 		SizeMiB:   r.SizeMiB,
@@ -104,6 +124,7 @@ func magnetOf(r Record) catalog.Magnet {
 // （例如 cnsub 变 false，于是 feed 标题少一个「中文字幕」前缀）。
 func recordOf(m catalog.Magnet) Record {
 	return Record{
+		Source:    m.Source,
 		Infohash:  m.Infohash,
 		Name:      m.Name,
 		SizeMiB:   m.SizeMiB,
