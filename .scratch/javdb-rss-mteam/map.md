@@ -52,8 +52,10 @@
 | 06 | [可见性](issues/06-visibility.md) | 02, 04 |
 | 07 | [真实验收](issues/07-real-acceptance.md) | 01–06 |
 | 08 | [文档收尾](issues/08-docs.md) | 02, 04, 06 |
+| 09 | [首发冻结真的成立](issues/09-first-emission-freeze-holds.md)（Docker 验收抓到的 P0） | 无 |
+| 10 | [把这次决策反转记下来](issues/10-record-the-reversal.md) | 09 |
 
-**前沿是 01**（唯一无阻塞的）。02 是最大的那张 —— tracer bullet 必然如此：它要切穿
+**前沿是 09**（Docker 验收抓到的 P0；票 07 被它挡住）。02 是最大的那张 —— tracer bullet 必然如此：它要切穿
 配置 → HTTP 客户端 → bencode → 持久状态 → 装饰器 → handler → feed。
 它在用户当前的 5 部清单上端到端可验证；对 234 部会撞 30 秒超时，而**那正是 04 存在的理由**，
 不是 02 的缺陷。
