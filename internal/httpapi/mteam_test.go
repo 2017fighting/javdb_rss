@@ -623,3 +623,107 @@ func TestMetricsOmitsProgressWhenLoopNeverRan(t *testing.T) {
 		t.Errorf("循环从未跑过时不该报 pending：\n%s", body)
 	}
 }
+
+// TestWantFeedRendersAllThreeOutcomesEndToEnd 是票 03 遗留的那条端到端
+// （当时只在 `catalog.Source` 接缝上验过，没在 HTTP 层验）。
+//
+// 它一次穿过五层：假 M-Team → 后台循环判定 → 判定表 → feed 渲染 → XML。
+// 三种结果各走一遍，并断言**同一件事**：无论哪一种，作品都照上游下发
+// （差别只在判定表里那条记录，以及凭据那条要在 /healthz/upstream 里看得见）。
+//
+// 判据是「用户看到什么」：条数、标题里的计数、以及凭据信号 —— 不是内部字段。
+func TestWantFeedRendersAllThreeOutcomesEndToEnd(t *testing.T) {
+	tests := []struct {
+		name           string
+		handler        http.HandlerFunc
+		wantCredBroken bool
+		wantOutcome    string
+	}{
+		{
+			name: "空结果（负结果：查过、没有）",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"code":"0","message":"SUCCESS","data":{"data":[]}}`)
+			},
+			wantOutcome: "miss",
+		},
+		{
+			name: "401（凭据失效 —— 重试无用）",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"code":"401","message":"Full authentication is required"}`)
+			},
+			wantCredBroken: true,
+			wantOutcome:    "failed",
+		},
+		{
+			name: "网络层坏法（M-Team 给了看不懂的响应）",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `<html>502 Bad Gateway</html>`)
+			},
+			wantOutcome: "failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mt := httptest.NewServer(tt.handler)
+			defer mt.Close()
+
+			store, err := mteam.Open(t.TempDir())
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer func() { _ = store.Close() }()
+
+			src := &recordingSource{want: &catalog.WantList{Works: []catalog.Work{
+				wantWork("KV-1", catalog.Magnet{Infohash: "u1"}),
+			}}}
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			dec := mteam.New(src, store, nil, log)
+			loop := mteam.NewLoop(src, &mteam.Client{BaseURL: mt.URL, APIKey: "k"}, store, nil,
+				func() time.Duration { return time.Minute }, 0, log)
+			s := newTestServerObj(t, "provider: stub\n", dec, store)
+			s.mteamStatus = storeStatus{Store: store}
+			h := s.Handler()
+
+			// 一、判定之前：作品被**扣住**（不发条目，但计数说出来）。
+			got := parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+			if len(got.Channel.Items) != 0 || !strings.Contains(got.Channel.Title, "1 部待定来源") {
+				t.Fatalf("判定之前应当扣住并计数，实际 %d 条 / %q",
+					len(got.Channel.Items), got.Channel.Title)
+			}
+
+			// 二、后台跑一轮。
+			loop.Once(context.Background())
+
+			// 三、判定表里那条记录是**可区分的**（三种结果各是各的）。
+			v, ok := store.Get("id-KV-1")
+			if !ok {
+				t.Fatalf("后台没留下判定")
+			}
+			if string(v.Outcome) != tt.wantOutcome {
+				t.Errorf("outcome = %q, want %q", v.Outcome, tt.wantOutcome)
+			}
+
+			// 四、feed：三种结果**都照上游下发**（负结果与失败都不扣）。
+			got = parseWantFeed(t, do(t, h, "/rss/want.xml").Body.String())
+			if len(got.Channel.Items) != 1 {
+				t.Fatalf("得到 %d 条条目，want 1（三种结果都不该扣住）", len(got.Channel.Items))
+			}
+			if strings.Contains(got.Channel.Title, "待定来源") {
+				t.Errorf("判定已完成，不该再有待定来源：%q", got.Channel.Title)
+			}
+			if !strings.HasPrefix(got.Channel.Items[0].Enclosure.URL, "magnet:?xt=urn:btih:u1") {
+				t.Errorf("应当发上游那条磁链，实际 %q", got.Channel.Items[0].Enclosure.URL)
+			}
+
+			// 五、凭据那条要在**人看的地方**也看得见（只有 401 那一种）。
+			var body map[string]any
+			if err := json.Unmarshal(do(t, h, "/healthz/upstream").Body.Bytes(), &body); err != nil {
+				t.Fatalf("不是 JSON: %v", err)
+			}
+			m, _ := body["mteam"].(map[string]any)
+			if got := m["credential_broken"]; got != tt.wantCredBroken {
+				t.Errorf("credential_broken = %v, want %v", got, tt.wantCredBroken)
+			}
+		})
+	}
+}
