@@ -35,9 +35,14 @@ pin 就是一个可读的 JSON 文件，可以直接看、直接改、直接备�
 
 ```json
 {"version": 1, "pins": {"aBc123": {"infohash": "0e8f...", "name": "KV-328",
-  "size_mb": 3110, "cnsub": false, "created_at": "09/27/2026",
-  "pinned_at": "2026-09-30T12:00:00Z"}}}
+  "size_mib": 3110, "cnsub": false, "created_at": "09/27/2026",
+  "pinned_at": "2026-09-30T12:00:00Z", "source": "upstream"}}}
 ```
+
+`source` 是这条磁链来自哪个数据来源（`upstream` 或 `mteam`）—— **它不是装饰**：
+「首发冻结」靠它成立（候选池的来源与 pin 的来源不同时永不切换），
+而 M-Team 那一条的 `<enclosure>` 也是靠它才发种子文件而不是磁链。
+旧文件没有这一位，读成 `upstream`；写错名字会**拒绝启动**（不静默当上游）。
 
 手工删掉某一条（「这个作品想重选」）后 `kill -HUP` 重读即可。
 文件损坏或版本不认识时会**拒绝启动**，而不是用空表静默覆盖。
