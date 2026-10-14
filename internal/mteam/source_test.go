@@ -1017,3 +1017,67 @@ func TestResetNeedsBothEntriesDeleted(t *testing.T) {
 		})
 	}
 }
+
+// --- 票 06：判定状态要看得见 --------------------------------------------------
+
+// TestCredentialFailureStopsTheCycleAndLogsOnce 钉住两件事。
+//
+// 一、凭据失效**立刻停轮**：继续下去只会把整张清单一条条撞同一个错 ——
+// 既白烧搜索配额，又把日志刷满。
+// 二、那条 ERROR **只在状态翻转时打一次**（照 health 的做法）——
+// 逐条打会把「换 key」这件事淹没在噪音里。
+func TestCredentialFailureStopsTheCycleAndLogsOnce(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{
+		{ID: "id-1", Number: "SSIS-001", Title: "甲", Magnets: []catalog.Magnet{upstreamMagnet()}},
+		{ID: "id-2", Number: "SSIS-001", Title: "乙", Magnets: []catalog.Magnet{upstreamMagnet()}},
+		{ID: "id-3", Number: "SSIS-001", Title: "丙", Magnets: []catalog.Magnet{upstreamMagnet()}},
+	}}
+	mt := &fakeMTeam{errBody: `{"code":"1","message":"key無效"}`}
+	f := newFixture(t, inner, mt, nil)
+
+	f.decide(t, 2)
+
+	// 一、只搜了一次就停了（第一轮），第二轮也停在同一个地方。
+	if got := mt.searchCalls.Load(); got != 2 {
+		t.Errorf("搜索了 %d 次 —— 凭据失效应当**立刻停轮**，而不是把整张清单烧一遍", got)
+	}
+	// 二、ERROR 只出现一次。
+	if n := strings.Count(f.log.String(), "凭据失效"); n != 1 {
+		t.Errorf("「凭据失效」出现了 %d 次，want 1（只在状态翻转时打）:\n%s", n, f.log.String())
+	}
+	// 三、判定表里留下的是**失败**，不是负结果 —— 失败不是判决。
+	v, ok := f.store.Get("id-1")
+	if !ok || v.Outcome != OutcomeFailed || v.FailureKind != FailureCredential {
+		t.Errorf("应当留下一条凭据类失败：%+v（存在=%v）", v, ok)
+	}
+}
+
+// TestStalledCyclesAreCounted 钉住「看起来在工作、实际没在工作」那条信号。
+//
+// 周期照跑、日志照打，而判定表一条都没多 —— 上游一直失败、限速把自己锁死、
+// 清单读不到，都会长这样。没有这条读数，运维只能靠「盯着标题里的数字发呆」。
+func TestStalledCyclesAreCounted(t *testing.T) {
+	inner := &fakeInner{want: []catalog.Work{
+		{ID: "id-1", Number: "SSIS-001", Title: "甲", Magnets: []catalog.Magnet{upstreamMagnet()}},
+		{ID: "id-2", Number: "SSIS-001", Title: "乙", Magnets: []catalog.Magnet{upstreamMagnet()}},
+	}}
+	mt := &fakeMTeam{rows: hitRow("1", "SSIS-001 x", false, "2021-01-01 00:00:00"), torrent: torrentCanonical}
+	f := newFixtureLimited(t, inner, mt, nil, 1) // 每小时只放行 1 个下载
+
+	f.decide(t, 1) // 有推进：判定了一部
+	if p := f.loop.Progress(); p.Stalled != 0 || p.Pending != 1 {
+		t.Errorf("第一轮之后：stalled=%d pending=%d，want 0/1", p.Stalled, p.Pending)
+	}
+
+	f.decide(t, 2) // 闸门关着：两轮都推不动
+	p := f.loop.Progress()
+	if p.Stalled != 2 {
+		t.Errorf("stalled = %d, want 2（连续两轮没有推进）", p.Stalled)
+	}
+	if p.Pending != 1 {
+		t.Errorf("pending = %d, want 1", p.Pending)
+	}
+	if p.Cycles != 3 {
+		t.Errorf("cycles = %d, want 3", p.Cycles)
+	}
+}

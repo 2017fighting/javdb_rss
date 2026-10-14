@@ -920,6 +920,27 @@ javdb_rss_build_info{version="v1.1.0"}          1
 `last_check_timestamp_seconds` 与 `check_latency_seconds` 在**从未检查过时不出现**：
 报 0 等于说「1970 年检查过」，而 staleness 类的规则正是拿这个字段算的。
 
+启用 M-Team 之后，还会多一组（**没配它就没有这组序列** —— 与 `provider=stub` 时
+没有 upstream 那组同一条判断）：
+
+```
+javdb_rss_mteam_judged                          0/1    # 有没有过至少一条判定
+javdb_rss_mteam_verdicts{outcome="hit|miss|failed"} …  # 判定表里各结果的条数
+javdb_rss_mteam_last_decision_timestamp_seconds …      # 最近一条判定的时刻
+javdb_rss_mteam_pending_works                   …      # 最近一轮还剩几部没判定
+javdb_rss_mteam_stalled_cycles                  …      # 连续多少轮没有推进
+javdb_rss_mteam_credential_broken               0/1    # 存取令牌是否失效
+```
+
+⚠️ **`judged` 是必须的**：一条判定都没有时，三个 `verdicts` 全是 0 ——
+那与「判定过、三个结果都是 0」在计数上长得一模一样。
+而 `last_decision_timestamp_seconds` 与 `pending_works` 在**从未判定/从未跑过时不出现**：
+报 0 等于说「1970 年判定过」，或者「跑过且没有欠账」。
+
+⚠️ **要盯的是 `stalled_cycles`**：它是「看起来在工作、实际没在工作」的信号 ——
+周期照跑、日志照打，而判定表一条都没多（上游一直失败、限速把自己锁死、清单读不到
+都会长这样）。一个可用的规则是 `stalled_cycles > 6`（约一个半小时没推进）。
+
 除了上面这些，`/metrics` 还带 **Go 运行时与进程收集器**（`go_*` / `process_*`）：
 本服务是「挂上就不管」的那一类，goroutine、内存、GC、fd 是排查时白拿的材料。
 

@@ -148,6 +148,11 @@ func (s *Server) metricsHandler() http.Handler {
 	if s.upstream != nil {
 		reg.MustRegister(newUpstreamCollector(s.upstream))
 	}
+	// 第二个来源的状态（没配它就没有这些序列 —— 与上面 upstream 同一条判断：
+	// 没有可报的东西，就不该凭空造一条「一切正常」的证据）。
+	if s.mteamStatus != nil {
+		reg.MustRegister(newMTeamCollector(s.mteamStatus))
+	}
 	// 用 HandlerFor 而不是 Handler()：后者绑在全局 registry 上（见上）。
 	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 }
@@ -159,4 +164,82 @@ func gaugeValue(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// mteamCollector 把第二个来源（M-Team）的状态投影成指标。
+//
+// 它**不新增任何事实**：序列与 `/healthz/upstream` 的 `mteam` 段、以及后台循环
+// 自己的读数一一对应。两处各自维护一份「判定推进到哪了」，迟早会漂，
+// 而漂的表现是告警与人对不上话。
+type mteamCollector struct {
+	status MTeamStatus
+
+	judged       *prometheus.Desc
+	verdicts     *prometheus.Desc
+	lastDecision *prometheus.Desc
+	pending      *prometheus.Desc
+	stalled      *prometheus.Desc
+	credBroken   *prometheus.Desc
+}
+
+func newMTeamCollector(st MTeamStatus) *mteamCollector {
+	const ns = "javdb_rss_mteam_"
+	return &mteamCollector{
+		status: st,
+		judged: prometheus.NewDesc(ns+"judged",
+			"是否已经有过至少一条判定：1 = 有。⚠️ 「一条判定都没有」也报 verdicts 全 0，"+
+				"因此不要只看 verdicts 判断「刚启用」还是「判定过但没命中」。",
+			nil, nil),
+		verdicts: prometheus.NewDesc(ns+"verdicts",
+			"判定表里各结果的条数。outcome = hit / miss / failed。",
+			[]string{"outcome"}, nil),
+		lastDecision: prometheus.NewDesc(ns+"last_decision_timestamp_seconds",
+			"最近一条判定的时刻（Unix 秒）。**一条判定都没有时不出现这条序列** —— "+
+				"报 0 等于说「1970 年判定过」，而 staleness 类规则正是拿它算的。",
+			nil, nil),
+		pending: prometheus.NewDesc(ns+"pending_works",
+			"最近一轮看到的、还没判定的作品数。循环从未跑过时不出现。",
+			nil, nil),
+		stalled: prometheus.NewDesc(ns+"stalled_cycles",
+			"连续多少轮没有推进（还有欠账却一条判定都没多）。"+
+				"⚠️ 它是「看起来在工作、实际没在工作」的信号 —— 周期照跑、日志照打。",
+			nil, nil),
+		credBroken: prometheus.NewDesc(ns+"credential_broken",
+			"存取令牌是否已失效：1 = 重试无用，去控制台换一个。与 upstream 的 signature_broken 同一条判断。",
+			nil, nil),
+	}
+}
+
+func (c *mteamCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.judged
+	ch <- c.verdicts
+	ch <- c.lastDecision
+	ch <- c.pending
+	ch <- c.stalled
+	ch <- c.credBroken
+}
+
+func (c *mteamCollector) Collect(ch chan<- prometheus.Metric) {
+	p := c.status.Progress()
+	st := p.Stats
+
+	judged := !st.LastAt.IsZero()
+	ch <- prometheus.MustNewConstMetric(c.judged, prometheus.GaugeValue, gaugeValue(judged))
+	// 三个 outcome 都报，哪怕是 0：告警规则要能对单个 outcome 写表达式，
+	// 而「序列时有时无」会让那种表达式在有些实例上静默地匹配不到东西。
+	ch <- prometheus.MustNewConstMetric(c.verdicts, prometheus.GaugeValue, float64(st.Hit), "hit")
+	ch <- prometheus.MustNewConstMetric(c.verdicts, prometheus.GaugeValue, float64(st.Miss), "miss")
+	ch <- prometheus.MustNewConstMetric(c.verdicts, prometheus.GaugeValue, float64(st.Failed), "failed")
+
+	if judged {
+		ch <- prometheus.MustNewConstMetric(c.lastDecision, prometheus.GaugeValue, float64(st.LastAt.Unix()))
+	}
+	// 进度只在循环真的跑过之后才有意义 —— 与上面 judged 同一条判断。
+	if p.Cycles > 0 {
+		ch <- prometheus.MustNewConstMetric(c.pending, prometheus.GaugeValue, float64(p.Pending))
+	}
+	ch <- prometheus.MustNewConstMetric(c.stalled, prometheus.GaugeValue, float64(p.Stalled))
+
+	_, _, broken := c.status.CredentialFailure()
+	ch <- prometheus.MustNewConstMetric(c.credBroken, prometheus.GaugeValue, gaugeValue(broken))
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/2017fighting/javdb_rss/internal/catalog"
@@ -44,6 +45,19 @@ type Loop struct {
 
 	// downloads 是种子下载的闸门（≤ 100 个/小时）。
 	downloads *rateGate
+
+	// mu 保护下面那几个「最近一轮」的读数（/metrics 会并发读）。
+	mu sync.Mutex
+	// cycles 是跑完的轮数（0 = 从未跑过）。
+	cycles int
+	// lastPending 是最近一轮看到的、还没判定的作品数。
+	lastPending int
+	// stalled 是「连续多少轮没有推进」。
+	stalled int
+	// lastCycleAt 是最近一轮结束的时刻。
+	lastCycleAt time.Time
+	// credSeen/credBroken 记住上一次对外报的凭据状态，用于「只在翻转时打日志」。
+	credSeen, credBroken bool
 
 	// OnFatal 在判定表落盘失败时被调用。它应当让进程退出。
 	OnFatal func(error)
@@ -98,6 +112,43 @@ func (l *Loop) Run(ctx context.Context) {
 			timer.Reset(d)
 		}
 	}
+}
+
+// Progress 是判定循环对外要说的那几句话 —— /metrics 与运维读它。
+//
+// 它是一次**快照**，不是一个活的对象：调用方拿到的是一份拷贝，之后不会变。
+type Progress struct {
+	// Cycles 是跑完的轮数。0 表示**从未跑过** —— 那时下面几个读数都没有意义。
+	Cycles int
+	// Pending 是最近一轮看到的、还没判定的作品数。
+	Pending int
+	// Stalled 是「连续多少轮没有推进」。
+	//
+	// ⚠️ 它是「看起来在工作、实际没在工作」那类失败的信号：周期照跑、日志照打，
+	// 而判定表一条都没多。上游一直失败、限速把自己锁死、清单读不到 —— 都会长这样。
+	Stalled int
+	// LastCycleAt 是最近一轮结束的时刻。
+	LastCycleAt time.Time
+	// Stats 是判定表当前的计数快照。
+	Stats Stats
+}
+
+// Progress 返回最近一轮的读数（并发安全）。
+func (l *Loop) Progress() Progress {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return Progress{
+		Cycles:      l.cycles,
+		Pending:     l.lastPending,
+		Stalled:     l.stalled,
+		LastCycleAt: l.lastCycleAt,
+		Stats:       l.store.Stats(),
+	}
+}
+
+// CredentialFailure 转发给判定表 —— 循环与表说的是同一件事。
+func (l *Loop) CredentialFailure() (string, time.Time, bool) {
+	return l.store.CredentialFailure()
 }
 
 // Once 跑一轮：读清单 → 对没有判定的作品查 M-Team → 落盘。
@@ -155,12 +206,32 @@ func (l *Loop) Once(ctx context.Context) {
 		return
 	}
 
+	// 记下这一轮的读数，供 /metrics 读。
+	l.mu.Lock()
+	l.cycles++
+	l.lastPending = todo - decided
+	l.lastCycleAt = l.now()
+	if decided > 0 {
+		l.stalled = 0
+	} else if l.lastPending > 0 {
+		// 还有欠账却一条都没推进 ⇒ 这一轮是**停滞**的。
+		l.stalled++
+	}
+	stalled, cycles, pending := l.stalled, l.cycles, l.lastPending
+	l.mu.Unlock()
+
 	// 只在**有进展或还有欠账**时打一条 INFO —— 常态下（全部已判定）这一轮是空的，
 	// 而每 15 分钟刷一条「本轮 0 部」正是让人学会忽略日志的那种噪音。
-	if decided > 0 || todo > 0 {
+	if decided > 0 || pending > 0 {
 		l.log.InfoContext(ctx, "判定循环跑完一轮",
 			"清单", len(list.Works), "新判定", decided, "命中", hits,
-			"待判定", todo-decided, "判定表总数", l.store.Len())
+			"待判定", pending, "判定表总数", l.store.Len(), "轮次", cycles)
+	}
+	if stalled > 0 && pending > 0 {
+		// 停滞**必须**看得见：周期照跑、日志照打，而判定表一条都没多 ——
+		// 那是「看起来在工作、实际没在工作」。
+		l.log.WarnContext(ctx, "判定循环连续若干轮没有推进",
+			"连续轮次", stalled, "待判定", pending)
 	}
 }
 
@@ -177,12 +248,22 @@ func (l *Loop) skip(w catalog.Work) bool {
 
 // decide 对一部作品做一次判定并落盘。返回结果（命中 / 负结果）。
 //
-// ⚠️ 它返回错误只有一种情形：**种子下载的闸门满了**（那是「稍后再来」，
-// 不是失败）。真正的查询失败会被记进判定表并返回 nil —— 因为那是一条**结果**。
+// ⚠️ 它返回错误只有两种情形，而两种都**不是失败**：
+//
+//	闸门满了（errDownloadGate）—— 稍后再来；
+//	凭据失效（ErrCredential）   —— 整条路都走不通，停轮（重试无用）。
+//
+// 其余失败会被记进判定表并返回 nil —— 因为那是一条**结果**（只是不是判决）。
 func (l *Loop) decide(ctx context.Context, w *catalog.Work) (Outcome, error) {
 	hits, err := l.client.Search(ctx, w.Number)
 	if err != nil {
 		l.recordFailure(ctx, w, err)
+		if errors.Is(err, ErrCredential) {
+			// ⚠️ 凭据失效**立刻停轮**：继续下去只会把整张清单一条条撞同一个错 ——
+			// 既白烧搜索配额，又会把日志刷满（而「只在翻转时打」那条规矩
+			// 正是为了不让日志变成噪音）。
+			return OutcomeFailed, err
+		}
 		return OutcomeFailed, nil
 	}
 
@@ -269,8 +350,17 @@ func (l *Loop) recordFailure(ctx context.Context, w *catalog.Work, err error) {
 	// 两类失败的日志**必须不同**：一类要人去换 key，另一类等一等就好。
 	// 混成一条，告警就会把人指向错的方向。
 	if kind == FailureCredential {
-		l.log.ErrorContext(ctx, "M-Team 凭据失效 —— 重试无用，去控制台换一个存取令牌",
-			"作品", w.Number, "err", err)
+		// ⚠️ **只在状态翻转时打**（照 health 的做法）。
+		// 一个坏 key 会命中清单里的每一部作品，逐条打 ERROR 会把日志变成噪音 ——
+		// 而「换 key」这件事只需要说一次。
+		l.mu.Lock()
+		flip := !l.credSeen || !l.credBroken
+		l.credSeen, l.credBroken = true, true
+		l.mu.Unlock()
+		if flip {
+			l.log.ErrorContext(ctx, "M-Team 凭据失效 —— 重试无用，去控制台换一个存取令牌",
+				"作品", w.Number, "err", err)
+		}
 		return
 	}
 	l.log.WarnContext(ctx, "M-Team 查询失败（不自动重试）", "作品", w.Number, "err", err)

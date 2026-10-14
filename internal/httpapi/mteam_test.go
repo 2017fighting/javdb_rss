@@ -213,6 +213,22 @@ func TestTorrentEndpointRejectsNonGET(t *testing.T) {
 	}
 }
 
+// storeStatus 是 MTeamStatus 的替身：凭据那条**转发给真的判定表**
+// （那条状态是从表里推导出来的，用假的会把这条测试的卖点测没），
+// 而进度那几个读数由测试直接给。
+type storeStatus struct {
+	*mteam.Store
+	prog mteam.Progress
+}
+
+func (s storeStatus) Progress() mteam.Progress {
+	// 计数那部分**转发给判定表**（真实的 Loop 也是这么填的）——
+	// 否则这个替身会把「判定表里有多少条」这件事测没。
+	p := s.prog
+	p.Stats = s.Store.Stats()
+	return p
+}
+
 // TestUpstreamDetailReportsMTeamCredential 钉住第二个来源的凭据信号。
 //
 // 它必须与「上游坏了」**分得开**：一个重试有用，一个要人去控制台换 key。
@@ -225,7 +241,7 @@ func TestUpstreamDetailReportsMTeamCredential(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, store)
-	s.mteamHealth = store
+	s.mteamStatus = storeStatus{Store: store}
 
 	// 还没查过：字段在，但为假（与 checked 那条既有判断同构 ——
 	// 「从未判定过」与「判定过且没坏」不是一回事，这里都表现为 false，
@@ -296,7 +312,9 @@ func TestUpstreamDetailReportsMTeamCredential(t *testing.T) {
 func TestTypedNilStoreBehavesLikeNoStore(t *testing.T) {
 	var nilStore *mteam.Store
 	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, nilStore)
-	s.mteamHealth = nilStore
+	// ⚠️ 这里**故意**把一个类型化 nil 塞进接口字段（而不是走 WithSecondSource）——
+	// 那正是当初 SIGSEGV 的形状，而这一条钉的是**第二层**兜底。
+	s.mteamStatus = storeStatus{Store: nilStore}
 
 	if rec := do(t, s.Handler(), "/torrent/"+e2eInfohash+".torrent"); rec.Code != http.StatusNotFound {
 		t.Errorf("/torrent/ = %d, want 404（nil 的判定表就是「没有第二个来源」）", rec.Code)
@@ -321,12 +339,12 @@ func TestTypedNilStoreBehavesLikeNoStore(t *testing.T) {
 // 第一层被下一个改装配的人绕过时，第二层还得兜着；两层都该有自己的钉子。
 func TestWithSecondSourceIgnoresNil(t *testing.T) {
 	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, nil)
-	if s.torrents != nil || s.mteamHealth != nil {
+	if s.torrents != nil || s.mteamStatus != nil {
 		t.Fatal("前置条件：刚构造的 Server 不该挂第二个来源")
 	}
 
 	var nilStore *mteam.Store
-	s.WithSecondSource(nilStore)
+	s.WithSecondSource(nilStore, nil)
 
 	// ⚠️ 这里断言的是「**没有挂上**」。若 WithSecondSource 少写那个 nil 判断，
 	// 这两个接口会变成非 nil（Go 的类型化 nil），于是 /torrent/ 会去调
@@ -334,8 +352,8 @@ func TestWithSecondSourceIgnoresNil(t *testing.T) {
 	if s.torrents != nil {
 		t.Error("nil 的判定表不该被挂成种子来源（类型化 nil 会让接口非 nil）")
 	}
-	if s.mteamHealth != nil {
-		t.Error("nil 的判定表不该被挂成凭据信号来源")
+	if s.mteamStatus != nil {
+		t.Error("nil 的判定表不该被挂成状态来源")
 	}
 }
 
@@ -488,5 +506,120 @@ func TestPendingSourceCountDropsAsTheLoopProgresses(t *testing.T) {
 	}
 	if !strings.Contains(got.Channel.Title, "2 部") {
 		t.Errorf("总数仍是 2 部：%q", got.Channel.Title)
+	}
+}
+
+// --- 票 06：判定状态要看得见 --------------------------------------------------
+
+// metricsBody 抓一次 /metrics 的正文。
+func metricsBody(t *testing.T, h http.Handler) string {
+	t.Helper()
+	rec := do(t, h, "/metrics")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics = %d", rec.Code)
+	}
+	return rec.Body.String()
+}
+
+// TestMetricsHasNoMTeamSeriesWithoutSecondSource 钉住「没配就没有序列」。
+//
+// 与 upstream 那条判断同构：没有可报的东西，就不该凭空造一条「一切正常」的证据 ——
+// 一条恒为 0 的 credential_broken 会让「没配 M-Team」看起来像「配了且凭据正常」。
+func TestMetricsHasNoMTeamSeriesWithoutSecondSource(t *testing.T) {
+	h := newTestServer(t, "provider: stub\n", &recordingSource{})
+	if body := metricsBody(t, h); strings.Contains(body, "javdb_rss_mteam_") {
+		t.Errorf("没配第二个来源时不该有 mteam 序列：\n%s", body)
+	}
+}
+
+// TestMetricsDistinguishesNeverJudgedFromZeroVerdicts 钉住票面那条最容易做错的判据。
+//
+// 「一条判定都没有」与「判定过、三个 outcome 都是 0」在**计数**上长得一模一样 ——
+// 所以必须有单独的一条（judged），而且时间戳在从未判定时**不出现**：
+// 报 0 等于说「1970 年判定过」，而 staleness 类规则正是拿它算的。
+func TestMetricsDistinguishesNeverJudgedFromZeroVerdicts(t *testing.T) {
+	store, err := mteam.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, store)
+	s.mteamStatus = storeStatus{Store: store}
+
+	body := metricsBody(t, s.Handler())
+	if !strings.Contains(body, `javdb_rss_mteam_judged 0`) {
+		t.Errorf("从未判定过时 judged 应当是 0：\n%s", body)
+	}
+	if strings.Contains(body, "javdb_rss_mteam_last_decision_timestamp_seconds") {
+		t.Errorf("从未判定过时那条时间戳**不该出现**（报 0 等于说 1970 年判定过）")
+	}
+	for _, outcome := range []string{"hit", "miss", "failed"} {
+		if !strings.Contains(body, `javdb_rss_mteam_verdicts{outcome="`+outcome+`"} 0`) {
+			t.Errorf("三个 outcome 都该报（哪怕是 0）：%s", outcome)
+		}
+	}
+
+	// 记一条判定之后：judged 翻到 1，时间戳出现。
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	store.Put("w1", mteam.Verdict{Outcome: mteam.OutcomeHit, Chosen: mteam.Candidate{Infohash: "h"}, At: at})
+
+	body = metricsBody(t, s.Handler())
+	if !strings.Contains(body, `javdb_rss_mteam_judged 1`) {
+		t.Errorf("判定过之后 judged 应当是 1：\n%s", body)
+	}
+	if !strings.Contains(body, `javdb_rss_mteam_verdicts{outcome="hit"} 1`) {
+		t.Errorf("命中数应当是 1：\n%s", body)
+	}
+	// ⚠️ 比**数值**而不是比字符串：Prometheus 会把大数渲染成 `1.7918928e+09`。
+	if got, ok := metricValue(t, body, "javdb_rss_mteam_last_decision_timestamp_seconds"); !ok || got != float64(at.Unix()) {
+		t.Errorf("时间戳 = %v（存在=%v），want %d", got, ok, at.Unix())
+	}
+}
+
+// TestMetricsReportsProgressAndCredential 钉住进度与凭据那几条。
+func TestMetricsReportsProgressAndCredential(t *testing.T) {
+	store, err := mteam.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	store.Put("w1", mteam.Verdict{
+		Outcome: mteam.OutcomeFailed, Failure: "key無效", FailureKind: mteam.FailureCredential,
+		At: time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC),
+	})
+
+	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, store)
+	// 循环跑过 5 轮、其中连续 3 轮没推进、还有 7 部欠账。
+	s.mteamStatus = storeStatus{Store: store, prog: mteam.Progress{
+		Cycles: 5, Pending: 7, Stalled: 3,
+	}}
+
+	body := metricsBody(t, s.Handler())
+	for _, want := range []string{
+		`javdb_rss_mteam_pending_works 7`,
+		`javdb_rss_mteam_stalled_cycles 3`,
+		`javdb_rss_mteam_credential_broken 1`,
+		`javdb_rss_mteam_verdicts{outcome="failed"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("缺 %q：\n%s", want, body)
+		}
+	}
+}
+
+// TestMetricsOmitsProgressWhenLoopNeverRan 钉住「循环从未跑过」时进度不出现。
+//
+// 与那条时间戳同一条判断：报 0 等于说「跑过、且没有欠账」。
+func TestMetricsOmitsProgressWhenLoopNeverRan(t *testing.T) {
+	store, err := mteam.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	s := newTestServerObj(t, "provider: stub\n", &recordingSource{}, store)
+	s.mteamStatus = storeStatus{Store: store} // Cycles = 0
+
+	if body := metricsBody(t, s.Handler()); strings.Contains(body, "javdb_rss_mteam_pending_works") {
+		t.Errorf("循环从未跑过时不该报 pending：\n%s", body)
 	}
 }

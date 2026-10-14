@@ -271,6 +271,41 @@ func (s *Store) Len() int {
 	return len(s.verdicts)
 }
 
+// Stats 是判定表当前的**计数快照**。
+//
+// 它一次拿全，而不是让调用方逐个方法去问：后者会让「命中数」与「总数」在两次
+// 调用之间被别的 goroutine 改掉，于是指标里出现 h+m+f ≠ total 这种自相矛盾的读数。
+type Stats struct {
+	Hit, Miss, Failed int
+	// LastAt 是最近一条判定的时刻。零值表示**一条判定都没有** ——
+	// 它与「有判定但都是 0」是两件事，调用方必须分得开（见 /metrics 里 judged 那条）。
+	LastAt time.Time
+}
+
+// Stats 返回判定表的计数快照。
+func (s *Store) Stats() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var st Stats
+	for _, v := range s.verdicts {
+		switch v.Outcome {
+		case OutcomeHit:
+			st.Hit++
+		case OutcomeMiss:
+			st.Miss++
+		case OutcomeFailed:
+			st.Failed++
+		}
+		if v.At.After(st.LastAt) {
+			st.LastAt = v.At
+		}
+	}
+	return st
+}
+
 // CredentialFailure 报告判定表里有没有一条「因凭据失效而失败」的记录。
 //
 // 它是从判定表**推导**出来的，不额外存一份状态：那条失败记录本身就是证据，

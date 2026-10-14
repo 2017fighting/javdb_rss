@@ -49,8 +49,8 @@ type Server struct {
 	// 为 nil 表示本实例没有第二个来源（没配 key）—— 那时该端点 404，
 	// 而不是 500：它确实不存在，而不是坏了。
 	torrents TorrentStore
-	// mteamHealth 是第二个来源的凭据信号（可为 nil：没配那个来源）。
-	mteamHealth MTeamHealth
+	// mteamStatus 是第二个来源的状态（凭据 + 进度）；为 nil 表示没配那个来源。
+	mteamStatus MTeamStatus
 }
 
 // New 构造 Server。log 为 nil 时使用 slog.Default()。
@@ -75,14 +75,16 @@ type TorrentStore interface {
 	LoadTorrent(infohash string) ([]byte, error)
 }
 
-// MTeamHealth 是 `/healthz/upstream` 对第二个来源的**只读**需求。
+// MTeamStatus 是 `/healthz/upstream` 与 `/metrics` 对第二个来源的**只读**需求。
 //
-// 它只回答一个问题：「M-Team 的凭据是不是失效了」。`*mteam.Store` 天然满足它。
+// 两句话：凭据是不是坏了、后台判定推进到哪了。`*mteam.Loop` 天然满足它
+// （它把凭据那条转发给判定表）。
 //
 // ⚠️ 它**不进 `/readyz`**：换 key 不是重启能解决的，而把实例从 Service 端点里摘掉
 // 只会让 feed 一起消失 —— 那时连「为什么」都看不到了。
-type MTeamHealth interface {
+type MTeamStatus interface {
 	CredentialFailure() (msg string, at time.Time, broken bool)
+	Progress() mteam.Progress
 }
 
 // WithSecondSource 挂上第二个来源（M-Team）的两个只读句柄：种子与凭据信号。
@@ -93,12 +95,12 @@ type MTeamHealth interface {
 // ⚠️ `st == nil` 时**什么都不挂**。这不是防御性编程：把 `var st *mteam.Store`（nil）
 // 交给一个接口参数，得到的接口**不是 nil**，于是 `s.torrents != nil` 为真，
 // handler 会去调 nil 接收者的方法而**崩在每一次请求上**。（真踩过。）
-func (s *Server) WithSecondSource(st *mteam.Store) *Server {
+func (s *Server) WithSecondSource(st *mteam.Store, status MTeamStatus) *Server {
 	if st == nil {
 		return s
 	}
 	s.torrents = st
-	s.mteamHealth = st
+	s.mteamStatus = status
 	return s
 }
 
@@ -292,8 +294,8 @@ func (s *Server) handleUpstreamDetail(w http.ResponseWriter, _ *http.Request) {
 	// ⚠️ 不混进上面那几个字段：这个端点里的「上游」一律指 JavDB，
 	// 而两者的故障域完全不同（一个重试有用，一个要人去换 key）。
 	// ⚠️ 它也**不改变状态码**：M-Team 坏了不该让本实例被摘出 Service 端点。
-	if s.mteamHealth != nil {
-		msg, at, broken := s.mteamHealth.CredentialFailure()
+	if s.mteamStatus != nil {
+		msg, at, broken := s.mteamStatus.CredentialFailure()
 		m := map[string]any{"credential_broken": broken}
 		if broken {
 			m["error"] = msg
